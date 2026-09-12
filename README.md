@@ -1,7 +1,11 @@
 # claude-account-switcher
 
-Run several Claude Code accounts side by side and fail over when one hits its rate limit —
-carrying the conversation across.
+**You're deep in a problem. Claude Code stops: you've hit your 5-hour limit.**
+
+You have a second account — a work seat, sitting idle. But switching means logging out, logging
+back in, and losing the conversation you were forty messages into. So you wait two hours instead.
+
+This fixes that. One command, and your conversation continues on the other account:
 
 ```
 [cc] personal · you@example.com
@@ -12,18 +16,28 @@ carrying the conversation across.
 [cc] work · you@company.com
 ```
 
-Built on the `CLAUDE_CONFIG_DIR` environment variable. No third-party services, no proxies,
-no network calls, no telemetry.
+About four seconds. Same conversation, same context, different account.
 
-## What this is, and what it is not
+## Who this is for
 
-This is for people who **already hold more than one Claude subscription** — a personal plan and
-a work seat, say — and are tired of stopping when one runs out while the other sits idle.
+- You hold **more than one Claude subscription** — typically a personal plan and a work seat.
+- You work in long sessions and lose real time to the 5-hour window.
+- You want the switch to be automatic, and your context to survive it.
 
-It does **not** pool, share or resell accounts, and it does not raise anyone's limits. Each
-account's own limits apply in full; the tool only chooses which of your own accounts a session
-runs against, and moves your conversation when one is spent. If you have one account, this will
-not help you.
+**If you have one account, this will not help you.** It does not pool, share or resell accounts,
+and it does not raise anyone's limits. Each account's own limits apply in full. All it does is
+choose which of *your own* accounts a session runs against, and carry your conversation when one
+is spent.
+
+## Why it exists
+
+Claude Code binds an account at process start, so no plugin or command can switch one mid-session.
+That sounds like a dead end — and it is, for switching *inside* a session. The way through is to
+end the run, move the transcript, and resume on the next account. That is all this does, plus the
+detection needed to know when to do it.
+
+Details in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md), including the two false-positive traps
+and the bug that logged me out while building it.
 
 ## Requirements
 
