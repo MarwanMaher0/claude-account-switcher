@@ -115,4 +115,43 @@ future=$(( $(date +%s) + 1800 ))
 assert_eq "$("$BIN/cc-detect" next-free "one")" "three" "next-free skips a limited account"
 cleanup_home
 
+# ---- a 429 is not always a usage limit -------------------------------------
+# Verified against the real Claude Code binary driven into a 429 by a mock API
+# (test/mock-api.py): a transient, server-side throttle is recorded as
+#   {"isApiErrorMessage":true,"apiErrorStatus":429,"error":"rate_limit",
+#    "quotaLimits":null}
+# and the client itself labels it "Server is temporarily limiting requests (not
+# your usage limit)". Only a genuine account limit populates quotaLimits.
+#
+# Switching accounts on a transient throttle would be wrong — the next account
+# talks to the same servers and would be throttled too.
+new_home >/dev/null
+slug="$("$BIN/cc-detect" slug "$PWD")"
+d="$HOME/.claude/projects/$slug"; mkdir -p "$d"
+
+sid="throttle-only"
+cat > "$d/$sid.jsonl" <<'EOF'
+{"type":"assistant","uuid":"a","message":{"content":[{"type":"text","text":"fine"}]}}
+{"type":"assistant","uuid":"b","isApiErrorMessage":true,"apiErrorStatus":429,"error":"rate_limit","quotaLimits":null,"message":{"content":[{"type":"text","text":"Server is temporarily limiting requests (not your usage limit)"}]}}
+EOF
+"$BIN/cc-detect" scan "$HOME/.claude" "$sid" "$PWD" >/dev/null 2>&1
+assert_eq "$?" "1" "transient 429 with quotaLimits:null does NOT count as a limit"
+
+# ...while a real usage limit alongside it still does
+sid="throttle-then-limit"
+future=$(( $(date +%s) + 3600 ))
+cat > "$d/$sid.jsonl" <<EOF
+{"type":"assistant","uuid":"a","isApiErrorMessage":true,"apiErrorStatus":429,"error":"rate_limit","quotaLimits":null,"message":{"content":[{"type":"text","text":"transient"}]}}
+{"type":"assistant","uuid":"b","isApiErrorMessage":true,"apiErrorStatus":429,"error":"rate_limit","quotaLimits":{"status":"rejected","rateLimitType":"five_hour","resetsAt":$future},"message":{"content":[{"type":"text","text":"real limit"}]}}
+EOF
+got="$("$BIN/cc-detect" scan "$HOME/.claude" "$sid" "$PWD" 2>/dev/null)"
+assert_eq "$got" "$future" "a real usage limit is still detected alongside a transient one"
+
+# and a rejected quota with no resetsAt must not be trusted as a limit window
+sid="rejected-no-reset"
+printf '%s\n' '{"type":"assistant","uuid":"a","quotaLimits":{"status":"rejected"}}' > "$d/$sid.jsonl"
+"$BIN/cc-detect" scan "$HOME/.claude" "$sid" "$PWD" >/dev/null 2>&1
+assert_eq "$?" "1" "rejected quota without resetsAt is ignored"
+cleanup_home
+
 summary
