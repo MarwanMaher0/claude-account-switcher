@@ -11,7 +11,7 @@ new_home >/dev/null
 out="$("$BIN/cc-detect" accounts)"
 assert_contains "$out" "personal" "AC-1 migration creates the default account"
 assert_contains "$out" "account2" "AC-1 migration picks up ~/.claude-2"
-assert_eq "$(stat -c '%a' "$HOME/.claude-switch/config.json")" "600" "AC-8 config.json is mode 600"
+assert_eq "$(file_mode "$HOME/.claude-switch/config.json")" "600" "AC-8 config.json is mode 600"
 
 # ---- AC-2 : idempotent ------------------------------------------------------
 before="$(cat "$HOME/.claude-switch/config.json")"
@@ -23,7 +23,7 @@ cleanup_home
 new_home >/dev/null
 rm -rf "$HOME/.claude-2"
 out="$("$BIN/cc-detect" accounts)"
-assert_eq "$(echo "$out" | wc -l)" "1" "AC-1 only ~/.claude present -> one account"
+assert_eq "$(count_lines "$out")" "1" "AC-1 only ~/.claude present -> one account"
 cleanup_home
 
 # ---- AC-3 : numeric state keys are carried over -----------------------------

@@ -76,6 +76,12 @@ run_acct() {
 
 new_session() { python3 -c 'import uuid; print(uuid.uuid4())'; }
 
+# GNU `date -d @epoch` and BSD/macOS `date -r epoch` do the same job with
+# different flags. Try both rather than assuming GNU coreutils.
+fmt_time() {
+    date -d "@$1" '+%H:%M' 2>/dev/null || date -r "$1" '+%H:%M' 2>/dev/null || echo '?'
+}
+
 # ---- cc status --------------------------------------------------------------
 cmd_status() {
     echo
@@ -270,7 +276,7 @@ exhausted() {
     if info="$("$DETECT" soonest 2>/dev/null)" && [ -n "$info" ]; then
         local aid="${info%% *}" until="${info##* }"
         if [ "${until:-0}" -gt 0 ] 2>/dev/null; then
-            warn "'$aid' frees up first at $(date -d "@$until" '+%H:%M' 2>/dev/null || echo '?')."
+            warn "'$aid' frees up first at $(fmt_time "$until")."
         fi
     fi
     exit 1
@@ -301,7 +307,10 @@ fi
 SESSION="$(new_session)"
 CWD="$PWD"
 RESUME=0
-declare -A TRIED=()
+# Accounts already used in this run, space-delimited. A plain string rather than
+# an associative array because macOS ships bash 3.2, which has no `declare -A`.
+# Account ids are restricted to [a-z0-9_-], so they can never contain a space.
+TRIED=""
 
 # ---- main loop --------------------------------------------------------------
 while :; do
@@ -318,7 +327,7 @@ while :; do
     fi
 
     dir="$(acct_dir "$ACCT")" || die "no such account: $ACCT"
-    TRIED[$ACCT]=1
+    TRIED="$TRIED $ACCT"
     note "$(acct_label "$ACCT")"
 
     # Where the transcript already ends, so the scan below sees only what THIS run
@@ -348,10 +357,11 @@ while :; do
     [ -n "$resets" ] || exit 0            # normal exit — nothing to do
 
     "$DETECT" mark "$ACCT" "$resets" >/dev/null
-    warn "$ACCT hit its limit · resets $(date -d "@$resets" '+%H:%M' 2>/dev/null)"
+    warn "$ACCT hit its limit · resets $(fmt_time "$resets")"
 
     # Next available account that this run has not already used.
-    NEXT="$("$DETECT" next-free "$(IFS=,; echo "${!TRIED[*]}")")" || NEXT=""
+    # comma-separate the used ids for cc-detect
+    NEXT="$("$DETECT" next-free "$(echo "$TRIED" | tr -s ' ' ',' | sed 's/^,//;s/,$//')")" || NEXT=""
 
     if [ -z "$NEXT" ]; then
         ACCT=""            # fall through to the fallback tiers

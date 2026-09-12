@@ -12,7 +12,7 @@ export STUB_MODE=login
 out="$("$BIN/cc" add work3 2>&1)"
 assert_contains "$out" "registered 'work3'" "AC-1 account is registered"
 assert_contains "$out" "new@example.com" "AC-6 the logged-in email is reported"
-assert_eq "$(stat -c '%a' "$HOME/.claude-work3")" "700" "AC-1 new dir is mode 700"
+assert_eq "$(file_mode "$HOME/.claude-work3")" "700" "AC-1 new dir is mode 700"
 assert_file "$HOME/.claude-work3/settings.json" "AC-1 settings.json copied"
 assert_file "$HOME/.claude-work3/CLAUDE.md" "AC-1 CLAUDE.md copied"
 assert_contains "$("$BIN/cc-detect" accounts)" "work3" "AC-1 appears in the account list"

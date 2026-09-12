@@ -37,7 +37,7 @@ if ! "$DETECT" next-free "$id" >/dev/null 2>&1; then
     info="$("$DETECT" soonest "$id" 2>/dev/null)" || exit 0
     until="${info##* }"
     if [ "${until:-0}" -gt 0 ] 2>/dev/null; then
-        when="$(date -d "@$until" '+%H:%M' 2>/dev/null || echo '?')"
+        when="$(date -d \"@$until\" '+%H:%M' 2>/dev/null || date -r \"$until\" '+%H:%M' 2>/dev/null || echo '?')"
         printf 'Every other account is rate limited — failover is unavailable until about %s.\n' "$when"
     fi
 fi

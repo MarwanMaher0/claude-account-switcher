@@ -26,6 +26,6 @@ stamp="$HOME/.claude-switch/.notified-$session-$resets"
 [ -e "$stamp" ] && exit 0
 mkdir -p "$HOME/.claude-switch" && touch "$stamp"
 
-when=$(date -d "@$resets" '+%H:%M' 2>/dev/null || echo '?')
+when=$(date -d \"@$resets\" '+%H:%M' 2>/dev/null || date -r \"$resets\" '+%H:%M' 2>/dev/null || echo '?')
 printf 'RATE LIMIT on this account — resets %s. This session cannot change accounts (auth is fixed at process start). Exit and run `cc` to continue on the next available account, with this conversation carried over.\n' "$when"
 exit 0

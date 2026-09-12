@@ -8,7 +8,14 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC2034  # BIN is used by the suites that source this file
 BIN="$REPO/bin"
+
+# GNU stat uses -c, BSD/macOS uses -f. Ask both.
+file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%OLp' "$1" 2>/dev/null; }
+
+# BSD wc pads its output with spaces; GNU does not. Always trim before comparing.
+count_lines() { printf '%s\n' "$1" | wc -l | tr -d ' '; }
 
 PASS=0
 FAIL=0
