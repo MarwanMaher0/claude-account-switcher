@@ -28,7 +28,17 @@ Framing rule from SPEC-04: this is about switching between accounts you already 
 > something has to end the run deliberately — which I only knew to build because I checked the
 > real data instead of trusting the assumption.
 >
-> **3. The bug that logged me out.**
+> **3. A 429 is not always your usage limit.**
+> I only found this by pointing the real binary at a mock API that always returns 429, instead
+> of trusting my own test stub. It recorded an empty quota payload and printed "Server is
+> temporarily limiting requests (not your usage limit)".
+>
+> So transient throttling and a real quota limit look alike at a glance but differ in the data.
+> Switching accounts on a throttle would be pointless — the next account talks to the same
+> servers. My detection was already right to ignore it, but by accident rather than by design,
+> and it had no test. Now it does.
+>
+> **4. The bug that logged me out.**
 > Setting CLAUDE_CONFIG_DIR to the default account's own path is not the same as leaving it
 > unset. Claude Code then looks for a config file that isn't there, decides you're a new user,
 > runs onboarding, and overwrites your credentials with whatever logs in next. My own tool did
@@ -38,13 +48,17 @@ Framing rule from SPEC-04: this is about switching between accounts you already 
 > That one became three guard rails and a test whose only job is to assert an environment
 > variable is absent.
 >
-> Two more bugs came out of a test harness that stubs the CLI and fakes a rate limit, so the
-> suite costs no quota: an expired limit event in the transcript tail marking an account spent
-> forever, and — my favourite — the handoff copying the transcript *including* the 429, so the
-> receiving account read the previous account's limit and declared itself limited too. One
-> clean handoff, then an infinite ping-pong.
+> Two more came out of a harness that stubs the CLI and fakes a limit, so the suite costs no
+> quota: an expired limit event in the transcript tail marking an account spent forever, and —
+> my favourite — the handoff copying the transcript *including* the 429, so the receiving
+> account read the previous account's limit and declared itself limited too. One clean handoff,
+> then an infinite ping-pong.
 >
-> MIT, 106 tests, no network calls, and it never reads a credentials file:
+> And CI caught the one I'd never have found locally: macOS ships bash 3.2, which has no
+> associative arrays, so the whole launcher aborted there. I had put macOS in the test matrix,
+> which is a claim of support. Without that runner I'd have shipped something that didn't run.
+>
+> MIT, 109 tests, no network calls, and it never reads a credentials file:
 > github.com/MarwanMaher0/claude-account-switcher
 >
 > To be clear about what it is: it switches between accounts you already pay for. It doesn't
@@ -70,7 +84,7 @@ Claude Code. The failure is told honestly, which reads as competence rather than
 > makes Claude Code think you're a new user and overwrite your credentials. Unrecoverable.
 > That became three guard rails and a test that asserts an environment variable is absent.
 >
-> MIT, 106 tests, no network calls:
+> MIT, 109 tests, no network calls:
 > github.com/MarwanMaher0/claude-account-switcher
 >
 > It switches between accounts you already own. It doesn't pool accounts or raise limits.
