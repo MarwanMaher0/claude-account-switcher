@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-account-switcher",
+  "description": "Run several Claude Code accounts side by side and fail over when one hits its rate limit.",
+  "owner": {
+    "name": "Marwan Maher",
+    "url": "https://github.com/MarwanMaher0"
+  },
+  "plugins": [
+    {
+      "name": "cc-switch",
+      "description": "Shows which Claude account a session is using and announces a rate limit the moment it lands. Pairs with the cc launcher, which performs the switch.",
+      "source": "./plugin",
+      "category": "productivity"
+    }
+  ]
+}

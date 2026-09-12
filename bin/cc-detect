@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""Config, state and rate-limit detection for the `cc` account switcher.
+
+Claude Code writes one JSON object per line into
+  <config-dir>/projects/<slugified-cwd>/<session-id>.jsonl
+
+A rate-limited turn carries a structured quota object:
+
+  {"isApiErrorMessage": true, "apiErrorStatus": 429, "error": "rate_limit",
+   "quotaLimits": {"status": "rejected", "rateLimitType": "five_hour",
+                   "resetsAt": <epoch>}}
+
+We key on quotaLimits.status == "rejected" and read resetsAt, rather than matching the
+human-readable message, which is subject to change.
+
+Subcommands
+  accounts                       one "<id>\\t<dir>\\t<isDefault>" per line, config order
+  dir <id>                       that account's config directory
+  is-default <id>                exit 0 if it is the default account
+  pick                           first available account id (exit 1 if all limited)
+  soonest [exclude]              "<id> <epoch>" for the limited account freeing up first
+  status                         human-readable state
+  scan <dir> <session> [cwd] [offset]   exit 0 + print resetsAt if this run hit a limit
+  size <dir> <session> [cwd]     transcript size, used as the scan offset
+  mark <id> <resets-at>          record an account as limited (0 clears)
+  slug <cwd>                     the project-dir slug for a path
+  fallback <name> <field>        read a fallbacks.<name>.<field> value
+"""
+import json
+import os
+import re
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+SWITCH_DIR = os.path.join(HOME, ".claude-switch")
+CONFIG = os.path.join(SWITCH_DIR, "config.json")
+STATE = os.path.join(SWITCH_DIR, "state.json")
+DEFAULT_DIR = os.path.join(HOME, ".claude")
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+class ConfigError(Exception):
+    """Raised for any invalid config. Never swallowed — guessing which account to
+    launch is how the wrong account gets written to."""
+
+
+def expand(path):
+    return os.path.abspath(os.path.expanduser(path))
+
+
+def slugify(path):
+    """Claude Code's project-dir naming: non-alphanumerics become dashes."""
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(path))
+
+
+def _write_private(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.chmod(os.path.dirname(path), 0o700)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------- config ----
+def migrate():
+    """Build config.json from the historical hardcoded two-account layout.
+
+    Only ever runs when config.json is absent. Never touches account directories
+    or credentials.
+    """
+    accounts = [{"id": "personal", "dir": "~/.claude", "isDefault": True}]
+    second = os.path.join(HOME, ".claude-2")
+    if os.path.isdir(second):
+        accounts.append({"id": "account2", "dir": "~/.claude-2"})
+
+    cfg = {
+        "version": 2,
+        "accounts": accounts,
+        "fallbacks": {
+            "apiKey": {"enabled": False, "keyCommand": None, "confirmEachUse": True},
+            "externalCli": {"enabled": False, "command": None},
+        },
+    }
+    _write_private(CONFIG, cfg)
+
+    # Carry limit windows over from numeric keys.
+    try:
+        with open(STATE) as fh:
+            old = json.load(fh)
+    except (OSError, ValueError):
+        old = {}
+    old_accounts = old.get("accounts", {})
+    if any(k.isdigit() for k in old_accounts):
+        mapping = {"1": accounts[0]["id"]}
+        if len(accounts) > 1:
+            mapping["2"] = accounts[1]["id"]
+        migrated = {}
+        for num, new_id in mapping.items():
+            if num in old_accounts:
+                migrated[new_id] = {"limitedUntil": old_accounts[num].get("limitedUntil", 0)}
+        save_state({"version": 2, "accounts": migrated})
+    return cfg
+
+
+def validate(cfg):
+    accounts = cfg.get("accounts")
+    if not isinstance(accounts, list) or not accounts:
+        raise ConfigError("config has no accounts")
+
+    # Count defaults up front: "two defaults" is the more fundamental mistake, and
+    # reporting it beats the per-account dir error one of them would also trigger.
+    marked = [a.get("id", "?") for a in accounts if a.get("isDefault")]
+    if len(marked) > 1:
+        raise ConfigError(f"more than one isDefault account: {', '.join(marked)}")
+
+    seen_ids, seen_dirs = set(), set()
+    for acct in accounts:
+        aid = acct.get("id", "")
+        if not ID_RE.match(aid or ""):
+            raise ConfigError(f"invalid account id: {aid!r}")
+        if aid in seen_ids:
+            raise ConfigError(f"duplicate account id: {aid}")
+        seen_ids.add(aid)
+
+        if not acct.get("dir"):
+            raise ConfigError(f"account {aid} has no dir")
+        real = expand(acct["dir"])
+        if real in seen_dirs:
+            raise ConfigError(f"two accounts share a directory: {real}")
+        seen_dirs.add(real)
+
+        if acct.get("isDefault"):
+            # The whole point of the flag: this account must be the one Claude
+            # Code treats as default, or the launch environment will be wrong
+            # and onboarding will overwrite its credentials.
+            if real != expand(DEFAULT_DIR):
+                raise ConfigError(
+                    f"account {aid} is marked isDefault but its dir is {real}, "
+                    f"not {DEFAULT_DIR}")
+
+    return cfg
+
+
+def load_config():
+    if not os.path.exists(CONFIG):
+        return validate(migrate())
+    try:
+        with open(CONFIG) as fh:
+            cfg = json.load(fh)
+    except OSError as exc:
+        raise ConfigError(f"cannot read {CONFIG}: {exc}")
+    except ValueError as exc:
+        raise ConfigError(f"{CONFIG} is not valid JSON: {exc}")
+    return validate(cfg)
+
+
+def accounts():
+    return load_config()["accounts"]
+
+
+def account_by_id(aid):
+    for acct in accounts():
+        if acct["id"] == aid:
+            return acct
+    raise ConfigError(f"no such account: {aid}")
+
+
+# ----------------------------------------------------------------- state ----
+def load_state():
+    try:
+        with open(STATE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {"version": 2, "accounts": {}}
+
+
+def save_state(state):
+    _write_private(STATE, state)
+
+
+def limited_until(state, aid):
+    return int(state.get("accounts", {}).get(aid, {}).get("limitedUntil", 0) or 0)
+
+
+def pick(state=None):
+    """First account in config order whose limit window has passed, else None."""
+    state = state or load_state()
+    now = time.time()
+    for acct in accounts():
+        if limited_until(state, acct["id"]) <= now:
+            return acct["id"]
+    return None
+
+
+def soonest(state=None, exclude=()):
+    """Of the accounts that are actually limited, the one freeing up first.
+
+    Only accounts whose window is still in the future count. An available account
+    has limitedUntil 0, so including them would always win the min() and report a
+    reset time of the epoch — which is how this was wrong the first time.
+    """
+    state = state or load_state()
+    now = time.time()
+    candidates = [a["id"] for a in accounts()
+                  if a["id"] not in exclude and limited_until(state, a["id"]) > now]
+    if not candidates:
+        return None, 0
+    aid = min(candidates, key=lambda i: limited_until(state, i))
+    return aid, limited_until(state, aid)
+
+
+# ------------------------------------------------------------ transcripts ----
+def transcript_path(config_dir, session_id, cwd=None):
+    proj = os.path.join(expand(config_dir), "projects", slugify(cwd or os.getcwd()))
+    return os.path.join(proj, f"{session_id}.jsonl")
+
+
+def size_of(config_dir, session_id, cwd=None):
+    try:
+        return os.path.getsize(transcript_path(config_dir, session_id, cwd))
+    except OSError:
+        return 0
+
+
+def scan(config_dir, session_id, cwd=None, offset=0):
+    """Return the resetsAt epoch if THIS RUN hit a rate limit, else None.
+
+    `offset` is the transcript's byte size captured just before the run started, so
+    only newly appended turns count. This matters after a handoff: the transcript
+    copied from the limited account still contains that account's 429, and without
+    the offset the receiving account would re-read it and mark itself limited too.
+    """
+    path = transcript_path(config_dir, session_id, cwd)
+    if not os.path.exists(path):
+        return None
+
+    cap = 64 * 1024 * 1024  # never scan more than this, however long the run
+    try:
+        with open(path, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            start = max(int(offset or 0), size - cap, 0)
+            fh.seek(start)
+            chunk = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+    now = time.time()
+    latest = None
+    for line in chunk.splitlines():
+        if '"quotaLimits"' not in line:      # cheap prefilter before the JSON parse
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue                        # partial first line from the tail seek
+        quota = obj.get("quotaLimits") or {}
+        if quota.get("status") != "rejected":
+            continue
+        resets = quota.get("resetsAt")
+        # An event whose window has already elapsed is history, not a reason to
+        # switch — otherwise an old limit in the tail triggers a handoff on every
+        # later exit.
+        if resets and resets > now and (latest is None or resets > latest):
+            latest = int(resets)
+    return latest
+
+
+# ------------------------------------------------------------------ main ----
+def cmd_status():
+    state = load_state()
+    now = time.time()
+    for acct in accounts():
+        aid, adir = acct["id"], expand(acct["dir"])
+        until = limited_until(state, aid)
+        tag = " (default)" if acct.get("isDefault") else ""
+        if until > now:
+            when = time.strftime("%H:%M", time.localtime(until))
+            mins = int((until - now) / 60)
+            print(f"  {aid:<12} LIMITED until {when} ({mins} min){tag}  {adir}")
+        else:
+            print(f"  {aid:<12} available{'':<22}{tag}  {adir}")
+
+    nxt = pick(state)
+    if nxt:
+        print(f"\n  next launch -> {nxt}")
+    else:
+        aid, until = soonest(state)
+        when = time.strftime("%H:%M", time.localtime(until)) if until else "?"
+        print(f"\n  all accounts limited — {aid} frees up first at {when}")
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__.strip())
+        return 2
+    cmd = argv[1]
+
+    if cmd == "slug":
+        print(slugify(argv[2] if len(argv) > 2 else os.getcwd()))
+
+    elif cmd == "accounts":
+        for acct in accounts():
+            print(f"{acct['id']}\t{expand(acct['dir'])}\t{int(bool(acct.get('isDefault')))}")
+
+    elif cmd == "dir":
+        print(expand(account_by_id(argv[2])["dir"]))
+
+    elif cmd == "is-default":
+        return 0 if account_by_id(argv[2]).get("isDefault") else 1
+
+    elif cmd == "pick":
+        chosen = pick()
+        if not chosen:
+            return 1
+        print(chosen)
+
+    elif cmd == "next-free":
+        # First available account, in config order, excluding ids already used in
+        # this run. Comma-separated exclusions. Exit 1 when nothing is left, which
+        # is how `cc` knows tier 1 is exhausted.
+        exclude = set(filter(None, (argv[2] if len(argv) > 2 else "").split(",")))
+        state, now = load_state(), time.time()
+        for acct in accounts():
+            if acct["id"] in exclude:
+                continue
+            if limited_until(state, acct["id"]) <= now:
+                print(acct["id"])
+                return 0
+        return 1
+
+    elif cmd == "soonest":
+        exclude = set(filter(None, (argv[2] if len(argv) > 2 else "").split(",")))
+        aid, until = soonest(exclude=exclude)
+        if not aid:
+            return 1
+        print(f"{aid} {until}")
+
+    elif cmd == "status":
+        cmd_status()
+
+    elif cmd == "size":
+        cwd = argv[4] if len(argv) > 4 else None
+        print(size_of(argv[2], argv[3], cwd))
+
+    elif cmd == "scan":
+        cwd = argv[4] if len(argv) > 4 else None
+        offset = int(argv[5]) if len(argv) > 5 else 0
+        resets = scan(argv[2], argv[3], cwd, offset)
+        if resets:
+            print(resets)
+            return 0
+        return 1
+
+    elif cmd == "mark":
+        aid, resets = argv[2], int(argv[3])
+        account_by_id(aid)                      # fail loudly on an unknown id
+        state = load_state()
+        state.setdefault("accounts", {}).setdefault(aid, {})["limitedUntil"] = resets
+        save_state(state)
+
+    elif cmd == "fallback":
+        cfg = load_config().get("fallbacks", {}).get(argv[2], {})
+        value = cfg.get(argv[3])
+        if value is None or value is False:
+            return 1
+        print("" if value is True else value)
+
+    else:
+        print(f"unknown subcommand: {cmd}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except ConfigError as exc:
+        print(f"cc-detect: {exc}", file=sys.stderr)
+        sys.exit(3)

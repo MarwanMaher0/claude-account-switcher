@@ -1,0 +1,29 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "cc-switch",
+  "version": "2.0.0",
+  "description": "Run several Claude Code accounts side by side and fail over when one hits its rate limit. Surfaces limit state inside the session; the switch itself is performed by the cc launcher.",
+  "author": {
+    "name": "Marwan Maher",
+    "email": "marwanmaher635@gmail.com",
+    "url": "https://github.com/MarwanMaher0"
+  },
+  "homepage": "https://github.com/MarwanMaher0/claude-account-switcher",
+  "license": "MIT",
+  "skills": ["./"],
+  "commands": "./commands",
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup|resume",
+        "hooks": [{ "type": "command",
+                    "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"",
+                    "timeout": 5,
+                    "statusMessage": "Checking account limits..." }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command",
+                    "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/limit-notice.sh\"",
+                    "timeout": 5 }] }
+    ]
+  }
+}

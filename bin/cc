@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+# cc — run several Claude Code accounts and fail over when one hits its rate limit.
+#
+# Starts on the first account that is not rate limited. When that account hits its
+# limit the conversation is handed to the next one: the transcript is copied into
+# that account's config dir and reopened with --resume, so the conversation
+# continues rather than starting over.
+#
+# An account is bound at process start (CLAUDE_CONFIG_DIR is read once), so a live
+# session can never change accounts — every handoff is between runs.
+#
+#   cc                     start on a healthy account
+#   cc status              which accounts are limited, and until when
+#   cc add <id>            create, log in and register another account
+#   cc remove <id>         deregister an account  (--purge also deletes its dir)
+#   cc --acct <id>         force a specific account
+#   cc --manual            never end a run automatically on a limit
+#
+# Config: ~/.claude-switch/config.json    State: ~/.claude-switch/state.json
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DETECT="$HERE/cc-detect"
+WATCH="$HERE/cc-watch"
+AUTOKILL=1
+
+c_dim=$'\033[2m'; c_yel=$'\033[33m'; c_grn=$'\033[32m'; c_bold=$'\033[1m'; c_rst=$'\033[0m'
+note() { printf '%s[cc]%s %s\n' "$c_dim" "$c_rst" "$*" >&2; }
+warn() { printf '%s[cc]%s %s\n' "$c_yel" "$c_rst" "$*" >&2; }
+good() { printf '%s[cc]%s %s\n' "$c_grn" "$c_rst" "$*" >&2; }
+die()  { printf '%s[cc]%s %s\n' "$c_yel" "$c_rst" "$*" >&2; exit 1; }
+
+[ -x "$DETECT" ] || die "missing $DETECT"
+
+# ---- helpers ----------------------------------------------------------------
+acct_dir()   { "$DETECT" dir "$1"; }
+is_default() { "$DETECT" is-default "$1"; }
+
+# The default account keeps its config at ~/.claude.json, BESIDE the directory.
+# Any <dir>/.claude.json there is debris from launching it with CLAUDE_CONFIG_DIR
+# set — the mistake this launcher exists to avoid.
+acct_email() {
+    python3 - "$1" "$2" <<'PY' 2>/dev/null || echo "not logged in"
+import json, os, sys
+d, is_default = os.path.expanduser(sys.argv[1]), sys.argv[2] == "1"
+path = os.path.expanduser("~/.claude.json") if is_default else os.path.join(d, ".claude.json")
+try:
+    acct = json.load(open(path)).get("oauthAccount", {})
+    print(acct.get("emailAddress") or "not logged in")
+except Exception:
+    print("not logged in")
+PY
+}
+
+acct_label() {
+    local id="$1" dir def
+    dir="$(acct_dir "$id")" || return 1
+    if is_default "$id"; then def=1; else def=0; fi
+    printf '%s · %s' "$id" "$(acct_email "$dir" "$def")"
+}
+
+# Launch claude for one account. THE critical branch: the default account must run
+# with CLAUDE_CONFIG_DIR REMOVED, not set to its own path. Setting it makes Claude
+# Code look for ~/.claude/.claude.json, find nothing, run onboarding, and overwrite
+# ~/.claude/.credentials.json with whatever account logs in next.
+run_acct() {
+    local id="$1"; shift
+    local dir; dir="$(acct_dir "$id")"
+    if is_default "$id"; then
+        env -u CLAUDE_CONFIG_DIR claude "$@"
+    else
+        env CLAUDE_CONFIG_DIR="$dir" claude "$@"
+    fi
+}
+
+new_session() { python3 -c 'import uuid; print(uuid.uuid4())'; }
+
+# ---- cc status --------------------------------------------------------------
+cmd_status() {
+    echo
+    "$DETECT" status || return $?
+    echo
+    while IFS=$'\t' read -r id dir def; do
+        [ -n "$id" ] || continue
+        printf '  %-12s %s\n' "$id" "$(acct_email "$dir" "$def")"
+    done < <("$DETECT" accounts)
+    echo
+}
+
+# ---- cc add -----------------------------------------------------------------
+cmd_add() {
+    local id="" dir="" adopt=0
+    id="${1:-}"; shift || true
+    [ -n "$id" ] || die "usage: cc add <id> [--dir <path>] [--adopt]"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dir)   dir="${2:-}"; shift 2 ;;
+            --adopt) adopt=1; shift ;;
+            *) die "cc add: unknown option $1" ;;
+        esac
+    done
+    [[ "$id" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "invalid id: $id (a-z, 0-9, - and _)"
+    [ -n "$dir" ] || dir="$HOME/.claude-$id"
+
+    python3 - "$id" "$dir" "$adopt" <<'PY' || exit 1
+import json, os, re, sys
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+HOME = os.path.expanduser("~")
+CONFIG = os.path.join(HOME, ".claude-switch", "config.json")
+aid, adir, adopt = sys.argv[1], os.path.abspath(os.path.expanduser(sys.argv[2])), sys.argv[3] == "1"
+
+# Checked FIRST, and before any "already registered" message: this is the
+# dangerous case, and it must be named as such even when ~/.claude happens not to
+# be registered yet. A second account pointed at ~/.claude would be launched with
+# CLAUDE_CONFIG_DIR set, which makes Claude Code run onboarding and overwrite the
+# default account's credentials on first login.
+if adir == os.path.abspath(os.path.join(HOME, ".claude")):
+    sys.exit("cc add: refusing — ~/.claude is the default account's own directory. "
+             "Registering it again would overwrite its credentials on login.")
+
+cfg = json.load(open(CONFIG))
+for acct in cfg["accounts"]:
+    if acct["id"] == aid:
+        sys.exit(f"cc add: account {aid} already exists")
+    if os.path.abspath(os.path.expanduser(acct["dir"])) == adir:
+        sys.exit(f"cc add: {adir} is already registered as {acct['id']}")
+if not adopt and os.path.isdir(adir) and os.listdir(adir):
+    sys.exit(f"cc add: {adir} exists and is not empty (use --adopt to register it as-is)")
+print(adir)
+PY
+
+    local created=0
+    if [ "$adopt" = "0" ]; then
+        mkdir -p "$dir" && chmod 700 "$dir" && created=1
+        # settings only — never credentials, history, projects or sessions
+        local src="$HOME/.claude"
+        for f in settings.json CLAUDE.md; do
+            [ -f "$src/$f" ] && cp -p "$src/$f" "$dir/$f" && note "copied $f"
+        done
+    fi
+
+    # Register before login so the dir is discoverable, then roll back if login fails.
+    python3 - "$id" "$dir" <<'PY'
+import json, os, sys
+HOME = os.path.expanduser("~")
+CONFIG = os.path.join(HOME, ".claude-switch", "config.json")
+STATE = os.path.join(HOME, ".claude-switch", "state.json")
+aid, adir = sys.argv[1], sys.argv[2]
+cfg = json.load(open(CONFIG))
+cfg["accounts"].append({"id": aid, "dir": adir})
+tmp = CONFIG + ".tmp"
+json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, CONFIG)
+# a re-added id must not inherit a stale limit window
+try:
+    st = json.load(open(STATE))
+    if st.get("accounts", {}).pop(aid, None) is not None:
+        t = STATE + ".tmp"
+        json.dump(st, open(t, "w"), indent=2); os.chmod(t, 0o600); os.replace(t, STATE)
+except Exception:
+    pass
+PY
+
+    good "registered '$id' -> $dir"
+    note "opening login — sign in with the account you want as '$id'"
+    env CLAUDE_CONFIG_DIR="$dir" claude || true
+
+    local email
+    email="$(acct_email "$dir" 0)"
+    if [ "$email" = "not logged in" ]; then
+        warn "no account logged in at $dir — rolling back"
+        python3 - "$id" <<'PY'
+import json, os, sys
+CONFIG = os.path.join(os.path.expanduser("~"), ".claude-switch", "config.json")
+cfg = json.load(open(CONFIG))
+cfg["accounts"] = [a for a in cfg["accounts"] if a["id"] != sys.argv[1]]
+tmp = CONFIG + ".tmp"
+json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, CONFIG)
+PY
+        [ "$created" = "1" ] && rm -rf "$dir" && note "removed $dir"
+        die "cc add: login did not complete — nothing was registered"
+    fi
+    good "'$id' is $email"
+    cmd_status
+}
+
+# ---- cc remove --------------------------------------------------------------
+cmd_remove() {
+    local id="${1:-}" purge=0
+    [ -n "$id" ] || die "usage: cc remove <id> [--purge]"
+    shift
+    [ "${1:-}" = "--purge" ] && purge=1
+    is_default "$id" && die "cc remove: refusing — '$id' is the default account"
+    local dir; dir="$(acct_dir "$id")" || die "no such account: $id"
+
+    if [ "$purge" = "1" ]; then
+        warn "--purge deletes $dir, including that account's local credentials and history."
+        warn "The account upstream is unaffected. This cannot be undone."
+        printf '%sType the account id to confirm:%s ' "$c_bold" "$c_rst" >&2
+        local typed; read -r typed
+        [ "$typed" = "$id" ] || die "cc remove: confirmation did not match — nothing removed"
+    fi
+
+    python3 - "$id" <<'PY'
+import json, os, sys
+CONFIG = os.path.join(os.path.expanduser("~"), ".claude-switch", "config.json")
+cfg = json.load(open(CONFIG))
+cfg["accounts"] = [a for a in cfg["accounts"] if a["id"] != sys.argv[1]]
+tmp = CONFIG + ".tmp"
+json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, CONFIG)
+PY
+    good "deregistered '$id'"
+    if [ "$purge" = "1" ]; then
+        rm -rf "$dir" && good "deleted $dir"
+    else
+        note "directory left in place: $dir"
+    fi
+}
+
+# ---- fallback tiers ---------------------------------------------------------
+# Tier 2: pay-per-token API key. Off unless configured, and confirmed each use by
+# default — an unattended fallback into this can spend real money.
+try_api_key() {
+    local session="$1" resume="$2"
+    "$DETECT" fallback apiKey enabled >/dev/null 2>&1 || return 1
+    local keycmd; keycmd="$("$DETECT" fallback apiKey keyCommand 2>/dev/null)" || return 1
+    [ -n "$keycmd" ] || return 1
+
+    local key; key="$(eval "$keycmd" 2>/dev/null)"
+    [ -n "$key" ] || { warn "apiKey.keyCommand produced nothing — skipping"; return 1; }
+
+    if "$DETECT" fallback apiKey confirmEachUse >/dev/null 2>&1; then
+        warn "All accounts are limited. The API key tier bills PER TOKEN against an"
+        warn "account with no subscription cap. This can cost real money."
+        printf '%sContinue on the API key? [y/N]%s ' "$c_bold" "$c_rst" >&2
+        local ans; read -r ans
+        case "$ans" in [yY]*) ;; *) note "declined"; return 1 ;; esac
+    fi
+
+    good "falling back to the API key tier — same conversation"
+    if [ "$resume" = "1" ]; then
+        env -u CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY="$key" claude --resume "$session"
+    else
+        env -u CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY="$key" claude --session-id "$session"
+    fi
+    return 0
+}
+
+# Tier 3: a different tool entirely. No transcript translation is attempted —
+# a silently lossy import is worse than an honest fresh start.
+try_external() {
+    local transcript="$1"
+    "$DETECT" fallback externalCli enabled >/dev/null 2>&1 || return 1
+    local cmd; cmd="$("$DETECT" fallback externalCli command 2>/dev/null)" || return 1
+    [ -n "$cmd" ] || return 1
+    command -v "${cmd%% *}" >/dev/null 2>&1 || { note "external CLI '${cmd%% *}' not installed — skipping"; return 1; }
+
+    warn "Handing off to: $cmd"
+    warn "This is a DIFFERENT tool. Your conversation does NOT carry over — it starts fresh."
+    [ -n "$transcript" ] && note "transcript, if you want to carry anything by hand: $transcript"
+    eval "$cmd"
+    return 0
+}
+
+exhausted() {
+    warn "every account is limited, and no fallback is available."
+    # soonest exits non-zero when nothing is actually limited — report what we can
+    # rather than printing a bogus epoch-0 reset time.
+    local info
+    if info="$("$DETECT" soonest 2>/dev/null)" && [ -n "$info" ]; then
+        local aid="${info%% *}" until="${info##* }"
+        if [ "${until:-0}" -gt 0 ] 2>/dev/null; then
+            warn "'$aid' frees up first at $(date -d "@$until" '+%H:%M' 2>/dev/null || echo '?')."
+        fi
+    fi
+    exit 1
+}
+
+# ---- argument parsing -------------------------------------------------------
+case "${1:-}" in
+    status) cmd_status; exit $? ;;
+    add)    shift; cmd_add "$@"; exit $? ;;
+    remove) shift; cmd_remove "$@"; exit $? ;;
+esac
+
+FORCED=""
+while :; do
+    case "${1:-}" in
+        --acct)   FORCED="${2:-}"; shift 2 ;;
+        --manual) AUTOKILL=0; shift ;;
+        *) break ;;
+    esac
+done
+
+"$DETECT" accounts >/dev/null || exit 3   # surfaces config errors before launching
+
+ACCT="$FORCED"
+if [ -z "$ACCT" ]; then
+    ACCT="$("$DETECT" pick)" || ACCT=""
+fi
+SESSION="$(new_session)"
+CWD="$PWD"
+RESUME=0
+declare -A TRIED=()
+
+# ---- main loop --------------------------------------------------------------
+while :; do
+    if [ -z "$ACCT" ]; then
+        # Tier 1 exhausted. Try the configured fallbacks, in order.
+        slug="$("$DETECT" slug "$CWD")"
+        last_transcript=""
+        for d in $("$DETECT" accounts | cut -f2); do
+            [ -f "$d/projects/$slug/$SESSION.jsonl" ] && last_transcript="$d/projects/$slug/$SESSION.jsonl"
+        done
+        try_api_key "$SESSION" "$RESUME" && exit 0
+        try_external "$last_transcript" && exit 0
+        exhausted
+    fi
+
+    dir="$(acct_dir "$ACCT")" || die "no such account: $ACCT"
+    TRIED[$ACCT]=1
+    note "$(acct_label "$ACCT")"
+
+    # Where the transcript already ends, so the scan below sees only what THIS run
+    # appends. After a handoff the copied transcript still holds the previous
+    # account's 429; without this the new account re-reads it and marks itself
+    # limited.
+    offset="$("$DETECT" size "$dir" "$SESSION" "$CWD")"
+
+    WATCHER=""
+    if [ "$AUTOKILL" = "1" ] && [ -x "$WATCH" ]; then
+        "$WATCH" "$dir" "$SESSION" "$CWD" "$offset" "$$" &
+        WATCHER=$!
+    fi
+
+    if [ "$RESUME" = "1" ]; then
+        run_acct "$ACCT" --resume "$SESSION" "$@"
+    else
+        run_acct "$ACCT" --session-id "$SESSION" "$@"
+    fi
+
+    if [ -n "$WATCHER" ]; then
+        kill "$WATCHER" 2>/dev/null
+        wait "$WATCHER" 2>/dev/null
+    fi
+
+    resets="$("$DETECT" scan "$dir" "$SESSION" "$CWD" "$offset")" || resets=""
+    [ -n "$resets" ] || exit 0            # normal exit — nothing to do
+
+    "$DETECT" mark "$ACCT" "$resets" >/dev/null
+    warn "$ACCT hit its limit · resets $(date -d "@$resets" '+%H:%M' 2>/dev/null)"
+
+    # Next available account that this run has not already used.
+    NEXT="$("$DETECT" next-free "$(IFS=,; echo "${!TRIED[*]}")")" || NEXT=""
+
+    if [ -z "$NEXT" ]; then
+        ACCT=""            # fall through to the fallback tiers
+        continue
+    fi
+
+    # ---- carry the conversation across --------------------------------------
+    slug="$("$DETECT" slug "$CWD")"
+    src="$dir/projects/$slug/$SESSION.jsonl"
+    dst_dir="$(acct_dir "$NEXT")/projects/$slug"
+    if [ -f "$src" ]; then
+        mkdir -p "$dst_dir"
+        note "carrying the conversation over ($(du -h "$src" | cut -f1))…"
+        cp -p "$src" "$dst_dir/$SESSION.jsonl"
+        RESUME=1
+    else
+        warn "no transcript found — starting fresh on $NEXT"
+        SESSION="$(new_session)"
+        RESUME=0
+    fi
+
+    ACCT="$NEXT"
+    good "switching to $ACCT — same conversation"
+done

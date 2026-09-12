@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show environment
+        run: |
+          bash --version | head -1
+          python3 --version
+
+      # The suite stubs `claude` and runs against a throwaway HOME, so it needs
+      # no API key, no Claude install, and consumes no quota.
+      - name: Run test suites
+        run: bash test/run-all.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: shellcheck
+        run: |
+          shellcheck --severity=warning \
+            bin/cc bin/cc-watch \
+            install.sh uninstall.sh \
+            plugin/hooks/*.sh \
+            test/*.sh
+
+      - name: Byte-compile python
+        run: python3 -m py_compile bin/cc-detect
+
+      - name: Validate JSON manifests
+        run: |
+          python3 -c "import json;json.load(open('.claude-plugin/marketplace.json'))"
+          python3 -c "import json;json.load(open('plugin/.claude-plugin/plugin.json'))"
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Publication gate: no credential reads, no private identifiers, no network
+      # calls. Run separately from the main suite so a failure here is unmissable.
+      - name: Security gates
+        run: bash test/test-security.sh

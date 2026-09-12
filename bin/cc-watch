@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# cc-watch — background limit watcher for `cc`.
+#
+# Claude Code does NOT exit when an account hits its rate limit; it prints the
+# message and keeps the session open (verified against a real 429 on
+# 2026-09-06, where the session logged 281 further lines over ~50 minutes).
+# So for a hands-free switch something has to end the run. This watcher tails
+# the transcript and, on seeing a limit that belongs to THIS run, terminates
+# the claude process so `cc` can hand the conversation to the other account.
+#
+#   cc-watch <config-dir> <session-id> <cwd> <offset> <cc-pid>
+#
+# The claude process is found as a child of <cc-pid>. ~/.local/bin/claude execs
+# the native binary, so that child's command line is the binary path itself.
+
+set -uo pipefail
+
+DETECT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cc-detect"
+CONFIG_DIR="$1"; SESSION="$2"; CWD="$3"; OFFSET="$4"; CCPID="$5"
+POLL="${CC_WATCH_POLL:-2}"        # seconds between checks
+GRACE="${CC_WATCH_GRACE:-8}"      # seconds to allow a clean shutdown
+
+c_yel=$'\033[33m'; c_bold=$'\033[1m'; c_rst=$'\033[0m'
+
+claude_pid() {
+    # children of cc that are the claude binary (not this watcher)
+    pgrep -P "$CCPID" -f 'native-binary/claude' 2>/dev/null | head -1
+}
+
+while :; do
+    sleep "$POLL"
+
+    # cc gone? nothing left to watch.
+    kill -0 "$CCPID" 2>/dev/null || exit 0
+
+    resets="$("$DETECT" scan "$CONFIG_DIR" "$SESSION" "$CWD" "$OFFSET" 2>/dev/null)" || continue
+    [ -n "$resets" ] || continue
+
+    when=$(date -d "@$resets" '+%H:%M' 2>/dev/null || echo "?")
+    printf '\n%s%s[cc] rate limit hit — resets %s%s\n' "$c_bold" "$c_yel" "$when" "$c_rst" >&2
+    printf '%s[cc] ending this run to switch accounts…%s\n\n' "$c_yel" "$c_rst" >&2
+
+    pid="$(claude_pid)"
+    if [ -z "$pid" ]; then
+        # Nothing to signal — cc will still detect the limit when the run ends.
+        exit 0
+    fi
+
+    # SIGTERM first so the transcript is flushed cleanly.
+    kill -TERM "$pid" 2>/dev/null
+    for _ in $(seq "$GRACE"); do
+        sleep 1
+        kill -0 "$pid" 2>/dev/null || exit 0
+    done
+    kill -KILL "$pid" 2>/dev/null
+    exit 0
+done
