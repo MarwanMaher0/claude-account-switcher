@@ -23,17 +23,12 @@ back in, and losing the conversation you were forty messages into. So you wait t
 
 This fixes that. One command, and your conversation continues on the other account:
 
-```console
-$ cc
-[cc] personal · you@example.com
-     ...working...
-[cc] personal hit its limit · resets 15:40
-[cc] carrying the conversation over (24M)…
-[cc] switching to work — same conversation
-[cc] work · you@company.com
-```
+<div align="center">
+  <img src="docs/media/failover.png" alt="Terminal showing cc running: it reports the personal account hit its limit and will reset at 15:40, carries the conversation over, and switches to the work account with the same conversation." width="820">
+</div>
 
-**About four seconds.** Same conversation, same context, different account.
+**About four seconds.** Same conversation, same context, different account. Run
+`bash test/demo.sh` to see it yourself without installing anything.
 
 ---
 
