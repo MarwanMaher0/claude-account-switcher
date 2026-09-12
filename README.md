@@ -1,4 +1,20 @@
+<div align="center">
+
 # claude-account-switcher
+
+**Switch between the Claude Code accounts you already own — without losing the conversation.**
+
+[![CI](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg)](#requirements)
+[![Tests](https://img.shields.io/badge/tests-109%20assertions-brightgreen.svg)](#tests)
+[![No telemetry](https://img.shields.io/badge/telemetry-none-success.svg)](#privacy)
+
+[Install](#install) · [Quickstart](#quickstart) · [Commands](#commands) · [How it works](#how-failover-works) · [Docs](#docs)
+
+</div>
+
+---
 
 **You're deep in a problem. Claude Code stops: you've hit your 5-hour limit.**
 
@@ -7,7 +23,8 @@ back in, and losing the conversation you were forty messages into. So you wait t
 
 This fixes that. One command, and your conversation continues on the other account:
 
-```
+```console
+$ cc
 [cc] personal · you@example.com
      ...working...
 [cc] personal hit its limit · resets 15:40
@@ -16,7 +33,25 @@ This fixes that. One command, and your conversation continues on the other accou
 [cc] work · you@company.com
 ```
 
-About four seconds. Same conversation, same context, different account.
+**About four seconds.** Same conversation, same context, different account.
+
+---
+
+## Contents
+
+- [Who this is for](#who-this-is-for)
+- [Why it exists](#why-it-exists)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [Commands](#commands)
+- [How failover works](#how-failover-works)
+- [When every account is spent](#when-every-account-is-spent)
+- [The one thing a fork must not break](#-the-one-thing-a-fork-must-not-break)
+- [What it does not do](#what-it-does-not-do)
+- [Privacy](#privacy)
+- [Tests](#tests)
+- [Docs](#docs)
 
 ## Who this is for
 
@@ -24,10 +59,11 @@ About four seconds. Same conversation, same context, different account.
 - You work in long sessions and lose real time to the 5-hour window.
 - You want the switch to be automatic, and your context to survive it.
 
-**If you have one account, this will not help you.** It does not pool, share or resell accounts,
-and it does not raise anyone's limits. Each account's own limits apply in full. All it does is
-choose which of *your own* accounts a session runs against, and carry your conversation when one
-is spent.
+> [!IMPORTANT]
+> **If you have one account, this will not help you.** It does not pool, share or resell accounts,
+> and it does not raise anyone's limits. Each account's own limits apply in full. All it does is
+> choose which of *your own* accounts a session runs against, and carry your conversation when one
+> is spent.
 
 ## Why it exists
 
@@ -36,14 +72,17 @@ That sounds like a dead end — and it is, for switching *inside* a session. The
 end the run, move the transcript, and resume on the next account. That is all this does, plus the
 detection needed to know when to do it.
 
-Details in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md), including the two false-positive traps
+Details in **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)**, including the two false-positive traps
 and the bug that logged me out while building it.
 
 ## Requirements
 
-- Claude Code, working from your terminal
-- `bash` 4+ and `python3`
-- Two or more Claude accounts you own, each able to log in
+| | |
+|---|---|
+| Claude Code | working from your terminal |
+| `bash` | 3.2+ — macOS's stock bash is fine |
+| `python3` | 3.6+, already present on both platforms |
+| Accounts | two or more you own, each able to log in |
 
 ## Install
 
@@ -53,14 +92,21 @@ cd claude-account-switcher
 ./install.sh
 ```
 
-Installs `cc`, `cc-detect` and `cc-watch` into `~/.local/bin`. Nothing else is touched.
+Installs `cc`, `cc-detect` and `cc-watch` into `~/.local/bin`. Nothing else is touched, and
+`./uninstall.sh` removes them again.
 
-Optional plugin, for limit notices inside a session:
+<details>
+<summary><b>Optional plugin</b> — limit notices inside a session</summary>
 
 ```bash
 claude plugin marketplace add MarwanMaher0/claude-account-switcher
 claude plugin install cc-switch
 ```
+
+Adds two hooks: one names the account at session start, the other announces a rate limit the
+moment it lands — useful because Claude Code itself stays silent and simply keeps the session
+open. Roughly 74 tokens of always-on context.
+</details>
 
 ## Quickstart
 
@@ -86,25 +132,46 @@ Your existing account is detected on first run — there is nothing to configure
 
 ## How failover works
 
+```
+   account A                         account B
+   ┌──────────────┐                  ┌──────────────┐
+   │ session runs │                  │              │
+   │      ↓       │                  │              │
+   │  429 limit   │                  │              │
+   └──────┬───────┘                  └──────▲───────┘
+          │  watcher ends the run           │
+          │  transcript copied ─────────────┘
+          │  claude --resume <same session id>
+          ▼
+   conversation continues, ~4s
+```
+
 1. `cc` starts the first account whose limit window has passed.
 2. A background watcher reads the session transcript. **Claude Code does not exit when you hit a
    rate limit** — it prints the message and stays open — so the watcher ends the run when a limit
    belonging to *that run* appears.
 3. The transcript is copied into the next account's config directory and reopened with
-   `--resume`, so the conversation continues instead of restarting. Typically about 4 seconds.
+   `--resume`, so the conversation continues instead of restarting.
 
-When every account is spent, two optional tiers follow — both off by default. See
-[docs/CONFIG.md](docs/CONFIG.md).
+Detection keys on the structured `quotaLimits` field the client records, not on the
+human-readable message, which can be reworded at any time. A 429 alone is not enough: transient
+server-side throttling looks similar but carries no quota payload, and switching on it would be
+pointless — the next account talks to the same servers.
+
+## When every account is spent
+
+Two optional tiers follow, **both off by default**. See [docs/CONFIG.md](docs/CONFIG.md).
 
 | Tier | Source | Conversation | Cost |
-|---|---|---|---|
-| 1 | Your Claude accounts | carries over | subscription |
-| 2 | `ANTHROPIC_API_KEY` | carries over | **per token** |
-| 3 | A different CLI | does **not** carry | depends |
+|:---:|---|---|---|
+| **1** | Your Claude accounts | carries over | subscription |
+| **2** | `ANTHROPIC_API_KEY` | carries over | **per token** |
+| **3** | A different CLI | does **not** carry | depends |
 
 ## ⚠️ The one thing a fork must not break
 
-`CLAUDE_CONFIG_DIR=~/.claude` is **not** the same as leaving the variable unset.
+> [!WARNING]
+> `CLAUDE_CONFIG_DIR=~/.claude` is **not** the same as leaving the variable unset.
 
 Claude Code keeps the default account's config at `~/.claude.json` — *beside* the directory, not
 inside it. Set the variable to that same path and Claude Code looks for `~/.claude/.claude.json`,
@@ -112,9 +179,9 @@ finds nothing, runs first-time onboarding, and **overwrites `~/.claude/.credenti
 whatever account logs in next**. That silently logs you out of your default account, and the old
 token cannot be recovered: Claude Code backs up `.claude.json`, never `.credentials.json`.
 
-This is not hypothetical — it happened during development, and cost a re-login. The default
-account is therefore always launched with `env -u CLAUDE_CONFIG_DIR`, `cc add` refuses to
-register a second account at `~/.claude`, and a test asserts both.
+This is not hypothetical — it happened during development and cost a re-login. The default account
+is therefore always launched with `env -u CLAUDE_CONFIG_DIR`, `cc add` refuses to register a second
+account at `~/.claude`, and a test asserts both.
 
 ## What it does not do
 
@@ -127,28 +194,21 @@ register a second account at `~/.claude`, and a test asserts both.
   browser login, its quota cannot be redirected locally, and conversations cannot move between
   accounts.
 - **It cannot use GitHub Copilot's quota.** Claude Code speaks the Anthropic API (and
-  Bedrock/Vertex/Foundry, which serve Claude models). Copilot is a different vendor with
-  different auth. Proxies that re-expose Copilot as an Anthropic endpoint breach GitHub's terms
-  and risk your account, so they are deliberately not supported. Copilot can only appear as a
-  tier-3 external CLI, launched as itself.
+  Bedrock/Vertex/Foundry, which serve Claude models). Copilot is a different vendor with different
+  auth. Proxies that re-expose Copilot as an Anthropic endpoint breach GitHub's terms and risk your
+  account, so they are deliberately unsupported. Copilot can only appear as a tier-3 external CLI,
+  launched as itself.
 
 ## Privacy
 
-- No network calls and no telemetry. Enforced by a test.
-- Nothing ever reads, copies or prints a `.credentials.json`. Enforced by a test, statically and
-  at runtime.
+- **No network calls, no telemetry.** Enforced by a test over everything shipped.
+- **Never reads, copies or prints a `.credentials.json`.** Enforced by a test, statically and at
+  runtime.
 - `cc add` copies exactly two files into a new account: `settings.json` and `CLAUDE.md`.
 - Failover copies your session transcript between config directories **on your own machine**, so
   the conversation can continue. It never leaves the machine.
 
-## Docs
-
-| | |
-|---|---|
-| [HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) | limit detection, the two false-positive traps, why a live session cannot switch |
-| [CONFIG.md](docs/CONFIG.md) | every config field, and the fallback tiers |
-| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | logged-out recovery, PATH problems, what `cc` does not govern |
-| [docs/specs/](docs/specs/) | the specs this was built from, with acceptance criteria |
+See [SECURITY.md](SECURITY.md) for the full list and how to report an issue.
 
 ## Tests
 
@@ -156,9 +216,30 @@ register a second account at `~/.claude`, and a test asserts both.
 bash test/run-all.sh
 ```
 
-106 assertions across five suites. No framework to install. `claude` is stubbed and every test
+**109 assertions across five suites.** No framework to install. `claude` is stubbed and every test
 runs against a throwaway `HOME`, so the suite cannot touch a real account and consumes no API
-quota.
+quota. CI runs the whole thing on Linux and macOS, plus `shellcheck` and a separate security gate.
+
+<details>
+<summary>What the suite actually caught</summary>
+
+- macOS ships **bash 3.2**, with no associative arrays — the launcher aborted outright there
+- the handoff copying a 429 *with* the transcript, so the receiving account declared itself limited
+- an expired limit in the transcript tail marking an account spent forever
+- a 429 that is transient throttling rather than a usage limit, which must not trigger a switch
+- `date -d`, `stat -c`, padded `wc -l`, and a `TMPDIR` ending in a slash
+
+</details>
+
+## Docs
+
+| | |
+|---|---|
+| [HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) | limit detection, the false-positive traps, why a live session cannot switch |
+| [CONFIG.md](docs/CONFIG.md) | every config field, and the fallback tiers |
+| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | logged-out recovery, PATH problems, what `cc` does not govern |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | running the suite, and the rules not up for negotiation |
+| [docs/specs/](docs/specs/) | the specs this was built from, with acceptance criteria |
 
 ## Licence
 
