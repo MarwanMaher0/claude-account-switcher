@@ -1,0 +1,41 @@
+I built a tool to switch between my two Claude accounts.
+
+On the first run it logged me out of my main one.
+
+The token was gone for good, because Claude Code backs up its config file but not its credentials file. And the cause was one environment variable I thought was harmless.
+
+Setting CLAUDE_CONFIG_DIR is how you point Claude Code at a second account. So I set it to the first account's own folder and assumed nothing would happen.
+
+Something happened. That account keeps its config file next to the folder, not inside it. Claude Code looked, found nothing, decided I was a new user, ran onboarding, and wrote over my credentials with whoever logged in next.
+
+I did this to myself while building the tool that was supposed to prevent it.
+
+Anyway. Three things I learned that were worth the trouble.
+
+1. A running session can't change accounts.
+
+The config folder and the credentials get read once, when the process starts. Nothing can change them after that, and there's no "rate limited" event to hook into anyway. I lost hours trying to get around this before I gave up and worked with it instead. End the run, move the transcript, start again on the other account. Four seconds, and the conversation carries over.
+
+Most of my better decisions have started as a constraint I didn't want to accept.
+
+2. Claude Code doesn't quit when you hit the limit.
+
+I assumed it did. Then I went and read a real rate limit in my own session history. The session had kept going for another 281 lines over the next fifty minutes. It just sits there.
+
+If I'd trusted the assumption, the tool would have done nothing at the exact moment it existed for.
+
+3. A 429 doesn't always mean you're out of quota.
+
+I only caught this because I stopped trusting my own test fake and pointed the real binary at a mock server that always returns 429. It logged an empty quota payload and printed "Server is temporarily limiting requests (not your usage limit)".
+
+So a temporary throttle and a real limit look almost identical. Switching accounts on a throttle achieves nothing, because the next account talks to the same servers. My code already ignored it, but by luck rather than design, and there was no test for it. There is now.
+
+Every one of those I got wrong by reasoning about what I assumed the system did, and got right by going and reading what it actually wrote down.
+
+It's MIT, works on Linux and macOS, makes no network calls, and never reads your credentials file. 109 tests, none of which burn API quota, because the CLI is faked out.
+
+One thing before anyone asks. This switches between accounts you already pay for. It doesn't pool accounts and it doesn't get you past anyone's limits. If you only have one subscription it's useless to you.
+
+Link's in the comments.
+
+#ClaudeCode #DeveloperTools #SoftwareEngineering #OpenSource

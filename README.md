@@ -50,6 +50,7 @@ $ cc
 - [The one thing a fork must not break](#-the-one-thing-a-fork-must-not-break)
 - [What it does not do](#what-it-does-not-do)
 - [Privacy](#privacy)
+- [See it work](#see-it-work)
 - [Tests](#tests)
 - [Docs](#docs)
 
@@ -209,6 +210,16 @@ account at `~/.claude`, and a test asserts both.
   the conversation can continue. It never leaves the machine.
 
 See [SECURITY.md](SECURITY.md) for the full list and how to report an issue.
+
+## See it work
+
+```bash
+bash test/demo.sh
+```
+
+Prints a real failover against a stubbed CLI and a throwaway `HOME` — no account touched, no
+quota consumed. Useful for a screenshot, or for deciding whether you want this before installing
+anything.
 
 ## Tests
 
