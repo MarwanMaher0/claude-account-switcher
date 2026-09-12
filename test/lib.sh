@@ -56,7 +56,11 @@ assert_no_file() { [ -f "$1" ] && no "$2" "file should not exist: $1" || ok "$2"
 
 # A throwaway HOME with two logged-in accounts, mirroring a normal install.
 new_home() {
-    SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/cc-test-XXXXXX")"
+    # macOS sets TMPDIR with a trailing slash, which would produce a path
+    # containing "//". Python's abspath normalises that away, so a literal string
+    # comparison against a path built here would fail. Trim it so both agree.
+    local tmp="${TMPDIR:-/tmp}"
+    SANDBOX="$(mktemp -d "${tmp%/}/cc-test-XXXXXX")"
     export HOME="$SANDBOX"
     mkdir -p "$HOME/.claude" "$HOME/.claude-2"
     printf '{"oauthAccount":{"emailAddress":"first@example.com","subscriptionType":"max"}}\n' \
