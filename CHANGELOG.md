@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Runs on macOS. It previously did not: macOS ships bash 3.2, which has no associative arrays,
+  so the launcher aborted outright. Also `date -d`, `stat -c`, BSD `wc -l` padding, and a
+  `TMPDIR` ending in a slash.
+
+### Added
+- Three tests covering a 429 that is **not** a usage limit. Found by driving the real Claude Code
+  binary into a 429 with a mock API endpoint (`test/mock-api.py`): transient server-side
+  throttling records no quota payload and must not trigger a switch, since the next account talks
+  to the same servers. Test count 106 → 109.
+
+### Changed
+- README rebuilt: leads with the problem, carries a real CI badge, and corrects the stated
+  requirement — bash 3.2 is supported, not 4+.
+
 ## 2.0.0 — 2026-09-12
 
 First public release.
