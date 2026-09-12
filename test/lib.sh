@@ -91,13 +91,24 @@ cleanup_home() {
 #   env       — report whether CLAUDE_CONFIG_DIR is set, then exit
 #   limit     — write a live 429 into the transcript, then idle until killed
 #   ok        — write one normal turn and exit
-#   login     — create an oauthAccount in the config dir (simulates a login)
+#   login     — create an oauthAccount in the config dir (simulates a login);
+#               STUB_EMAIL, STUB_ACCOUNT and STUB_ORG choose who signs in
 #   nologin   — exit without logging in
+# Every invocation's arguments are appended to $STUB_LOG. `claude auth login` behaves
+# per $STUB_MODE; any other `auth` subcommand does nothing. STUB_NO_AUTH=1 makes `auth`
+# an unknown command, as in a build that predates it.
 stub_claude() {
     STUBDIR="$SANDBOX/stub/native-binary"
     mkdir -p "$STUBDIR"
+    export STUB_LOG="$SANDBOX/stub/calls.log"
+    : > "$STUB_LOG"
     cat > "$STUBDIR/claude" <<'STUB'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STUB_LOG:-/dev/null}"
+if [ "${1:-}" = "auth" ]; then
+  [ -n "${STUB_NO_AUTH:-}" ] && { echo "error: unknown command 'auth'" >&2; exit 1; }
+  [ "${2:-}" = "login" ] || exit 0
+fi
 slug=$(python3 -c "import re,os;print(re.sub(r'[^A-Za-z0-9]','-',os.path.abspath('$PWD')))")
 sid=""; mode_arg=""
 while [ $# -gt 0 ]; do
@@ -124,7 +135,8 @@ case "${STUB_MODE:-ok}" in
      echo "{\"type\":\"assistant\",\"uuid\":\"t3\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"resumed on $cfgdir\"}]}}" >> "$d/$sid.jsonl"
      ;;
   login)
-     printf '{"oauthAccount":{"emailAddress":"new@example.com","subscriptionType":"max"}}\n' > "$cfgdir/.claude.json"
+     printf '{"oauthAccount":{"emailAddress":"%s","accountUuid":"%s","organizationUuid":"%s","subscriptionType":"max"}}\n' \
+       "${STUB_EMAIL:-new@example.com}" "${STUB_ACCOUNT:-acct-new}" "${STUB_ORG:-org-new}" > "$cfgdir/.claude.json"
      ;;
   nologin) : ;;
 esac

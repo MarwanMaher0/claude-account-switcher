@@ -123,8 +123,9 @@ Your existing account is detected on first run — there is nothing to configure
 | `cc` | Start on the preferred account if it is free, else the first free one. Fails over on a limit. |
 | `cc use <id>` | Prefer an account for new sessions, in the terminal and in the VS Code panel. |
 | `cc status` | Every account, its email, which window it hit (5-hour or weekly) and when that resets. Flags two ids logged into the same account. |
-| `cc add <id>` | Create `~/.claude-<id>`, copy your settings, log in, register. Refuses a login that duplicates an existing account. |
-| `cc add <id> --dir <path> --adopt` | Register a directory that is already logged in. |
+| `cc add <id>` | Create `~/.claude-<id>`, copy your settings, ask which email you mean, sign in, register. Refuses a login of an account you already added, or of a different address. |
+| `cc add <id> --email <address>` | Pre-fill the login page, and refuse the add if the browser signs in as anyone else. |
+| `cc add <id> --dir <path> --adopt` | Register a directory that is already signed in, without a new login. |
 | `cc remove <id>` | Deregister. Add `--purge` to delete the directory too. |
 | `cc clear <id>` | Forget a limit recorded for an account. |
 | `cc vscode on` / `off` | Keep the VS Code Claude panel on a free account, carrying recent chats across. |

@@ -12,7 +12,8 @@
 #   cc                     start on a healthy account (the preferred one while it is free)
 #   cc use <id>            prefer an account for new sessions — terminal and VS Code panel
 #   cc status              which accounts are limited, by which window, until when
-#   cc add <id>            create, log in and register another account
+#   cc add <id>            create, sign in and register another account
+#   cc add <id> --email X  pre-fill the login with X and refuse any other account
 #   cc remove <id>         deregister an account  (--purge also deletes its dir)
 #   cc clear <id>          forget a limit recorded for an account
 #   cc vscode on|off       keep the VS Code panel on an account with quota left
@@ -107,18 +108,27 @@ cmd_status() {
 
 # ---- cc add -----------------------------------------------------------------
 cmd_add() {
-    local id="" dir="" adopt=0
+    local id="" dir="" adopt=0 want_email=""
     id="${1:-}"; shift || true
-    [ -n "$id" ] || die "usage: cc add <id> [--dir <path>] [--adopt]"
+    [ -n "$id" ] || die "usage: cc add <id> [--email <address>]    e.g.  cc add work"
     while [ $# -gt 0 ]; do
         case "$1" in
-            --dir)   dir="${2:-}"; shift 2 ;;
+            --dir|--email)
+                # `shift 2` with one argument left shifts nothing, which would loop forever.
+                { [ $# -ge 2 ] && [ -n "$2" ]; } || die "cc add: $1 needs a value"
+                if [ "$1" = "--dir" ]; then dir="$2"; else want_email="$2"; fi
+                shift 2 ;;
             --adopt) adopt=1; shift ;;
             *) die "cc add: unknown option $1" ;;
         esac
     done
     [[ "$id" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "invalid id: $id (a-z, 0-9, - and _)"
     [ -n "$dir" ] || dir="$HOME/.claude-$id"
+
+    # Create config.json on a first run, as every other command does, and stop on a broken
+    # one. Without this, `cc add` as the first command ever run crashed reading a file that
+    # did not exist yet.
+    "$DETECT" accounts >/dev/null || exit 3
 
     python3 - "$id" "$dir" "$adopt" <<'PY' || exit 1
 import json, os, re, sys
@@ -144,8 +154,25 @@ for acct in cfg["accounts"]:
         sys.exit(f"cc add: {adir} is already registered as {acct['id']}")
 if not adopt and os.path.isdir(adir) and os.listdir(adir):
     sys.exit(f"cc add: {adir} exists and is not empty (use --adopt to register it as-is)")
-print(adir)
 PY
+
+    # An adopted directory that is already signed in needs no login.
+    local need_login=1
+    if [ "$adopt" = "1" ] && [ "$(acct_email "$dir" 0)" != "not logged in" ]; then
+        need_login=0
+    fi
+
+    # Ask which address the user means, before anything is created, so the check against
+    # the browser's open session is on without anyone having to know about --email.
+    # Enter skips it. Asked only when someone is at the keyboard.
+    if [ "$need_login" = "1" ] && [ -z "$want_email" ] && { [ -t 0 ] || [ -n "${CC_PROMPT:-}" ]; }; then
+        printf '%s[cc]%s email of the account to add (Enter to skip): ' "$c_bold" "$c_rst" >&2
+        read -r want_email || want_email=""
+    fi
+    case "$want_email" in
+        ""|*@*) ;;
+        *) die "cc add: '$want_email' is not an email address" ;;
+    esac
 
     local created=0
     if [ "$adopt" = "0" ]; then
@@ -153,13 +180,12 @@ PY
         # settings only — never credentials, history, projects or sessions
         local src="$HOME/.claude"
         for f in settings.json CLAUDE.md; do
-            [ -f "$src/$f" ] && cp -p "$src/$f" "$dir/$f" && note "copied $f"
+            [ -f "$src/$f" ] && cp -p "$src/$f" "$dir/$f"
         done
         # The cc-switch plugin's hooks record limits inside sessions. Share the
         # default account's copy rather than installing it again per account.
         if [ -d "$src/skills/cc-switch" ]; then
-            mkdir -p "$dir/skills" && ln -s "$src/skills/cc-switch" "$dir/skills/cc-switch" \
-                && note "linked the cc-switch plugin"
+            mkdir -p "$dir/skills" && ln -s "$src/skills/cc-switch" "$dir/skills/cc-switch"
         fi
     fi
 
@@ -184,32 +210,70 @@ except Exception:
     pass
 PY
 
-    good "registered '$id' -> $dir"
-    note "opening login — sign in with the account you want as '$id'"
-    env CLAUDE_CONFIG_DIR="$dir" claude || true
+    local shown="$dir"
+    case "$dir" in "$HOME"/*) shown="~${dir#"$HOME"}" ;; esac
+    note "adding '$id' ($shown)"
+    if [ "$need_login" = "1" ]; then
+        login_account "$id" "$dir" "$want_email"
+    else
+        note "already signed in — no login needed"
+    fi
 
     local email
     email="$(acct_email "$dir" 0)"
     if [ "$email" = "not logged in" ]; then
-        warn "no account logged in at $dir — rolling back"
         rollback_add "$id" "$created" "$dir"
-        die "cc add: login did not complete — nothing was registered"
+        die "no login completed for '$id' — nothing added. Run cc add $id again when you are ready to sign in."
     fi
 
-    # Two logins of one account share one usage limit, so a second adds nothing but
-    # a wasted hop on every failover. Easy to do by accident: the browser signs in
-    # with whichever claude.ai account it already has open.
-    local dup
-    dup="$("$DETECT" emails | awk -F'\t' -v me="$id" -v e="$email" \
-        'tolower($2) == tolower(e) && $1 != me { print $1; exit }')"
-    if [ -n "$dup" ]; then
-        warn "'$id' signed in as $email — the same account as '$dup', so they would share one limit."
-        warn "sign out of claude.ai in your browser (or use a private window), then add it again — rolling back"
+    # --email names the account the user meant. The browser can still sign in as
+    # whoever it already has open, so check what actually arrived.
+    if [ -n "$want_email" ] && \
+       [ "$(printf '%s' "$email" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$want_email" | tr '[:upper:]' '[:lower:]')" ]; then
+        warn "'$id' signed in as $email, not $want_email."
         rollback_add "$id" "$created" "$dir"
-        die "cc add: duplicate login — nothing was registered"
+        die "nothing added. Use a private browser window, then run: cc add $id --email $want_email"
     fi
-    good "'$id' is $email"
+
+    # Two logins of one account in one organization share one usage limit, so a second
+    # adds nothing but a wasted hop on every failover. The match is on account and
+    # organization ids, not email: a personal plan and a work seat can share an address
+    # and still have separate limits.
+    local dup
+    dup="$("$DETECT" duplicate-of "$id" 2>/dev/null)" || dup=""
+    if [ -n "$dup" ]; then
+        warn "'$id' signed in as $email — that is '$dup' again, which shares its limit."
+        rollback_add "$id" "$created" "$dir"
+        die "nothing added. Use a private browser window and sign in with your other account: cc add $id --email <address>"
+    fi
+    good "'$id' added as $email — cc moves to it when another account runs out (cc use $id to start on it)"
     cmd_status
+}
+
+# Sign a new account in. `claude auth login` does only that and exits; a build without
+# the `auth` subcommand gets an interactive session to sign in and then exit.
+login_account() {
+    local id="$1" dir="$2" want="$3" known
+    # The browser signs in with whichever claude.ai account it already has open — which
+    # is how a "new" account silently turns out to be one already registered. Say so
+    # before the browser opens, not after the login is wasted.
+    known="$("$DETECT" emails 2>/dev/null | awk -F'\t' -v me="$id" \
+        '$1 != me && $2 != "" { printf "%s%s (%s)", sep, $1, $2; sep = ", " }')"
+    [ -n "$known" ] && note "already added: $known"
+    warn "your browser signs in with whichever claude.ai account is open — if that is one above, use a private window"
+
+    if env CLAUDE_CONFIG_DIR="$dir" claude auth --help >/dev/null 2>&1; then
+        if [ -n "$want" ]; then
+            note "opening login as $want…"
+            env CLAUDE_CONFIG_DIR="$dir" claude auth login --email "$want" || true
+        else
+            note "opening login…"
+            env CLAUDE_CONFIG_DIR="$dir" claude auth login || true
+        fi
+    else
+        note "opening Claude — sign in, then exit it"
+        env CLAUDE_CONFIG_DIR="$dir" claude || true
+    fi
 }
 
 # Undo a registration whose login did not produce a usable, distinct account.

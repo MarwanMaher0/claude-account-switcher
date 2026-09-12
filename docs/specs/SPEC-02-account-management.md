@@ -33,16 +33,34 @@ cc add work3
    **Never** `.credentials.json`, `history.jsonl`, `projects/`, `sessions/`, or `.claude.json`.
 5. **Register** in `config.json` (appended last = lowest priority), clearing any stale state
    for that id.
-6. **Log in**: launch `env CLAUDE_CONFIG_DIR=<dir> claude` so the user completes OAuth.
-7. **Verify**: read `<dir>/.claude.json` for `oauthAccount.emailAddress`. Report the email and
-   plan on success.
-8. **Roll back** on failure: if no `oauthAccount` appears, remove the config entry and the
-   created directory, and say why. A half-registered account is worse than none, because `pick`
-   would route to a dead account.
+6. **Warn, then log in.** Before the browser opens, list the accounts already registered and say
+   that the browser signs in with whichever claude.ai account it already has open. Then run
+   `env CLAUDE_CONFIG_DIR=<dir> claude auth login` — login only, it exits when done — with
+   `--email <address>` when the user passed one. A build without `claude auth` falls back to an
+   interactive `claude` session that the user exits after signing in.
+7. **Verify**: read `<dir>/.claude.json` for `oauthAccount`. Report the email on success.
+8. **Refuse the wrong account.** Roll back when:
+   - no `oauthAccount` appears, so the login did not complete;
+   - `--email` was given and the login arrived as a different address;
+   - the login draws on the same limit as an account already registered: the same
+     `accountUuid` **and** `organizationUuid`, or the same email when either login lacks
+     those ids.
+
+   Rolling back removes the config entry and the directory `cc add` created, and says why. A
+   half-registered account is worse than none, because `pick` would route to a dead account. A
+   duplicate is worse still, because every failover would hop to an account that is already spent.
+
+**Why ids and not email.** A personal plan and a work seat can share one address yet have separate
+limits. Refusing that pair would block exactly the case this tool exists for.
+
+**Why warn first.** This was a real failure. The browser was still signed in to an account that was
+already registered, the login silently reused it, and the "new" account shared that account's
+limit. Catching it afterwards wastes the login; saying so before the browser opens prevents it.
 
 Existing directories that already hold a logged-in account may be adopted with
-`cc add <id> --dir <path> --adopt`, which skips creation and copying and goes straight to
-verification.
+`cc add <id> --dir <path> --adopt`, which skips creation, copying and login, and goes straight to
+verification. Adopting a directory that duplicates a registered account is refused, and the
+directory — which `cc add` did not create — is left in place.
 
 ## `cc remove <id>`
 
@@ -72,3 +90,15 @@ Confirmation is a typed id, not a y/n — `--purge` on the wrong account is unre
 | AC-7 | `cc remove` refuses the default account. |
 | AC-8 | `cc remove` without `--purge` leaves the directory intact; with `--purge` it requires the typed id and only then deletes. |
 | AC-9 | `cc add --adopt` registers an existing logged-in dir without copying or overwriting anything in it. |
+| AC-10 | A login that draws on the same limit as a registered account is refused, naming that account. Nothing is registered and the created directory is removed. |
+| AC-11 | A new account shares the default account's `cc-switch` plugin by symlink, and rollback never touches it. |
+| AC-12 | Signing in uses `claude auth login`, never an interactive session, when the installed `claude` has the `auth` subcommand. |
+| AC-13 | Before the browser opens, `cc add` lists the accounts already registered and warns that the browser reuses its open claude.ai session. |
+| AC-14 | The same email in a different organization is a separate limit: it is accepted, and `cc status` does not flag it. |
+| AC-15 | The same `accountUuid` and `organizationUuid` under another id is refused, whatever the case of the email. |
+| AC-16 | `--email` pre-fills the login page. A login that arrives as a different address is refused and rolled back; a matching address is accepted regardless of case. `--email` or `--dir` with no value is an error, not a hang. |
+| AC-17 | `--adopt` on a directory already signed in opens no login. Adopting a duplicate is refused and leaves the directory in place. |
+| AC-18 | A `claude` without the `auth` subcommand falls back to an interactive sign-in. |
+| AC-19 | At a terminal, `cc add` asks for the email of the account to add before creating anything. An answer works exactly like `--email`; Enter skips; an answer without `@` is refused. |
+| AC-20 | Output stays short: it starts with what is being added, shows at most four lines before the login opens, never says "registered" before the login succeeds, and on success says how to use the account. Usage shows an example. |
+| AC-21 | `cc add` works as the very first `cc` command on a machine: it creates `config.json` as every other command does, keeps the existing default account, and never shows a traceback. |

@@ -21,6 +21,7 @@ Subcommands
   is-default <id>                   exit 0 if it is the default account
   account-of [dir]                  "<id>\\t<isDefault>" for a config dir ($CLAUDE_CONFIG_DIR if omitted)
   emails                            "<id>\\t<email>" per account, email empty when not logged in
+  duplicate-of <id>                 another account drawing on the same usage limit (exit 1 if none)
   pick                              account to start on: the preferred one if free, else the first free
   next-free [used,ids]              first free account in config order, skipping those listed
   soonest [exclude]                 "<id> <epoch>" for the limited account freeing up first
@@ -230,7 +231,8 @@ def account_of(config_dir):
     return None
 
 
-def account_email(acct):
+def account_oauth(acct):
+    """The oauthAccount block Claude Code wrote at login, or {} when not signed in."""
     # The default account keeps its config at ~/.claude.json, BESIDE the directory.
     if acct.get("isDefault"):
         path = os.path.join(HOME, ".claude.json")
@@ -238,7 +240,28 @@ def account_email(acct):
         path = os.path.join(expand(acct["dir"]), ".claude.json")
     data = _load_json(path, {})
     oauth = data.get("oauthAccount") if isinstance(data, dict) else None
-    return (oauth or {}).get("emailAddress")
+    return oauth if isinstance(oauth, dict) else {}
+
+
+def account_email(acct):
+    return account_oauth(acct).get("emailAddress")
+
+
+def same_limit_pool(a, b):
+    """True when two configured accounts draw on one usage limit.
+
+    That means the same account in the same organization. An email address alone is not
+    enough: a personal plan and a work seat can share one address and still have separate
+    limits, and refusing that pair would block exactly what this tool is for. Email is
+    only the fallback when either login lacks the account and organization ids.
+    """
+    oa, ob = account_oauth(a), account_oauth(b)
+    ids = ("accountUuid", "organizationUuid")
+    if all(oa.get(k) for k in ids) and all(ob.get(k) for k in ids):
+        return all(oa[k] == ob[k] for k in ids)
+    ea = (oa.get("emailAddress") or "").lower()
+    eb = (ob.get("emailAddress") or "").lower()
+    return bool(ea) and ea == eb
 
 
 # ----------------------------------------------------------------- state ----
@@ -552,13 +575,20 @@ def cmd_status():
               f"{emails[aid] or 'not logged in':<30} {tilde(expand(acct['dir']))}"
               f"{'  (' + ', '.join(tags) + ')' if tags else ''}")
 
-    by_email = {}
+    # Group logins that draw on one limit: the same account and organization, not merely
+    # the same email address.
+    groups = []
     for acct in accts:
-        if emails[acct["id"]]:
-            by_email.setdefault(emails[acct["id"]].lower(), []).append(acct["id"])
-    for email, same in by_email.items():
-        if len(same) > 1:
-            print(f"\n  ! {' and '.join(same)} are logged in as the same account ({email}).")
+        for group in groups:
+            if same_limit_pool(group[0], acct):
+                group.append(acct)
+                break
+        else:
+            groups.append([acct])
+    for group in groups:
+        if len(group) > 1:
+            names = " and ".join(a["id"] for a in group)
+            print(f"\n  ! {names} are logged in as the same account ({emails[group[0]['id']]}).")
             print("    They share one usage limit, so switching between them gains nothing.")
 
     if nxt:
@@ -601,6 +631,14 @@ def main(argv):
     elif cmd == "emails":
         for acct in accounts():
             print(f"{acct['id']}\t{account_email(acct) or ''}")
+
+    elif cmd == "duplicate-of":
+        me = account_by_id(args[0])
+        for acct in accounts():
+            if acct["id"] != me["id"] and same_limit_pool(me, acct):
+                print(acct["id"])
+                return 0
+        return 1
 
     elif cmd == "pick":
         _refresh_quietly()

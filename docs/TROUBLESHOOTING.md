@@ -63,6 +63,27 @@ cc clear <id>
 Then please open an issue — the two known false-positive causes (expired events and copied
 events) are both guarded and tested, so a third would be a real bug worth fixing.
 
+## The account I added turned out to be one I already had
+
+`cc add` opens a claude.ai login in your browser, and the browser signs in with whichever account
+it already has open. If that is an account you have already registered, the new one would share
+its limit, so `cc add` refuses it and removes what it created:
+
+```
+'work' signed in as you@example.com — that is 'personal' again, which shares its limit.
+```
+
+Add it again in a private browser window, and type the address you mean when `cc add` asks for
+"email of the account to add". It then refuses any login that arrives as a different address.
+Scripts can pass the same answer as `--email`:
+
+```bash
+cc add work --email you@company.com
+```
+
+`cc status` flags two ids that are already signed in to the same account. Remove one with
+`cc remove <id>`.
+
 ## My browser session hit its limit
 
 Nothing here applies. claude.ai sessions authenticate through the browser login; their quota

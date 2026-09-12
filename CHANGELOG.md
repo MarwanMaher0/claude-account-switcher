@@ -15,6 +15,20 @@
 - The in-session limit notice never fired on a real limit: Claude Code runs `StopFailure`, not
   `Stop`, when a turn ends on an API error. It also mistook a copied limit for the session's own,
   and printed "resets ?" through a quoting bug that `cc-watch` shared.
+- `cc add` could register a second login of an account already registered. The browser signs in
+  with whichever claude.ai account it already has open, so the "new" account silently shared an
+  existing one's limit. `cc add` now warns before the browser opens, signs in with
+  `claude auth login` instead of a full session, accepts `--email` to pre-fill the login and refuse
+  any other address, and skips the login when adopting a directory that is already signed in.
+- The duplicate check compared email addresses, which would wrongly refuse a work seat that shares
+  an address with a personal plan. It now compares account and organization ids.
+- `cc add --dir` with no value looped forever. It is now an error.
+- `cc add` was noisy and relied on users knowing about `--email`. It printed a stray path, said
+  "registered" before the login had succeeded, and buried its one warning. It now asks for the
+  email of the account to add (Enter skips), shows at most four lines before the login opens, and
+  ends by saying how to use the new account.
+- `cc add` crashed with a Python traceback when it was the first `cc` command ever run, because
+  nothing had created the config yet.
 
 ### Added
 - `cc use <id>`: prefer an account for new sessions, in the terminal and in the VS Code panel.
