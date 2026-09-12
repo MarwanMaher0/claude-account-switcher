@@ -4,7 +4,7 @@
 set -euo pipefail
 
 DEST="${CC_INSTALL_DIR:-$HOME/.local/bin}"
-for f in cc cc-detect cc-watch; do
+for f in cc cc-detect cc-watch cc-vscode; do
     [ -f "$DEST/$f" ] && rm -f "$DEST/$f" && echo "  removed $DEST/$f"
 done
 echo

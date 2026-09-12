@@ -7,37 +7,67 @@ Claude Code writes one JSON object per line into
 A rate-limited turn carries a structured quota object:
 
   {"isApiErrorMessage": true, "apiErrorStatus": 429, "error": "rate_limit",
-   "quotaLimits": {"status": "rejected", "rateLimitType": "five_hour",
+   "timestamp": "2026-09-12T19:15:37.908Z",
+   "quotaLimits": {"status": "rejected", "rateLimitType": "seven_day",
                    "resetsAt": <epoch>}}
 
 We key on quotaLimits.status == "rejected" and read resetsAt, rather than matching the
-human-readable message, which is subject to change.
+human-readable message, which is subject to change. rateLimitType names the window
+that ran out ("five_hour", "seven_day", ...); it is displayed, never relied on.
 
 Subcommands
-  accounts                       one "<id>\\t<dir>\\t<isDefault>" per line, config order
-  dir <id>                       that account's config directory
-  is-default <id>                exit 0 if it is the default account
-  pick                           first available account id (exit 1 if all limited)
-  soonest [exclude]              "<id> <epoch>" for the limited account freeing up first
-  status                         human-readable state
-  scan <dir> <session> [cwd] [offset]   exit 0 + print resetsAt if this run hit a limit
-  size <dir> <session> [cwd]     transcript size, used as the scan offset
-  mark <id> <resets-at>          record an account as limited (0 clears)
-  slug <cwd>                     the project-dir slug for a path
-  fallback <name> <field>        read a fallbacks.<name>.<field> value
+  accounts                          one "<id>\\t<dir>\\t<isDefault>" per line, config order
+  dir <id>                          that account's config directory
+  is-default <id>                   exit 0 if it is the default account
+  account-of [dir]                  "<id>\\t<isDefault>" for a config dir ($CLAUDE_CONFIG_DIR if omitted)
+  emails                            "<id>\\t<email>" per account, email empty when not logged in
+  pick                              account to start on: the preferred one if free, else the first free
+  next-free [used,ids]              first free account in config order, skipping those listed
+  soonest [exclude]                 "<id> <epoch>" for the limited account freeing up first
+  status                            human-readable state
+  use <id>                          prefer this account for new sessions
+  refresh                           learn limits hit outside cc (the VS Code panel, a bare claude)
+  scan <dir> <session> [cwd] [offset]   "<resetsAt> [type]" if this run hit a limit
+  size <dir> <session> [cwd]        transcript size, used as the scan offset
+  session-limit <transcript> <id> <session> [own|recent]
+                                    "<resetsAt> [type]" for a limit this session hit on <id>
+  mark <id> <resets-at> [type]      set an account's limit window (0 clears)
+  raise <id> <resets-at> [type]     extend an account's limit window, never shorten it
+  record-run <id> <session>         note that a session has just started on an account
+  slug <cwd>                        the project-dir slug for a path
+  fallback <name> <field>           read a fallbacks.<name>.<field> value
+
+pick, next-free, soonest and status refresh first, so a limit hit in the VS Code panel
+is known before the next launch.
 """
+import fcntl
+import glob
 import json
 import os
 import re
+import stat
 import sys
 import time
+from contextlib import contextmanager
+from datetime import datetime
 
 HOME = os.path.expanduser("~")
 SWITCH_DIR = os.path.join(HOME, ".claude-switch")
 CONFIG = os.path.join(SWITCH_DIR, "config.json")
 STATE = os.path.join(SWITCH_DIR, "state.json")
+CACHE = os.path.join(SWITCH_DIR, "scan-cache.json")
+LOCK = os.path.join(SWITCH_DIR, ".lock")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+# A weekly window plus a margin: no older transcript or run can hold a live limit.
+HORIZON = 8 * 86400
+# How much of a transcript's end is read the first time it is seen. Nothing useful
+# can follow a limit on the same account, so a live one sits near the end.
+TAIL = 1024 * 1024
+
+LIMIT_NAMES = {"five_hour": "5-hour", "seven_day": "weekly",
+               "seven_day_opus": "weekly Opus", "seven_day_sonnet": "weekly Sonnet"}
 
 
 class ConfigError(Exception):
@@ -49,19 +79,46 @@ def expand(path):
     return os.path.abspath(os.path.expanduser(path))
 
 
+def tilde(path):
+    return "~" + path[len(HOME):] if path == HOME or path.startswith(HOME + os.sep) else path
+
+
 def slugify(path):
     """Claude Code's project-dir naming: non-alphanumerics become dashes."""
     return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(path))
 
 
+def _load_json(path, default):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
 def _write_private(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     os.chmod(os.path.dirname(path), 0o700)
-    tmp = path + ".tmp"
+    # per-process temp name: a hook and a launcher can write at the same moment
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as fh:
         json.dump(data, fh, indent=2)
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+@contextmanager
+def state_lock():
+    """Serialise read-modify-write of state.json. Hooks in several sessions and the
+    launcher all record limits, and a lost update is a forgotten limit."""
+    os.makedirs(SWITCH_DIR, exist_ok=True)
+    fd = os.open(LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 # ---------------------------------------------------------------- config ----
@@ -87,11 +144,7 @@ def migrate():
     _write_private(CONFIG, cfg)
 
     # Carry limit windows over from numeric keys.
-    try:
-        with open(STATE) as fh:
-            old = json.load(fh)
-    except (OSError, ValueError):
-        old = {}
+    old = _load_json(STATE, {})
     old_accounts = old.get("accounts", {})
     if any(k.isdigit() for k in old_accounts):
         mapping = {"1": accounts[0]["id"]}
@@ -168,13 +221,29 @@ def account_by_id(aid):
     raise ConfigError(f"no such account: {aid}")
 
 
+def account_of(config_dir):
+    """The configured account a config dir belongs to. Unset means the default."""
+    real = os.path.realpath(expand(config_dir) if config_dir else DEFAULT_DIR)
+    for acct in accounts():
+        if os.path.realpath(expand(acct["dir"])) == real:
+            return acct
+    return None
+
+
+def account_email(acct):
+    # The default account keeps its config at ~/.claude.json, BESIDE the directory.
+    if acct.get("isDefault"):
+        path = os.path.join(HOME, ".claude.json")
+    else:
+        path = os.path.join(expand(acct["dir"]), ".claude.json")
+    data = _load_json(path, {})
+    oauth = data.get("oauthAccount") if isinstance(data, dict) else None
+    return (oauth or {}).get("emailAddress")
+
+
 # ----------------------------------------------------------------- state ----
 def load_state():
-    try:
-        with open(STATE) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return {"version": 2, "accounts": {}}
+    return _load_json(STATE, {"version": 2, "accounts": {}})
 
 
 def save_state(state):
@@ -185,11 +254,35 @@ def limited_until(state, aid):
     return int(state.get("accounts", {}).get(aid, {}).get("limitedUntil", 0) or 0)
 
 
+def limit_type(state, aid):
+    return state.get("accounts", {}).get(aid, {}).get("limitType")
+
+
+def raise_limit(state, aid, resets, ltype=None):
+    """Record a limit window, never shortening one already known. True if changed."""
+    entry = state.setdefault("accounts", {}).setdefault(aid, {})
+    resets = int(resets)
+    if resets > limited_until(state, aid):
+        entry["limitedUntil"] = resets
+        if ltype:
+            entry["limitType"] = ltype
+        else:
+            entry.pop("limitType", None)
+        return True
+    if resets == limited_until(state, aid) and ltype and not entry.get("limitType"):
+        entry["limitType"] = ltype
+        return True
+    return False
+
+
 def pick(state=None):
-    """First account in config order whose limit window has passed, else None."""
+    """The preferred account if its window has passed, else the first free one in
+    config order, else None."""
     state = state or load_state()
     now = time.time()
-    for acct in accounts():
+    preferred = state.get("preferred")
+    ordered = sorted(accounts(), key=lambda a: a["id"] != preferred)  # stable sort
+    for acct in ordered:
         if limited_until(state, acct["id"]) <= now:
             return acct["id"]
     return None
@@ -212,6 +305,34 @@ def soonest(state=None, exclude=()):
     return aid, limited_until(state, aid)
 
 
+# ------------------------------------------------------------------ runs ----
+def record_run(aid, session):
+    now = time.time()
+    with state_lock():
+        state = load_state()
+        runs = [r for r in state.get("runs", []) if r.get("startedAt", 0) > now - HORIZON]
+        runs.append({"session": session, "account": aid, "startedAt": int(now)})
+        state["runs"] = runs[-1000:]
+        save_state(state)
+
+
+def latest_run(runs, session, aid=None, before=None):
+    """The most recent recorded run of a session, optionally on one account or
+    started no later than a moment (with two seconds of clock slack)."""
+    best = None
+    for run in runs:
+        if run.get("session") != session:
+            continue
+        if aid is not None and run.get("account") != aid:
+            continue
+        started = run.get("startedAt", 0)
+        if before is not None and started > before + 2:
+            continue
+        if best is None or started >= best.get("startedAt", 0):
+            best = run
+    return best
+
+
 # ------------------------------------------------------------ transcripts ----
 def transcript_path(config_dir, session_id, cwd=None):
     proj = os.path.join(expand(config_dir), "projects", slugify(cwd or os.getcwd()))
@@ -225,8 +346,44 @@ def size_of(config_dir, session_id, cwd=None):
         return 0
 
 
+def parse_ts(value):
+    """Epoch seconds from a transcript timestamp such as 2026-09-12T19:15:37.908Z."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def limit_events(chunk, now=None):
+    """Unexpired usage-limit events in a block of transcript bytes."""
+    now = time.time() if now is None else now
+    found = []
+    for line in chunk.split(b"\n"):
+        if b'"quotaLimits"' not in line or b'"rejected"' not in line:   # cheap prefilter
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue                        # partial first line from a tail seek
+        quota = obj.get("quotaLimits") if isinstance(obj, dict) else None
+        if not isinstance(quota, dict) or quota.get("status") != "rejected":
+            continue
+        resets = quota.get("resetsAt")
+        # An event whose window has already elapsed is history, not a reason to
+        # switch — otherwise an old limit in the tail triggers a handoff on every
+        # later exit.
+        if not isinstance(resets, (int, float)) or resets <= now:
+            continue
+        found.append({"uuid": obj.get("uuid"), "resetsAt": int(resets),
+                      "type": quota.get("rateLimitType"),
+                      "ts": parse_ts(obj.get("timestamp"))})
+    return found
+
+
 def scan(config_dir, session_id, cwd=None, offset=0):
-    """Return the resetsAt epoch if THIS RUN hit a rate limit, else None.
+    """The limit event THIS RUN hit (latest reset), else None.
 
     `offset` is the transcript's byte size captured just before the run started, so
     only newly appended turns count. This matters after a handoff: the transcript
@@ -234,84 +391,219 @@ def scan(config_dir, session_id, cwd=None, offset=0):
     the offset the receiving account would re-read it and mark itself limited too.
     """
     path = transcript_path(config_dir, session_id, cwd)
-    if not os.path.exists(path):
-        return None
-
     cap = 64 * 1024 * 1024  # never scan more than this, however long the run
     try:
         with open(path, "rb") as fh:
             size = fh.seek(0, os.SEEK_END)
-            start = max(int(offset or 0), size - cap, 0)
-            fh.seek(start)
-            chunk = fh.read().decode("utf-8", errors="replace")
+            fh.seek(max(int(offset or 0), size - cap, 0))
+            chunk = fh.read()
     except OSError:
         return None
+    events = limit_events(chunk)
+    return max(events, key=lambda e: e["resetsAt"]) if events else None
 
+
+def session_limit(path, since):
+    """Newest limit event in a transcript written at or after `since`."""
+    try:
+        with open(path, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - 8 * TAIL))
+            chunk = fh.read()
+    except OSError:
+        return None
+    events = [e for e in limit_events(chunk) if e["ts"] is not None and e["ts"] >= since - 2]
+    return max(events, key=lambda e: e["ts"]) if events else None
+
+
+def _events_for(path, st, entry, now):
+    """Limit events in one transcript, reading only what was appended since the
+    last look. Returns (events, cache entry)."""
+    resuming = bool(entry) and entry.get("ino") == st.st_ino and st.st_size >= entry.get("size", 0)
+    if resuming and st.st_size == entry.get("size"):
+        events = [e for e in entry.get("events", []) if e["resetsAt"] > now]
+        return events, dict(entry, events=events)
+
+    start = entry["size"] if resuming else max(0, st.st_size - TAIL)
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            raw = fh.read(st.st_size - start)
+    except OSError:
+        return [], None
+
+    body = 0
+    if start > 0 and not resuming:          # a tail read lands mid-line
+        nl = raw.find(b"\n")
+        body = nl + 1 if nl >= 0 else len(raw)
+    end = max(raw.rfind(b"\n") + 1, body)   # stop after the last complete line
+    events = (entry.get("events", []) if resuming else []) + limit_events(raw[body:end], now)
+    events = [e for e in events if e["resetsAt"] > now]
+    return events, {"ino": st.st_ino, "size": start + end, "events": events}
+
+
+def refresh():
+    """Learn limits hit outside `cc` — in the VS Code panel or a bare `claude` — from
+    every account's recent transcripts, and record them in state.
+
+    Attribution is the hard part. Conversations are copied or linked between
+    accounts when they move, so a limit event can sit in a directory that does not
+    own it. An event is pinned on:
+      1. the account of the latest recorded run of that session that started before
+         the event (cc and the plugin's SessionStart hook record runs); otherwise
+      2. the only account whose copy of that session holds the event.
+    Anything still ambiguous is skipped. A missed limit costs one extra 429; a
+    wrong one would keep a healthy account out of rotation.
+    """
     now = time.time()
-    latest = None
-    for line in chunk.splitlines():
-        if '"quotaLimits"' not in line:      # cheap prefilter before the JSON parse
-            continue
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue                        # partial first line from the tail seek
-        quota = obj.get("quotaLimits") or {}
-        if quota.get("status") != "rejected":
-            continue
-        resets = quota.get("resetsAt")
-        # An event whose window has already elapsed is history, not a reason to
-        # switch — otherwise an old limit in the tail triggers a handoff on every
-        # later exit.
-        if resets and resets > now and (latest is None or resets > latest):
-            latest = int(resets)
-    return latest
+    accts = accounts()
+    ids = {a["id"] for a in accts}
+    old = _load_json(CACHE, {})
+    if not isinstance(old, dict):
+        old = {}
+    cache, holders, candidates = {}, {}, []
+
+    for acct in accts:
+        pattern = os.path.join(glob.escape(expand(acct["dir"])), "projects", "*", "*.jsonl")
+        for path in glob.glob(pattern):
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode) or st.st_mtime < now - HORIZON:
+                continue
+            events, entry = _events_for(path, st, old.get(path), now)
+            if entry is not None:
+                cache[path] = entry
+            session = os.path.basename(path)[:-len(".jsonl")]
+            for ev in events:
+                holders.setdefault((session, ev["uuid"]), set()).add(acct["id"])
+                candidates.append((session, ev))
+
+    if cache != old:
+        _write_private(CACHE, cache)
+    if not candidates:
+        return
+
+    with state_lock():
+        state = load_state()
+        runs = state.get("runs", [])
+        changed = False
+        for session, ev in candidates:
+            run = latest_run(runs, session, before=ev["ts"]) if ev["ts"] else None
+            owner = run.get("account") if run else None
+            if owner is None and ev["uuid"]:
+                held = holders.get((session, ev["uuid"]), set())
+                owner = next(iter(held)) if len(held) == 1 else None
+            if owner in ids:
+                changed = raise_limit(state, owner, ev["resetsAt"], ev["type"]) or changed
+        if changed:
+            save_state(state)
+
+
+def _refresh_quietly():
+    try:
+        refresh()
+    except ConfigError:
+        raise
+    except Exception as exc:  # bookkeeping must never stop a launch
+        print(f"cc-detect: could not read transcripts for limits: {exc}", file=sys.stderr)
 
 
 # ------------------------------------------------------------------ main ----
+def fmt_until(epoch, now):
+    """Clock time, with the weekday once the reset is more than 20 hours away."""
+    fmt = "%H:%M" if epoch - now < 20 * 3600 else "%a %H:%M"
+    return time.strftime(fmt, time.localtime(epoch))
+
+
+def fmt_left(seconds):
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours} h {minutes} min"
+    days, hours = divmod(hours, 24)
+    return f"{days} d {hours} h"
+
+
 def cmd_status():
     state = load_state()
     now = time.time()
-    for acct in accounts():
-        aid, adir = acct["id"], expand(acct["dir"])
-        until = limited_until(state, aid)
-        tag = " (default)" if acct.get("isDefault") else ""
-        if until > now:
-            when = time.strftime("%H:%M", time.localtime(until))
-            mins = int((until - now) / 60)
-            print(f"  {aid:<12} LIMITED until {when} ({mins} min){tag}  {adir}")
-        else:
-            print(f"  {aid:<12} available{'':<22}{tag}  {adir}")
-
+    accts = accounts()
     nxt = pick(state)
+    preferred = state.get("preferred")
+    emails = {a["id"]: account_email(a) for a in accts}
+    width = max(len(a["id"]) for a in accts)
+
+    for acct in accts:
+        aid = acct["id"]
+        until = limited_until(state, aid)
+        if until > now:
+            ltype = limit_type(state, aid)
+            kind = f" · {LIMIT_NAMES.get(ltype, ltype)}" if ltype else ""
+            label = f"LIMITED{kind} until {fmt_until(until, now)} ({fmt_left(until - now)})"
+        else:
+            label = "available"
+        tags = [name for name, on in (("default", acct.get("isDefault")),
+                                      ("preferred", aid == preferred)) if on]
+        print(f"  {'▶' if aid == nxt else ' '} {aid:<{width}}  {label:<44} "
+              f"{emails[aid] or 'not logged in':<30} {tilde(expand(acct['dir']))}"
+              f"{'  (' + ', '.join(tags) + ')' if tags else ''}")
+
+    by_email = {}
+    for acct in accts:
+        if emails[acct["id"]]:
+            by_email.setdefault(emails[acct["id"]].lower(), []).append(acct["id"])
+    for email, same in by_email.items():
+        if len(same) > 1:
+            print(f"\n  ! {' and '.join(same)} are logged in as the same account ({email}).")
+            print("    They share one usage limit, so switching between them gains nothing.")
+
     if nxt:
         print(f"\n  next launch -> {nxt}")
     else:
         aid, until = soonest(state)
-        when = time.strftime("%H:%M", time.localtime(until)) if until else "?"
+        when = fmt_until(until, now) if until else "?"
         print(f"\n  all accounts limited — {aid} frees up first at {when}")
+
+
+def _print_limit(ev):
+    print(f"{ev['resetsAt']} {ev['type'] or ''}".strip())
 
 
 def main(argv):
     if len(argv) < 2:
         print(__doc__.strip())
         return 2
-    cmd = argv[1]
+    cmd, args = argv[1], argv[2:]
 
     if cmd == "slug":
-        print(slugify(argv[2] if len(argv) > 2 else os.getcwd()))
+        print(slugify(args[0] if args else os.getcwd()))
 
     elif cmd == "accounts":
         for acct in accounts():
             print(f"{acct['id']}\t{expand(acct['dir'])}\t{int(bool(acct.get('isDefault')))}")
 
     elif cmd == "dir":
-        print(expand(account_by_id(argv[2])["dir"]))
+        print(expand(account_by_id(args[0])["dir"]))
 
     elif cmd == "is-default":
-        return 0 if account_by_id(argv[2]).get("isDefault") else 1
+        return 0 if account_by_id(args[0]).get("isDefault") else 1
+
+    elif cmd == "account-of":
+        acct = account_of(args[0] if args and args[0] else os.environ.get("CLAUDE_CONFIG_DIR"))
+        if not acct:
+            return 1
+        print(f"{acct['id']}\t{int(bool(acct.get('isDefault')))}")
+
+    elif cmd == "emails":
+        for acct in accounts():
+            print(f"{acct['id']}\t{account_email(acct) or ''}")
 
     elif cmd == "pick":
+        _refresh_quietly()
         chosen = pick()
         if not chosen:
             return 1
@@ -321,7 +613,8 @@ def main(argv):
         # First available account, in config order, excluding ids already used in
         # this run. Comma-separated exclusions. Exit 1 when nothing is left, which
         # is how `cc` knows tier 1 is exhausted.
-        exclude = set(filter(None, (argv[2] if len(argv) > 2 else "").split(",")))
+        _refresh_quietly()
+        exclude = set(filter(None, (args[0] if args else "").split(",")))
         state, now = load_state(), time.time()
         for acct in accounts():
             if acct["id"] in exclude:
@@ -332,38 +625,83 @@ def main(argv):
         return 1
 
     elif cmd == "soonest":
-        exclude = set(filter(None, (argv[2] if len(argv) > 2 else "").split(",")))
+        _refresh_quietly()
+        exclude = set(filter(None, (args[0] if args else "").split(",")))
         aid, until = soonest(exclude=exclude)
         if not aid:
             return 1
         print(f"{aid} {until}")
 
     elif cmd == "status":
+        _refresh_quietly()
         cmd_status()
 
+    elif cmd == "use":
+        aid = args[0] if args else ""
+        account_by_id(aid)                      # fail loudly on an unknown id
+        with state_lock():
+            state = load_state()
+            state["preferred"] = aid
+            save_state(state)
+
+    elif cmd == "refresh":
+        refresh()
+
     elif cmd == "size":
-        cwd = argv[4] if len(argv) > 4 else None
-        print(size_of(argv[2], argv[3], cwd))
+        print(size_of(args[0], args[1], args[2] if len(args) > 2 else None))
 
     elif cmd == "scan":
-        cwd = argv[4] if len(argv) > 4 else None
-        offset = int(argv[5]) if len(argv) > 5 else 0
-        resets = scan(argv[2], argv[3], cwd, offset)
-        if resets:
-            print(resets)
-            return 0
-        return 1
+        cwd = args[2] if len(args) > 2 else None
+        offset = int(args[3]) if len(args) > 3 else 0
+        ev = scan(args[0], args[1], cwd, offset)
+        if not ev:
+            return 1
+        _print_limit(ev)
 
-    elif cmd == "mark":
-        aid, resets = argv[2], int(argv[3])
+    elif cmd == "session-limit":
+        # For hooks running inside a session. `own` counts only a limit written
+        # since this session's recorded run started on <id>, and needs that record.
+        # `recent` also accepts the last 15 minutes when no run was recorded —
+        # used by the StopFailure hook, which fires the moment the limit lands.
+        path, aid, session = args[0], args[1], args[2]
+        mode = args[3] if len(args) > 3 else "own"
+        run = latest_run(load_state().get("runs", []), session, aid=aid)
+        started = run.get("startedAt") if run else None
+        if mode == "own":
+            if started is None:
+                return 1
+            since = started
+        else:
+            since = max(time.time() - 900, started or 0)
+        ev = session_limit(path, since)
+        if not ev:
+            return 1
+        _print_limit(ev)
+
+    elif cmd in ("mark", "raise"):
+        aid, resets = args[0], int(args[1])
+        ltype = args[2] if len(args) > 2 else None
         account_by_id(aid)                      # fail loudly on an unknown id
-        state = load_state()
-        state.setdefault("accounts", {}).setdefault(aid, {})["limitedUntil"] = resets
-        save_state(state)
+        with state_lock():
+            state = load_state()
+            if cmd == "raise":
+                raise_limit(state, aid, resets, ltype)
+            else:
+                entry = state.setdefault("accounts", {}).setdefault(aid, {})
+                entry["limitedUntil"] = resets
+                if ltype and resets:
+                    entry["limitType"] = ltype
+                else:
+                    entry.pop("limitType", None)
+            save_state(state)
+
+    elif cmd == "record-run":
+        account_by_id(args[0])
+        record_run(args[0], args[1])
 
     elif cmd == "fallback":
-        cfg = load_config().get("fallbacks", {}).get(argv[2], {})
-        value = cfg.get(argv[3])
+        cfg = load_config().get("fallbacks", {}).get(args[0], {})
+        value = cfg.get(args[1])
         if value is None or value is False:
             return 1
         print("" if value is True else value)

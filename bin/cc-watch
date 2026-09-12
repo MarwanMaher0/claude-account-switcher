@@ -36,7 +36,8 @@ while :; do
     resets="$("$DETECT" scan "$CONFIG_DIR" "$SESSION" "$CWD" "$OFFSET" 2>/dev/null)" || continue
     [ -n "$resets" ] || continue
 
-    when=$(date -d \"@$resets\" '+%H:%M' 2>/dev/null || date -r \"$resets\" '+%H:%M' 2>/dev/null || echo '?')
+    resets="${resets%% *}"            # "<epoch> <window type>"
+    when=$(date -d "@$resets" '+%H:%M' 2>/dev/null || date -r "$resets" '+%H:%M' 2>/dev/null || echo '?')
     printf '\n%s%s[cc] rate limit hit — resets %s%s\n' "$c_bold" "$c_yel" "$when" "$c_rst" >&2
     printf '%s[cc] ending this run to switch accounts…%s\n\n' "$c_yel" "$c_rst" >&2
 

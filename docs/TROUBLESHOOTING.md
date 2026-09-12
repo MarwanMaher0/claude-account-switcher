@@ -46,8 +46,9 @@ If the shim is broken, reinstall Claude Code, or put a working binary earlier on
 
 Three common reasons:
 
-1. **The session was not started by `cc`.** Sessions from the VS Code extension, or from running
-   `claude` directly, have no wrapper and will not fail over.
+1. **The session was not started by `cc`.** A bare `claude` has no wrapper and will not fail over.
+   For the VS Code panel, run `cc vscode on` once; after a limit, reload the window
+   (Developer: Reload Window) to continue on the next account.
 2. **`--manual` was used**, which disables the watcher. Switching then happens only when you quit.
 3. **Every account is limited.** `cc status` shows when the first one frees up.
 
@@ -56,7 +57,7 @@ Three common reasons:
 Run `cc status`. If an account shows as limited when it is not, clear it:
 
 ```bash
-cc-detect mark <id> 0
+cc clear <id>
 ```
 
 Then please open an issue — the two known false-positive causes (expired events and copied

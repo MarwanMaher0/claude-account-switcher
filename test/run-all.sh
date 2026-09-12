@@ -6,7 +6,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rc=0
 
-for suite in test-config.sh test-launch.sh test-accounts.sh test-plugin.sh test-security.sh; do
+for suite in test-config.sh test-launch.sh test-accounts.sh test-plugin.sh test-vscode.sh test-security.sh; do
     echo
     bash "$HERE/$suite" || rc=1
 done

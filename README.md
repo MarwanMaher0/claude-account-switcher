@@ -99,17 +99,19 @@ claude plugin marketplace add MarwanMaher0/claude-account-switcher
 claude plugin install cc-switch
 ```
 
-Adds two hooks: one names the account at session start, the other announces a rate limit the
-moment it lands — useful because Claude Code itself stays silent and simply keeps the session
-open. Roughly 74 tokens of always-on context.
+Adds three hooks: one names the account at session start, one records a rate limit the moment it
+lands (and moves the VS Code panel when `cc vscode on` is set), and one tells you how to continue
+instead of sending your next message into another 429. Roughly 74 tokens of always-on context.
 </details>
 
 ## Quickstart
 
 ```bash
-cc status            # your accounts, and which are limited
+cc status            # your accounts, which are limited, and until when
 cc add work          # create, log in and register another account
 cc                   # start on whichever account is free
+cc use work          # prefer one account for new sessions
+cc vscode on         # keep the VS Code panel on a free account too
 ```
 
 Your existing account is detected on first run — there is nothing to configure to get started.
@@ -118,13 +120,17 @@ Your existing account is detected on first run — there is nothing to configure
 
 | Command | What it does |
 |---|---|
-| `cc` | Start on the first available account. Fails over on a limit. |
-| `cc status` | Every account, its email, and any limit with its reset time. |
-| `cc add <id>` | Create `~/.claude-<id>`, copy your settings, log in, register. |
+| `cc` | Start on the preferred account if it is free, else the first free one. Fails over on a limit. |
+| `cc use <id>` | Prefer an account for new sessions, in the terminal and in the VS Code panel. |
+| `cc status` | Every account, its email, which window it hit (5-hour or weekly) and when that resets. Flags two ids logged into the same account. |
+| `cc add <id>` | Create `~/.claude-<id>`, copy your settings, log in, register. Refuses a login that duplicates an existing account. |
 | `cc add <id> --dir <path> --adopt` | Register a directory that is already logged in. |
 | `cc remove <id>` | Deregister. Add `--purge` to delete the directory too. |
-| `cc --acct <id>` | Force a specific account. |
+| `cc clear <id>` | Forget a limit recorded for an account. |
+| `cc vscode on` / `off` | Keep the VS Code Claude panel on a free account, carrying recent chats across. |
+| `cc --acct <id>` | Force a specific account for one run. |
 | `cc --manual` | Do not end a run automatically when a limit lands. |
+| `cc -- <args>` | Hand anything else to `claude` unchanged. A bare word that is not a command is refused. |
 
 ## How failover works
 
@@ -153,6 +159,24 @@ Detection keys on the structured `quotaLimits` field the client records, not on 
 human-readable message, which can be reworded at any time. A 429 alone is not enough: transient
 server-side throttling looks similar but carries no quota payload, and switching on it would be
 pointless — the next account talks to the same servers.
+
+Limits hit anywhere else — in the VS Code panel, or in a bare `claude` — are read back from the
+transcripts before every launch, so `cc` never starts on an account that is already spent.
+
+### In the VS Code panel
+
+The panel starts Claude itself, so there is no launcher to restart it. `cc vscode on` sets
+`CLAUDE_CONFIG_DIR` for the panel through VS Code's own `claudeCode.environmentVariables` setting,
+which the extension follows.
+
+1. When the panel's account hits a limit, the plugin's `StopFailure` hook records it and moves the
+   setting to the next free account, hard-linking the last week's chats across so they can resume.
+2. Your next message is not sent into another 429. The `UserPromptSubmit` hook answers instead:
+   which limit, when it resets, and to run **Developer: Reload Window**.
+3. After the reload, open chats resume on the new account with their history.
+
+The default account is never written into that setting, for the reason below — selecting it removes
+the variable instead.
 
 ## When every account is spent
 
@@ -183,9 +207,10 @@ account at `~/.claude`, and a test asserts both.
 
 - **It cannot switch a session that is already running.** `CLAUDE_CONFIG_DIR` and the credentials
   are read once at process start, so no hook, plugin or command can rebind them. Every switch is
-  between runs. Anything claiming otherwise is wrong.
-- **It only governs sessions it launched.** Sessions started by the VS Code extension, or by
-  running `claude` directly, have no wrapper around them and will not fail over.
+  between runs: in the terminal `cc` restarts the run for you, in the VS Code panel you reload the
+  window. Anything claiming otherwise is wrong.
+- **Only `cc` restarts a run by itself.** A bare `claude` has nothing around it. Its limits are
+  still learned from the transcript, so the next `cc` launch skips that account.
 - **It has nothing to do with claude.ai in a browser.** A web session's account comes from the
   browser login, its quota cannot be redirected locally, and conversations cannot move between
   accounts.
@@ -202,7 +227,10 @@ account at `~/.claude`, and a test asserts both.
   runtime.
 - `cc add` copies exactly two files into a new account: `settings.json` and `CLAUDE.md`.
 - Failover copies your session transcript between config directories **on your own machine**, so
-  the conversation can continue. It never leaves the machine.
+  the conversation can continue. With `cc vscode on`, a switch also hard-links the last week's chats
+  into the account the panel moves to. Nothing leaves the machine.
+- `cc vscode on` edits exactly one key in VS Code's user settings, `claudeCode.environmentVariables`,
+  in place, after backing the file up to `~/.claude-switch/vscode-settings.backup.json`.
 
 See [SECURITY.md](SECURITY.md) for the full list and how to report an issue.
 

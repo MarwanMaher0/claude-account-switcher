@@ -111,4 +111,24 @@ assert_contains "$out" "deleted" "AC-8 correct confirmation purges"
 [ -d "$HOME/.claude-2" ] && no "AC-8 directory actually deleted" || ok "AC-8 directory actually deleted"
 cleanup_home
 
+# ---- AC-10 / AC-11 : a second login of the same account; the plugin is shared -
+new_home >/dev/null; stub_claude
+"$BIN/cc-detect" accounts >/dev/null
+export STUB_MODE=login
+mkdir -p "$HOME/.claude/skills/cc-switch"
+
+"$BIN/cc" add work3 >/dev/null 2>&1
+[ -L "$HOME/.claude-work3/skills/cc-switch" ] && ok "AC-11 a new account shares the cc-switch plugin" \
+    || no "AC-11 a new account shares the cc-switch plugin"
+
+# the stub logs every add in as new@example.com — exactly the browser mistake
+out="$("$BIN/cc" add work4 2>&1)"; rc=$?
+assert_eq "$rc" "1" "AC-10 a second login of the same account is refused"
+assert_contains "$out" "same account as 'work3'" "AC-10 ...naming the account it duplicates"
+assert_not_contains "$("$BIN/cc-detect" accounts)" "work4" "AC-10 nothing is registered"
+[ -d "$HOME/.claude-work4" ] && no "AC-10 its directory is removed" || ok "AC-10 its directory is removed"
+[ -L "$HOME/.claude/skills/cc-switch" ] || [ -d "$HOME/.claude/skills/cc-switch" ] \
+    && ok "AC-10 rollback never touches the shared plugin" || no "AC-10 rollback never touches the shared plugin"
+cleanup_home
+
 summary

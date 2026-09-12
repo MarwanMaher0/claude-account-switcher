@@ -145,7 +145,8 @@ cat > "$d/$sid.jsonl" <<EOF
 {"type":"assistant","uuid":"b","isApiErrorMessage":true,"apiErrorStatus":429,"error":"rate_limit","quotaLimits":{"status":"rejected","rateLimitType":"five_hour","resetsAt":$future},"message":{"content":[{"type":"text","text":"real limit"}]}}
 EOF
 got="$("$BIN/cc-detect" scan "$HOME/.claude" "$sid" "$PWD" 2>/dev/null)"
-assert_eq "$got" "$future" "a real usage limit is still detected alongside a transient one"
+assert_eq "${got%% *}" "$future" "a real usage limit is still detected alongside a transient one"
+assert_eq "${got#* }" "five_hour" "the window type is reported after the reset time"
 
 # and a rejected quota with no resetsAt must not be trusted as a limit window
 sid="rejected-no-reset"

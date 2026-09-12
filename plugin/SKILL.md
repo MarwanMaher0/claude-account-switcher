@@ -13,7 +13,9 @@ No third-party switcher tools are involved.
 | `claude`  | `~/.claude`   | default account; runs with `CLAUDE_CONFIG_DIR` **unset** |
 | `claude2` | `~/.claude-2` | second account |
 | `cc`      | picks a free account | fails over on a rate limit |
-| `cc status` | — | who is limited, until when |
+| `cc use <id>` | — | prefer an account for new sessions, terminal and VS Code panel |
+| `cc status` | — | who is limited, by which window (5-hour / weekly), until when |
+| `cc vscode on` | — | keeps the VS Code panel on a free account |
 | `cc --manual` | — | never ends a run automatically |
 
 ## The one rule that matters
@@ -24,7 +26,9 @@ server can rebind them. Anything that claims otherwise is wrong — the switch
 always requires a new process.
 
 So when the user hits a limit, the honest answer is: exit, then run `cc`. If the
-session was started by `cc`, that happens on its own.
+session was started by `cc`, that happens on its own. In the VS Code panel with
+`cc vscode on`, the plugin has already pointed the panel at a free account and
+carried recent chats across — the user runs "Developer: Reload Window".
 
 ## Never set CLAUDE_CONFIG_DIR to the default account's own path
 
@@ -70,8 +74,9 @@ Two traps, both already fixed in `cc-detect`:
 
 ## Scope limits — state these rather than guessing
 
-- `cc` only governs sessions **it** launched. Sessions from the VSCode extension
-  or bare `claude` / `claude2` have no wrapper and will not fail over.
+- `cc` restarts only sessions **it** launched. The VS Code panel follows once
+  `cc vscode on` is set, after a window reload. A bare `claude` / `claude2` does
+  not switch, though its limits are still recorded for the next `cc` launch.
 - **claude.ai in a browser is unrelated.** Its account comes from the browser
   login, its quota cannot be redirected by anything local, and a conversation
   cannot be moved between accounts. The only option is a separate browser profile

@@ -9,12 +9,16 @@
 # An account is bound at process start (CLAUDE_CONFIG_DIR is read once), so a live
 # session can never change accounts — every handoff is between runs.
 #
-#   cc                     start on a healthy account
-#   cc status              which accounts are limited, and until when
+#   cc                     start on a healthy account (the preferred one while it is free)
+#   cc use <id>            prefer an account for new sessions — terminal and VS Code panel
+#   cc status              which accounts are limited, by which window, until when
 #   cc add <id>            create, log in and register another account
 #   cc remove <id>         deregister an account  (--purge also deletes its dir)
-#   cc --acct <id>         force a specific account
+#   cc clear <id>          forget a limit recorded for an account
+#   cc vscode on|off       keep the VS Code panel on an account with quota left
+#   cc --acct <id>         force a specific account for this run
 #   cc --manual            never end a run automatically on a limit
+#   cc -- <claude args>    hand anything else straight to claude
 #
 # Config: ~/.claude-switch/config.json    State: ~/.claude-switch/state.json
 
@@ -23,6 +27,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DETECT="$HERE/cc-detect"
 WATCH="$HERE/cc-watch"
+VSCODE="$HERE/cc-vscode"
 AUTOKILL=1
 
 c_dim=$'\033[2m'; c_yel=$'\033[33m'; c_grn=$'\033[32m'; c_bold=$'\033[1m'; c_rst=$'\033[0m'
@@ -77,20 +82,26 @@ run_acct() {
 new_session() { python3 -c 'import uuid; print(uuid.uuid4())'; }
 
 # GNU `date -d @epoch` and BSD/macOS `date -r epoch` do the same job with
-# different flags. Try both rather than assuming GNU coreutils.
+# different flags. Try both rather than assuming GNU coreutils. A reset more than
+# 20 hours away gets its weekday — "07:00" for a weekly limit reads as today.
 fmt_time() {
-    date -d "@$1" '+%H:%M' 2>/dev/null || date -r "$1" '+%H:%M' 2>/dev/null || echo '?'
+    local fmt='+%H:%M'
+    [ $(( $1 - $(date +%s) )) -gt 72000 ] 2>/dev/null && fmt='+%a %H:%M'
+    date -d "@$1" "$fmt" 2>/dev/null || date -r "$1" "$fmt" 2>/dev/null || echo '?'
+}
+
+# Keep the VS Code panel on the account a launch would pick. Silent, and a no-op
+# unless `cc vscode on` was run.
+sync_vscode() {
+    [ -x "$VSCODE" ] && "$VSCODE" sync --quiet >/dev/null 2>&1
+    return 0
 }
 
 # ---- cc status --------------------------------------------------------------
 cmd_status() {
     echo
     "$DETECT" status || return $?
-    echo
-    while IFS=$'\t' read -r id dir def; do
-        [ -n "$id" ] || continue
-        printf '  %-12s %s\n' "$id" "$(acct_email "$dir" "$def")"
-    done < <("$DETECT" accounts)
+    [ -x "$VSCODE" ] && "$VSCODE" status
     echo
 }
 
@@ -144,6 +155,12 @@ PY
         for f in settings.json CLAUDE.md; do
             [ -f "$src/$f" ] && cp -p "$src/$f" "$dir/$f" && note "copied $f"
         done
+        # The cc-switch plugin's hooks record limits inside sessions. Share the
+        # default account's copy rather than installing it again per account.
+        if [ -d "$src/skills/cc-switch" ]; then
+            mkdir -p "$dir/skills" && ln -s "$src/skills/cc-switch" "$dir/skills/cc-switch" \
+                && note "linked the cc-switch plugin"
+        fi
     fi
 
     # Register before login so the dir is discoverable, then roll back if login fails.
@@ -175,7 +192,30 @@ PY
     email="$(acct_email "$dir" 0)"
     if [ "$email" = "not logged in" ]; then
         warn "no account logged in at $dir — rolling back"
-        python3 - "$id" <<'PY'
+        rollback_add "$id" "$created" "$dir"
+        die "cc add: login did not complete — nothing was registered"
+    fi
+
+    # Two logins of one account share one usage limit, so a second adds nothing but
+    # a wasted hop on every failover. Easy to do by accident: the browser signs in
+    # with whichever claude.ai account it already has open.
+    local dup
+    dup="$("$DETECT" emails | awk -F'\t' -v me="$id" -v e="$email" \
+        'tolower($2) == tolower(e) && $1 != me { print $1; exit }')"
+    if [ -n "$dup" ]; then
+        warn "'$id' signed in as $email — the same account as '$dup', so they would share one limit."
+        warn "sign out of claude.ai in your browser (or use a private window), then add it again — rolling back"
+        rollback_add "$id" "$created" "$dir"
+        die "cc add: duplicate login — nothing was registered"
+    fi
+    good "'$id' is $email"
+    cmd_status
+}
+
+# Undo a registration whose login did not produce a usable, distinct account.
+rollback_add() {
+    local id="$1" created="$2" dir="$3"
+    python3 - "$id" <<'PY'
 import json, os, sys
 CONFIG = os.path.join(os.path.expanduser("~"), ".claude-switch", "config.json")
 cfg = json.load(open(CONFIG))
@@ -183,11 +223,7 @@ cfg["accounts"] = [a for a in cfg["accounts"] if a["id"] != sys.argv[1]]
 tmp = CONFIG + ".tmp"
 json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, CONFIG)
 PY
-        [ "$created" = "1" ] && rm -rf "$dir" && note "removed $dir"
-        die "cc add: login did not complete — nothing was registered"
-    fi
-    good "'$id' is $email"
-    cmd_status
+    [ "$created" = "1" ] && rm -rf "$dir" && note "removed $dir"
 }
 
 # ---- cc remove --------------------------------------------------------------
@@ -282,11 +318,44 @@ exhausted() {
     exit 1
 }
 
+# ---- cc use / clear / help --------------------------------------------------
+cmd_use() {
+    local id="${1:-}"
+    [ -n "$id" ] || die "usage: cc use <id>   (accounts: $("$DETECT" accounts | cut -f1 | tr '\n' ' '))"
+    "$DETECT" use "$id" || exit $?
+    good "new sessions start on '$id' while it has quota, and fail over as usual after that"
+    [ -x "$VSCODE" ] && "$VSCODE" sync
+    cmd_status
+}
+
+cmd_clear() {
+    local id="${1:-}"
+    [ -n "$id" ] || die "usage: cc clear <id>"
+    "$DETECT" mark "$id" 0 || exit $?
+    good "cleared the limit recorded for '$id'"
+    sync_vscode
+}
+
+usage() { sed -n 's/^#   \(cc .*\)/  \1/p' "${BASH_SOURCE[0]}"; }
+
 # ---- argument parsing -------------------------------------------------------
 case "${1:-}" in
     status) cmd_status; exit $? ;;
     add)    shift; cmd_add "$@"; exit $? ;;
     remove) shift; cmd_remove "$@"; exit $? ;;
+    use)    shift; cmd_use "$@"; exit $? ;;
+    clear)  shift; cmd_clear "$@"; exit $? ;;
+    vscode)
+        shift
+        [ -x "$VSCODE" ] || die "missing $VSCODE"
+        [ $# -gt 0 ] || set -- status
+        exec "$VSCODE" "$@" ;;
+    help|-h|--help) usage; exit 0 ;;
+    [a-z]*)
+        # A bare word used to fall through to claude as the first prompt, on
+        # whichever account happened to be free — `cc use third` did exactly that
+        # before `use` existed. Refuse it instead.
+        die "unknown command: $1 — see \`cc help\`. To hand claude a prompt: cc -- \"$*\"" ;;
 esac
 
 FORCED=""
@@ -294,6 +363,7 @@ while :; do
     case "${1:-}" in
         --acct)   FORCED="${2:-}"; shift 2 ;;
         --manual) AUTOKILL=0; shift ;;
+        --)       shift; break ;;
         *) break ;;
     esac
 done
@@ -342,6 +412,12 @@ while :; do
         WATCHER=$!
     fi
 
+    # Pin this run to its account, so a limit it hits is attributed correctly even
+    # after the conversation moves on. CC_MANAGED tells the plugin's hooks that
+    # exiting is enough: this launcher carries the conversation from there.
+    "$DETECT" record-run "$ACCT" "$SESSION" >/dev/null 2>&1 || true
+    export CC_MANAGED=1
+
     if [ "$RESUME" = "1" ]; then
         run_acct "$ACCT" --resume "$SESSION" "$@"
     else
@@ -353,11 +429,13 @@ while :; do
         wait "$WATCHER" 2>/dev/null
     fi
 
-    resets="$("$DETECT" scan "$dir" "$SESSION" "$CWD" "$offset")" || resets=""
-    [ -n "$resets" ] || exit 0            # normal exit — nothing to do
+    hit="$("$DETECT" scan "$dir" "$SESSION" "$CWD" "$offset")" || hit=""
+    [ -n "$hit" ] || exit 0               # normal exit — nothing to do
+    read -r resets ltype <<<"$hit"
 
-    "$DETECT" mark "$ACCT" "$resets" >/dev/null
+    "$DETECT" raise "$ACCT" "$resets" ${ltype:+"$ltype"} >/dev/null
     warn "$ACCT hit its limit · resets $(fmt_time "$resets")"
+    sync_vscode                           # the panel follows, when it is managed
 
     # Next available account that this run has not already used.
     # comma-separate the used ids for cc-detect
@@ -375,7 +453,8 @@ while :; do
     if [ -f "$src" ]; then
         mkdir -p "$dst_dir"
         note "carrying the conversation over ($(du -h "$src" | cut -f1))…"
-        cp -p "$src" "$dst_dir/$SESSION.jsonl"
+        # already one file when VS Code sync has linked this chat across
+        [ "$src" -ef "$dst_dir/$SESSION.jsonl" ] || cp -p "$src" "$dst_dir/$SESSION.jsonl"
         RESUME=1
     else
         warn "no transcript found — starting fresh on $NEXT"

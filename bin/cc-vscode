@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""Keep the VS Code Claude panel on an account that still has quota.
+
+The panel starts Claude itself, so the `cc` launcher never wraps it. What the
+extension does honour is `claudeCode.environmentVariables` in VS Code's user
+settings, and it follows a CLAUDE_CONFIG_DIR change there: new chats start on the
+new account, and reloading the window moves the open ones. The panel only resumes
+a chat it can find in the active account's projects folder, so a switch also
+carries the last week's chats across — as hard links, so every account sees the
+same conversation instead of copies that drift apart.
+
+Subcommands
+  on [--settings <path>]   manage the panel, and sync now
+  off                      stop managing it; the panel goes back to the default account
+  sync [--quiet]           point the panel at the account `cc-detect pick` chooses
+  carry <id>               link the last week's chats from every other account into <id>
+  current                  the account the panel is set to use
+  enabled                  exit 0 when sync is on
+  status                   one line for `cc status`
+
+The default account is never written as CLAUDE_CONFIG_DIR. Pointing the variable at
+~/.claude makes Claude Code run onboarding and replace that account's login, so
+choosing the default account removes the variable instead.
+"""
+import glob
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+HERE = os.path.dirname(os.path.realpath(__file__))
+DETECT = os.path.join(HERE, "cc-detect")
+SWITCH_DIR = os.path.join(HOME, ".claude-switch")
+CONFIG = os.path.join(SWITCH_DIR, "config.json")
+BACKUP = os.path.join(SWITCH_DIR, "vscode-settings.backup.json")
+DEFAULT_DIR = os.path.join(HOME, ".claude")
+KEY = "claudeCode.environmentVariables"
+CARRY_DAYS = 7
+
+CANDIDATES = [
+    "~/.config/Code/User/settings.json",
+    "~/.config/Code - Insiders/User/settings.json",
+    "~/.config/VSCodium/User/settings.json",
+    "~/.config/Cursor/User/settings.json",
+    "~/Library/Application Support/Code/User/settings.json",
+    "~/Library/Application Support/Code - Insiders/User/settings.json",
+    "~/Library/Application Support/VSCodium/User/settings.json",
+    "~/Library/Application Support/Cursor/User/settings.json",
+]
+
+
+def tilde(path):
+    return "~" + path[len(HOME):] if path.startswith(HOME + os.sep) else path
+
+
+def detect(*args):
+    """Run cc-detect: its stdout on success, None on a non-zero exit."""
+    res = subprocess.run([DETECT, *args], capture_output=True, text=True)
+    if res.returncode == 3:              # config error: surface it, never guess
+        sys.stderr.write(res.stderr)
+        sys.exit(3)
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def accounts():
+    rows = []
+    for line in (detect("accounts") or "").splitlines():
+        aid, adir, default = line.split("\t")
+        rows.append({"id": aid, "dir": adir, "default": default == "1"})
+    return rows
+
+
+def load_config():
+    detect("accounts")                   # creates config.json on a first run
+    with open(CONFIG) as fh:
+        return json.load(fh)
+
+
+def save_config(cfg):
+    tmp = f"{CONFIG}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONFIG)
+
+
+def settings_path(cfg):
+    configured = (cfg.get("vscode") or {}).get("settingsPath")
+    if configured:
+        return os.path.expanduser(configured)
+    for cand in CANDIDATES:
+        if os.path.isfile(os.path.expanduser(cand)):
+            return os.path.expanduser(cand)
+    return None
+
+
+# ---------------------------------------------------- VS Code settings (JSONC) ----
+# VS Code writes JSON with comments and trailing commas. The file is the user's, so
+# it is edited in place: only the one value is replaced, and everything else —
+# comments, ordering, formatting — is left byte for byte.
+def _skip_ws(text, i):
+    n = len(text)
+    while i < n:
+        if text[i] in " \t\r\n":
+            i += 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j + 1
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            if j < 0:
+                raise ValueError("unterminated comment")
+            i = j + 2
+        else:
+            break
+    return i
+
+
+def _skip_string(text, i):
+    n = len(text)
+    i += 1
+    while i < n:
+        if text[i] == "\\":
+            i += 2
+        elif text[i] == '"':
+            return i + 1
+        else:
+            i += 1
+    raise ValueError("unterminated string")
+
+
+def _skip_value(text, i):
+    n = len(text)
+    if i >= n:
+        raise ValueError("value expected")
+    if text[i] == '"':
+        return _skip_string(text, i)
+    if text[i] in "[{":
+        depth = 0
+        while i < n:
+            if text[i] == '"':
+                i = _skip_string(text, i)
+                continue
+            if text.startswith("//", i) or text.startswith("/*", i):
+                i = _skip_ws(text, i)
+                continue
+            if text[i] in "[{":
+                depth += 1
+            elif text[i] in "]}":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+            i += 1
+        raise ValueError("unbalanced brackets")
+    j = i
+    while j < n and text[j] not in ",}] \t\r\n/":
+        j += 1
+    return j
+
+
+def find_key(text, key):
+    """(key start, value start, value end) of a top-level key, or None."""
+    i = _skip_ws(text, 0)
+    if i >= len(text) or text[i] != "{":
+        raise ValueError("settings is not a JSON object")
+    i += 1
+    while True:
+        i = _skip_ws(text, i)
+        if i >= len(text):
+            raise ValueError("unterminated object")
+        if text[i] == "}":
+            return None
+        if text[i] == ",":
+            i += 1
+            continue
+        if text[i] != '"':
+            raise ValueError(f"unexpected character at offset {i}")
+        k_end = _skip_string(text, i)
+        name = json.loads(text[i:k_end])
+        colon = _skip_ws(text, k_end)
+        if colon >= len(text) or text[colon] != ":":
+            raise ValueError("expected ':'")
+        v_start = _skip_ws(text, colon + 1)
+        v_end = _skip_value(text, v_start)
+        if name == key:
+            return i, v_start, v_end
+        i = v_end
+
+
+def loads_jsonc(text):
+    """Parse VS Code's settings dialect: JSON plus comments and trailing commas."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            j = _skip_string(text, i)
+            out.append(text[i:j])
+            i = j
+        elif text.startswith("//", i) or text.startswith("/*", i):
+            i = _skip_ws(text, i)
+        elif c == ",":
+            j = _skip_ws(text, i + 1)
+            if j < n and text[j] in "}]":
+                i = j                    # a trailing comma
+            else:
+                out.append(c)
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    body = "".join(out).strip()
+    return json.loads(body) if body else {}
+
+
+def _replace_text(path, text):
+    mode = stat.S_IMODE(os.stat(path).st_mode) if os.path.exists(path) else 0o644
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.cc-tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def panel_config_dir(path):
+    """The CLAUDE_CONFIG_DIR the panel is set to launch with, or None."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = loads_jsonc(fh.read())
+    except (OSError, ValueError):
+        return None
+    entries = data.get(KEY) if isinstance(data, dict) else None
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and entry.get("name") == "CLAUDE_CONFIG_DIR":
+            return entry.get("value")
+    return None
+
+
+def set_config_dir(path, config_dir):
+    """Set CLAUDE_CONFIG_DIR in the panel's environment, or remove it when
+    config_dir is None. Returns True when the file changed."""
+    if config_dir and os.path.realpath(config_dir) == os.path.realpath(DEFAULT_DIR):
+        raise ValueError("refusing to set CLAUDE_CONFIG_DIR to ~/.claude")
+    path = os.path.realpath(path)           # keep a symlinked settings file linked
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        text = "{}\n"
+    try:
+        data = loads_jsonc(text)
+    except ValueError as exc:
+        raise ValueError(f"{tilde(path)} does not parse ({exc})")
+    if not isinstance(data, dict):
+        raise ValueError(f"{tilde(path)} is not a settings object")
+
+    current = data.get(KEY)
+    kept = [e for e in current
+            if not (isinstance(e, dict) and e.get("name") == "CLAUDE_CONFIG_DIR")] \
+        if isinstance(current, list) else []
+    wanted = kept + ([{"name": "CLAUDE_CONFIG_DIR", "value": config_dir}] if config_dir else [])
+    if current == wanted or (current is None and not wanted):
+        return False
+
+    value = json.dumps(wanted, indent=2).replace("\n", "\n  ")
+    span = find_key(text, KEY)
+    if span:
+        updated = text[:span[1]] + value + text[span[2]:]
+    else:
+        brace = _skip_ws(text, 0)
+        rest = _skip_ws(text, brace + 1)
+        sep = "" if rest < len(text) and text[rest] == "}" else ","
+        updated = f'{text[:brace + 1]}\n  "{KEY}": {value}{sep}{text[brace + 1:]}'
+
+    expected = dict(data)
+    expected[KEY] = wanted
+    if loads_jsonc(updated) != expected:
+        raise ValueError("the edit did not round-trip, so nothing was written")
+
+    if os.path.exists(path) and not os.path.exists(BACKUP):
+        os.makedirs(SWITCH_DIR, exist_ok=True)
+        shutil.copy2(path, BACKUP)
+        os.chmod(BACKUP, 0o600)
+    _replace_text(path, updated)
+    return True
+
+
+# ------------------------------------------------------------------- carry ----
+def carry(to_id):
+    """Link the last week's chats from every other account into <to_id>.
+
+    A chat already there is replaced only by a newer, at-least-as-long copy — never
+    one that has grown past the source, which would lose turns.
+    """
+    accts = accounts()
+    target = next((a for a in accts if a["id"] == to_id), None)
+    if not target:
+        raise SystemExit(f"cc-vscode: no such account: {to_id}")
+    horizon = time.time() - CARRY_DAYS * 86400
+    moved = 0
+    for acct in accts:
+        if acct["id"] == to_id:
+            continue
+        pattern = os.path.join(glob.escape(acct["dir"]), "projects", "*", "*.jsonl")
+        for src in glob.glob(pattern):
+            try:
+                st = os.lstat(src)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode) or st.st_mtime < horizon:
+                continue
+            slug = os.path.basename(os.path.dirname(src))
+            dst_dir = os.path.join(target["dir"], "projects", slug)
+            dst = os.path.join(dst_dir, os.path.basename(src))
+            try:
+                have = os.lstat(dst)
+            except FileNotFoundError:
+                have = None
+            if have is not None:
+                if (have.st_dev, have.st_ino) == (st.st_dev, st.st_ino):
+                    continue
+                if not (st.st_mtime > have.st_mtime and st.st_size >= have.st_size):
+                    continue
+            os.makedirs(dst_dir, mode=0o700, exist_ok=True)
+            tmp = f"{dst}.cc-carry.{os.getpid()}"
+            try:
+                os.link(src, tmp)
+            except OSError:                  # another filesystem: fall back to a copy
+                shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+            moved += 1
+    return moved
+
+
+# -------------------------------------------------------------------- sync ----
+def current(cfg):
+    path = settings_path(cfg)
+    value = panel_config_dir(path) if path else None
+    if not value:
+        default = next((a for a in accounts() if a["default"]), None)
+        return default["id"] if default else "(default)"
+    found = detect("account-of", value)
+    return found.split("\t")[0] if found else value
+
+
+def sync(quiet=False, force_carry=False):
+    def say(msg):
+        if not quiet:
+            print(msg)
+
+    cfg = load_config()
+    if not (cfg.get("vscode") or {}).get("enabled"):
+        return 0
+    path = settings_path(cfg)
+    if not path:
+        say("VS Code sync is on but no settings file was found: cc vscode on --settings <path>")
+        return 1
+    target = detect("pick")
+    if not target:
+        say("every account is limited — the VS Code panel stays where it is")
+        return 1
+    acct = next(a for a in accounts() if a["id"] == target)
+    try:
+        changed = set_config_dir(path, None if acct["default"] else acct["dir"])
+    except ValueError as exc:
+        print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
+        return 1
+    moved = carry(target) if (changed or force_carry) else 0
+    if changed:
+        say(f"VS Code panel -> {target}"
+            + (f" · {moved} recent chats carried over" if moved else "")
+            + ". New chats start there; Developer: Reload Window moves the open ones.")
+    return 0
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "status"
+    args = argv[2:]
+
+    if cmd == "on":
+        cfg = load_config()
+        if "--settings" in args:
+            idx = args.index("--settings")
+            if idx + 1 >= len(args):
+                print("usage: cc vscode on [--settings <path>]", file=sys.stderr)
+                return 2
+            path = os.path.abspath(os.path.expanduser(args[idx + 1]))
+        else:
+            path = settings_path(cfg)
+        if not path:
+            print("cc-vscode: no VS Code settings file found — pass --settings <path>", file=sys.stderr)
+            return 1
+        cfg["vscode"] = {"enabled": True, "settingsPath": path}
+        save_config(cfg)
+        print(f"VS Code sync on · {tilde(path)}")
+        rc = sync(force_carry=True)
+        print(f"VS Code panel -> {current(cfg)}")
+        return rc
+
+    if cmd == "off":
+        cfg = load_config()
+        path = settings_path(cfg)
+        cfg["vscode"] = dict(cfg.get("vscode") or {}, enabled=False)
+        save_config(cfg)
+        if path:
+            try:
+                set_config_dir(path, None)
+            except ValueError as exc:
+                print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
+                return 1
+        print("VS Code sync off · the panel is back on the default account")
+        return 0
+
+    if cmd == "sync":
+        return sync(quiet="--quiet" in args)
+
+    if cmd == "carry":
+        if not args:
+            print("usage: cc-vscode carry <id>", file=sys.stderr)
+            return 2
+        print(carry(args[0]))
+        return 0
+
+    if cmd == "current":
+        print(current(load_config()))
+        return 0
+
+    if cmd == "enabled":
+        return 0 if (load_config().get("vscode") or {}).get("enabled") else 1
+
+    if cmd == "status":
+        cfg = load_config()
+        path = settings_path(cfg)
+        if (cfg.get("vscode") or {}).get("enabled"):
+            print(f"  VS Code panel -> {current(cfg)}  (sync on · {tilde(path or '?')})")
+        elif path:
+            print("  VS Code panel is not managed · `cc vscode on` makes it follow")
+        return 0
+
+    print(__doc__.strip())
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
