@@ -8,9 +8,12 @@
 # one wasted request.
 set -uo pipefail
 
-DETECT="$(command -v cc-detect 2>/dev/null)"
-[ -n "$DETECT" ] || DETECT="$HOME/.local/bin/cc-detect"
-[ -x "$DETECT" ] || DETECT="${CLAUDE_PLUGIN_ROOT:-}/../bin/cc-detect"
+# The plugin ships its own copy of the tools, so a plugin installed from the directory
+# works before the cc command is installed. Prefer that copy: it is the version these
+# hooks were released with.
+DETECT="${CLAUDE_PLUGIN_ROOT:-}/bin/cc-detect"
+[ -x "$DETECT" ] || DETECT="$(command -v cc-detect 2>/dev/null)"
+{ [ -n "$DETECT" ] && [ -x "$DETECT" ]; } || DETECT="$HOME/.local/bin/cc-detect"
 [ -x "$DETECT" ] || exit 0
 
 when_is() {

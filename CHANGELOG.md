@@ -31,6 +31,13 @@
   nothing had created the config yet.
 
 ### Added
+- The plugin works on its own. Installed from a marketplace, it previously copied only its hooks,
+  which could not find the `cc` tools and silently did nothing. The repository root is now the
+  plugin, so `bin/` and `install.sh` ship with it, and the hooks use that copy first.
+- `/cc-setup`: installs the `cc` command from inside Claude Code and says what to do next. The
+  session-start hook points to it until the command is installed.
+- `install.sh` warns when another `cc`, usually the C compiler, is already on `PATH`, since builds
+  that run `cc` may then start the switcher.
 - `cc use <id>`: prefer an account for new sessions, in the terminal and in the VS Code panel.
 - `cc vscode on|off`: keeps the VS Code panel on a free account through its
   `claudeCode.environmentVariables` setting, edited in place, and hard-links the last week's chats

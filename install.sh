@@ -8,6 +8,16 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="${CC_INSTALL_DIR:-$HOME/.local/bin}"
 
+# `cc` is also the standard name of the C compiler, and ~/.local/bin usually comes
+# before /usr/bin on PATH. Find any other `cc` first, so the user is told plainly
+# that builds calling `cc` could start the account switcher instead.
+other_cc=""
+IFS=: read -r -a path_dirs <<<"$PATH"
+for d in "${path_dirs[@]}"; do
+    [ "$d" = "$DEST" ] && continue
+    if [ -x "$d/cc" ]; then other_cc="$d/cc"; break; fi
+done
+
 mkdir -p "$DEST"
 for f in cc cc-detect cc-watch cc-vscode; do
     install -m 755 "$SRC/bin/$f" "$DEST/$f"
@@ -20,6 +30,13 @@ case ":$PATH:" in
        echo "  NOTE: $DEST is not on your PATH."
        echo "  Add this to your shell profile:  export PATH=\"\$PATH:$DEST\"" ;;
 esac
+
+if [ -n "$other_cc" ]; then
+    echo
+    echo "  WARNING: $other_cc already exists. That is usually your C compiler."
+    echo "  If $DEST comes first on your PATH, \`make\` and other builds that run \`cc\`"
+    echo "  will start this account switcher instead. Check with:  command -v cc"
+fi
 
 echo
 echo "Next:"

@@ -73,8 +73,8 @@ T-2 is the one that matters most — it is the regression that logged a real use
 ```
 claude-account-switcher/
   bin/       cc, cc-detect, cc-watch
-  plugin/    .claude-plugin/plugin.json, SKILL.md, hooks/, commands/
-  .claude-plugin/marketplace.json      <- the repo is itself a marketplace
+  .claude-plugin/plugin.json + marketplace.json   <- the repo is both the plugin and its marketplace
+  hooks/  commands/  skills/cc-accounts/SKILL.md   <- plugin parts; bin/ ships inside the plugin too
   test/      bats suites + stub claude
   docs/  .github/workflows/ci.yml
   install.sh  uninstall.sh

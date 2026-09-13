@@ -6,7 +6,7 @@ echo "SPEC-04 — security gates"
 
 # Everything that ships. Tests are excluded where they legitimately mention these
 # strings in order to assert their absence.
-SHIPPED=$(find "$REPO/bin" "$REPO/plugin" -type f 2>/dev/null)
+SHIPPED=$(find "$REPO/bin" "$REPO/hooks" "$REPO/commands" "$REPO/skills" -type f 2>/dev/null)
 
 # ---- S-1 : never read credentials -------------------------------------------
 # The tool copies settings between accounts. It must never read, copy or print a
@@ -41,7 +41,7 @@ done
 assert_eq "$leaks" "" "S-2 no work or machine identifiers anywhere in the repo"
 
 # The published identity, on the other hand, must be present and correct.
-assert_contains "$(cat "$REPO/plugin/.claude-plugin/plugin.json" 2>/dev/null)" \
+assert_contains "$(cat "$REPO/.claude-plugin/plugin.json" 2>/dev/null)" \
     "marwanmaher635@gmail.com" "S-3 plugin.json carries the published author identity"
 
 # ---- S-4 : no network, no telemetry -----------------------------------------

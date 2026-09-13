@@ -4,7 +4,7 @@ description: Explain how to move the current conversation onto the other Claude 
 
 The user wants to continue on the other account.
 
-First run `~/.local/bin/cc status` to see which account is live and whether the
+First run `"${CLAUDE_PLUGIN_ROOT}/bin/cc" status` to see which account is live and whether the
 other one is available.
 
 Then tell them plainly:

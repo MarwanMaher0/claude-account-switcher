@@ -66,6 +66,21 @@ Nothing else on your machine changes.
 If it prints `NOTE: ... is not on your PATH`, run the `export` line it shows, add that line to
 your shell profile, and open a new terminal.
 
+> [!NOTE]
+> `cc` is also the usual name of the C compiler, and `install.sh` warns you if one exists. While
+> this tool is installed, builds that run `cc` (such as `make`) may start the switcher instead.
+> Check which one runs with `command -v cc`.
+
+**Or install from Claude Code.** Add the plugin, then let it set itself up:
+
+```bash
+claude plugin marketplace add https://github.com/MarwanMaher0/claude-account-switcher
+claude plugin install cc-switch
+```
+
+Start `claude` and type `/cc-setup`. It installs the same four commands and shows what to do
+next. This also covers Step 6a for your first account.
+
 ### Step 3: See your first account
 
 ```bash

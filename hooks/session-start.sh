@@ -5,10 +5,12 @@
 # auth.
 set -uo pipefail
 
-# Prefer an installed cc-detect; fall back to the copy shipped beside the plugin.
-DETECT="$(command -v cc-detect 2>/dev/null)"
-[ -n "$DETECT" ] || DETECT="$HOME/.local/bin/cc-detect"
-[ -x "$DETECT" ] || DETECT="${CLAUDE_PLUGIN_ROOT:-}/../bin/cc-detect"
+# The plugin ships its own copy of the tools, so a plugin installed from the directory
+# works before the cc command is installed. Prefer that copy: it is the version these
+# hooks were released with.
+DETECT="${CLAUDE_PLUGIN_ROOT:-}/bin/cc-detect"
+[ -x "$DETECT" ] || DETECT="$(command -v cc-detect 2>/dev/null)"
+{ [ -n "$DETECT" ] && [ -x "$DETECT" ]; } || DETECT="$HOME/.local/bin/cc-detect"
 [ -x "$DETECT" ] || exit 0
 
 # "<epoch>" -> "07:00", or "Mon 07:00" once it is more than 20 hours away
@@ -35,6 +37,12 @@ fi
 
 email="$("$DETECT" emails 2>/dev/null | awk -F'\t' -v id="$id" '$1 == id { print $2 }')"
 printf 'Account in use: %s (%s)\n' "$id" "${email:-?}"
+
+# Installed from the plugin directory but not set up yet: the hooks work, the terminal
+# launcher does not. Look for cc-watch rather than cc, which is also the C compiler's name.
+if ! command -v cc-watch >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/cc-watch" ]; then
+    printf 'The cc command is not installed yet, so sessions cannot switch accounts. Run /cc-setup once.\n'
+fi
 
 # Warn only when nothing else is available, so failover expectations are right.
 if ! "$DETECT" next-free "$id" >/dev/null 2>&1; then

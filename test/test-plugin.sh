@@ -4,7 +4,7 @@
 
 echo "SPEC-04 T-10 — plugin hooks"
 
-HOOKS="$REPO/plugin/hooks"
+HOOKS="$REPO/hooks"
 write_config() { mkdir -p "$HOME/.claude-switch"; cat > "$HOME/.claude-switch/config.json"; }
 
 three_accounts() {
@@ -127,14 +127,41 @@ assert_contains "$out" "Exit this session" "T-12 under cc, exiting is the whole 
 cleanup_home
 
 # ---- manifest ----------------------------------------------------------------
-assert_ok python3 -c "import json;json.load(open('$REPO/plugin/.claude-plugin/plugin.json'))"
+assert_ok python3 -c "import json;json.load(open('$REPO/.claude-plugin/plugin.json'))"
 ok "T-10 plugin.json is valid JSON"
-manifest="$(cat "$REPO/plugin/.claude-plugin/plugin.json")"
+manifest="$(cat "$REPO/.claude-plugin/plugin.json")"
 assert_contains "$manifest" '"StopFailure"' "T-11 StopFailure hook registered"
 assert_contains "$manifest" '"matcher": "rate_limit"' "T-11 ...for rate limits only"
 assert_contains "$manifest" '"UserPromptSubmit"' "T-12 UserPromptSubmit hook registered"
-for f in SKILL.md commands/cc-status.md commands/cc-switch.md hooks/session-start.sh hooks/limit-notice.sh hooks/limit-hit.sh; do
-    assert_file "$REPO/plugin/$f" "T-10 plugin ships $f"
+for f in skills/cc-accounts/SKILL.md commands/cc-status.md commands/cc-switch.md commands/cc-setup.md \
+         hooks/session-start.sh hooks/limit-notice.sh hooks/limit-hit.sh \
+         bin/cc bin/cc-detect bin/cc-watch bin/cc-vscode install.sh; do
+    assert_file "$REPO/$f" "T-10 plugin ships $f"
 done
+assert_contains "$(cat "$REPO/.claude-plugin/marketplace.json")" '"source": "./"' \
+    "T-10 the marketplace installs the whole repo, so bin/ travels with the plugin"
+
+# ---- T-13 : installed from the plugin directory, with nothing else on the machine ----
+# The directory copies only the plugin into its cache. The hooks must find cc-detect
+# inside the plugin itself: not on PATH, not in ~/.local/bin.
+new_home >/dev/null; three_accounts
+bare_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '/\.local/bin$' | grep -vx "$REPO/bin" | paste -sd: -)"
+out="$(PATH="$bare_path" CLAUDE_PLUGIN_ROOT="$REPO" env -u CLAUDE_CONFIG_DIR bash "$HOOKS/session-start.sh" </dev/null)"
+assert_contains "$out" "Account in use: one" "T-13 hooks use the cc-detect shipped inside the plugin"
+assert_contains "$out" "/cc-setup" "T-13 ...and point to /cc-setup while the cc command is not installed"
+mkdir -p "$HOME/.local/bin"; printf '#!/bin/sh\n' > "$HOME/.local/bin/cc-watch"; chmod +x "$HOME/.local/bin/cc-watch"
+out="$(PATH="$bare_path" CLAUDE_PLUGIN_ROOT="$REPO" env -u CLAUDE_CONFIG_DIR bash "$HOOKS/session-start.sh" </dev/null)"
+assert_not_contains "$out" "/cc-setup" "T-13 no setup hint once the cc command is installed"
+cleanup_home
+assert_contains "$(cat "$REPO/commands/cc-setup.md")" '${CLAUDE_PLUGIN_ROOT}/install.sh' \
+    "T-13 /cc-setup runs the install.sh shipped inside the plugin"
+
+# ---- T-14 : installing next to a C compiler named cc -----------------------------
+new_home >/dev/null
+mkdir -p "$SANDBOX/compiler"; printf '#!/bin/sh\n' > "$SANDBOX/compiler/cc"; chmod +x "$SANDBOX/compiler/cc"
+out="$(PATH="$SANDBOX/compiler:$PATH" CC_INSTALL_DIR="$SANDBOX/localbin" bash "$REPO/install.sh" 2>&1)"
+assert_contains "$out" "WARNING" "T-14 install warns that another cc, usually the C compiler, already exists"
+assert_file "$SANDBOX/localbin/cc" "T-14 ...and still installs"
+cleanup_home
 
 summary

@@ -147,7 +147,7 @@ d="$HOME/.claude/projects/-work"; mkdir -p "$d"; sid="panel-chat"
 printf '{"type":"user","uuid":"q"}\n' > "$d/$sid.jsonl"
 hook() {
     PATH="$REPO/bin:$PATH" CC_HOOK_TRIES=1 CLAUDE_CODE_ENTRYPOINT=claude-vscode \
-        env -u CLAUDE_CONFIG_DIR bash "$REPO/plugin/hooks/$1"
+        env -u CLAUDE_CONFIG_DIR bash "$REPO/hooks/$1"
 }
 payload "$sid" "$d/$sid.jsonl" | hook session-start.sh >/dev/null
 limit_line p "$future" seven_day >> "$d/$sid.jsonl"

@@ -9,8 +9,8 @@
   "plugins": [
     {
       "name": "cc-switch",
-      "description": "Shows which Claude account a session is using and announces a rate limit the moment it lands. Pairs with the cc launcher, which performs the switch.",
-      "source": "./plugin",
+      "description": "Claude Code: switch to your next Claude account when one hits its usage limit, keeping the conversation. Run /cc-setup after installing.",
+      "source": "./",
       "category": "productivity"
     }
   ]

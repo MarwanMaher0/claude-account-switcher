@@ -19,7 +19,7 @@ bash test/demo.sh
 ## Before opening a pull request
 
 1. `bash test/run-all.sh` passes.
-2. `shellcheck --severity=warning bin/cc bin/cc-watch install.sh uninstall.sh plugin/hooks/*.sh test/*.sh` is clean.
+2. `shellcheck --severity=warning bin/cc bin/cc-watch install.sh uninstall.sh hooks/*.sh test/*.sh` is clean.
 3. `python3 -m py_compile bin/cc-detect bin/cc-vscode` succeeds.
 4. New behaviour has a test. If it changes a contract, update the matching spec in `docs/specs/`.
 5. If a user will notice the change, update the README steps and `CHANGELOG.md`.
