@@ -32,10 +32,10 @@ So a temporary throttle and a real limit look almost identical. Switching accoun
 
 Every one of those I got wrong by reasoning about what I assumed the system did, and got right by going and reading what it actually wrote down.
 
-It's MIT, works on Linux and macOS, makes no network calls, and never reads your credentials file. 109 tests, none of which burn API quota, because the CLI is faked out.
+It works on Linux and macOS, in the terminal and in the VS Code panel. MIT, no network calls, never reads your credentials file, and 232 tests that don't burn any API quota because the CLI is faked out. It's in review for Anthropic's plugin directory too.
 
 One thing before anyone asks. This switches between accounts you already pay for. It doesn't pool accounts and it doesn't get you past anyone's limits. If you only have one subscription it's useless to you.
 
-Link's in the comments.
+Link and the two-line setup are in the comments.
 
 #ClaudeCode #DeveloperTools #SoftwareEngineering #OpenSource
