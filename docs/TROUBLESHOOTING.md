@@ -46,11 +46,34 @@ If the shim is broken, reinstall Claude Code, or put a working binary earlier on
 
 Three common reasons:
 
-1. **The session was not started by `cc`.** A bare `claude` has no wrapper and will not fail over.
-   For the VS Code panel, run `cc vscode on` once; after a limit, reload the window
-   (Developer: Reload Window) to continue on the next account.
-2. **`--manual` was used**, which disables the watcher. Switching then happens only when you quit.
+1. **The session was not started by `cc`.** A plain `claude` does not switch. Start sessions with
+   `cc`. For the VS Code panel, see the next section.
+2. **`--manual` was used.** That keeps the session open at a limit; `cc` switches when you exit.
 3. **Every account is limited.** `cc status` shows when the first one frees up.
+
+## The VS Code panel did not move to another account
+
+Check these in order:
+
+1. **Panel sync is on.** The last line of `cc status` should read `VS Code panel -> <name>` with
+   `sync on`. If not, run `cc vscode on`.
+2. **The plugin is installed in the account that hit the limit.** Plugins are per account. For the
+   first account run `claude plugin list`; for an added one run
+   `CLAUDE_CONFIG_DIR=~/.claude-<name> claude plugin list`. Look for `cc-switch`. If it is missing,
+   follow [Step 6a in the README](../README.md#step-6-vs-code-users-only).
+3. **The window was reloaded.** The panel keeps its account until you run
+   **Developer: Reload Window** from the command palette.
+
+## Installing the plugin fails
+
+If `claude plugin marketplace add` reports a git, SSH or permission error, use the full https
+address rather than the short `MarwanMaher0/claude-account-switcher` form:
+
+```bash
+claude plugin marketplace add https://github.com/MarwanMaher0/claude-account-switcher
+```
+
+The short form can clone over SSH, which fails on machines without a GitHub SSH key.
 
 ## It switched when it should not have
 

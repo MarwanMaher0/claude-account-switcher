@@ -23,10 +23,8 @@ esac
 
 echo
 echo "Next:"
-echo "  cc status          see your accounts"
-echo "  cc add <id>        add another account"
-echo "  cc vscode on       keep the VS Code panel on a free account"
+echo "  cc status          see your first account"
+echo "  cc add work        add another account (any short name)"
+echo "  cc                 start Claude Code on an account with quota left"
 echo
-echo "Optional plugin (in-session limit notices):"
-echo "  claude plugin marketplace add MarwanMaher0/claude-account-switcher"
-echo "  claude plugin install cc-switch"
+echo "Using the VS Code panel? Follow Step 6 in README.md."

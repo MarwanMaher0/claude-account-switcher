@@ -48,6 +48,11 @@
   to the same servers. Test count 106 → 109.
 
 ### Changed
+- Documentation rewritten for first-time users. The README is now numbered steps, each with the
+  command to run and what you should see: install, see your first account, add another, use `cc`,
+  and VS Code setup. It states that plugins are installed per account and gives the https form of
+  the plugin install, which works without a GitHub SSH key. Internals moved to `HOW-IT-WORKS.md`,
+  contributor rules to `CONTRIBUTING.md`.
 - README rebuilt: leads with the problem, carries a real CI badge, and corrects the stated
   requirement — bash 3.2 is supported, not 4+.
 
