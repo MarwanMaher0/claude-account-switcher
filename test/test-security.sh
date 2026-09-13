@@ -72,4 +72,23 @@ cleanup_home
 copilot="$(grep -ril "copilot" "$REPO/bin" 2>/dev/null || true)"
 assert_eq "$copilot" "" "AC-9 Copilot is never wired in as a Claude Code backend"
 
+# ---- P-1 : bash 3.2 reads a non-ASCII character as part of a variable name ----
+# macOS ships bash 3.2, which in a UTF-8 locale reads a non-ASCII character written
+# straight after a variable, such as an ellipsis after $want, as part of the
+# variable's name, and aborts under set -u. It broke `cc add --email` on macOS only,
+# so this check runs everywhere. Write the variable in braces, ${want}, instead.
+glued="$(python3 - "$REPO" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+files = [root / "bin" / "cc", root / "bin" / "cc-watch", root / "install.sh", root / "uninstall.sh"]
+files += sorted((root / "hooks").glob("*.sh")) + sorted((root / "test").glob("*.sh"))
+pat = re.compile(rb'\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xff]')
+for f in files:
+    for n, line in enumerate(f.read_bytes().splitlines(), 1):
+        if pat.search(line):
+            print(f"{f.relative_to(root)}:{n}")
+PY
+)"
+assert_eq "$glued" "" "P-1 no \$variable is directly followed by a non-ASCII character"
+
 summary

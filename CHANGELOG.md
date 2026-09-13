@@ -29,6 +29,9 @@
   ends by saying how to use the new account.
 - `cc add` crashed with a Python traceback when it was the first `cc` command ever run, because
   nothing had created the config yet.
+- On macOS, `cc add` with an email address (given with `--email` or at its prompt) stopped with
+  `unbound variable` and left the account half-added. bash 3.2 read the `…` after `$want` as part of
+  the variable's name. A test now rejects any variable directly followed by a non-ASCII character.
 
 ### Added
 - The plugin works on its own. Installed from a marketplace, it previously copied only its hooks,

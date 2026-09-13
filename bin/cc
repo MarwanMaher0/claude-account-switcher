@@ -264,7 +264,7 @@ login_account() {
 
     if env CLAUDE_CONFIG_DIR="$dir" claude auth --help >/dev/null 2>&1; then
         if [ -n "$want" ]; then
-            note "opening login as $want…"
+            note "opening login as ${want}…"
             env CLAUDE_CONFIG_DIR="$dir" claude auth login --email "$want" || true
         else
             note "opening login…"
