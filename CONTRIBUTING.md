@@ -6,7 +6,7 @@
 bash test/run-all.sh
 ```
 
-218 assertions across six suites. There is no framework to install. `claude` is replaced with a
+232 checks across six suites. There is no framework to install. `claude` is replaced with a
 stub and every test runs against a throwaway `HOME`, so the suite cannot touch a real account and
 uses no API quota. CI runs it on Linux and macOS.
 
