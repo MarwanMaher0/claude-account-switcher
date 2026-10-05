@@ -17,18 +17,34 @@
 # window), else the working directory.
 #
 # Fails closed: when the account cannot be decided for a folder that is, or may be,
-# pinned, nothing runs. When cc was never set up, Claude runs unchanged.
+# pinned, nothing runs; for any other folder Claude runs on the default account. When
+# cc was never set up, Claude runs unchanged.
 #
 # It is on the path of every Claude spawn, including `auth status --json`, so it
 # must stay fast and must never read stdin (that is Claude's stream-json channel).
 # Plain bash 3.2.
 
+# The extension passes its bundled binary first. A build or platform without one
+# passes only Claude's own arguments and leaves finding Claude to the wrapper; Claude
+# never takes a program path as its first argument, so anything that is not an
+# executable file (a flag, say) means "no binary given": use the `claude` on PATH.
 real="${1:-}"
-if [ -z "$real" ]; then
-    echo "cc-switch: cc-claude-wrapper expects the Claude binary as its first argument" >&2
-    exit 1
+if [ -n "$real" ] && [ "${real#-}" = "$real" ] && [ -f "$real" ] && [ -x "$real" ]; then
+    shift
+else
+    # The first `claude` on PATH, skipping cc's own terminal shim (which calls back here).
+    real=""
+    oldifs="$IFS"; IFS=:
+    for d in $PATH; do
+        case "$d" in ""|"$HOME/.claude-switch/terminal-bin") continue ;; esac
+        if [ -f "$d/claude" ] && [ -x "$d/claude" ]; then real="$d/claude"; break; fi
+    done
+    IFS="$oldifs"
+    if [ -z "$real" ]; then
+        echo "cc-switch: no Claude binary was passed to cc-claude-wrapper and none is on PATH" >&2
+        exit 1
+    fi
 fi
-shift
 
 SWITCH_DIR="$HOME/.claude-switch"
 folder="${CC_WINDOW_FOLDER:-$PWD}"
@@ -42,8 +58,9 @@ DEFAULT_REAL="$(resolved "$HOME/.claude")"
 # Run Claude with CLAUDE_CONFIG_DIR removed (the default account).
 run_default() { exec env -u CLAUDE_CONFIG_DIR "$real" "$@"; }
 
-# Run Claude unchanged, except that an inherited CLAUDE_CONFIG_DIR naming the default
-# account's own dir is removed: that value makes Claude Code replace its login.
+# Run Claude unchanged (cc is not set up), except that an inherited CLAUDE_CONFIG_DIR
+# naming the default account's own dir is removed: that value makes Claude Code
+# replace its login.
 run_unchanged() {
     if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$(resolved "$CLAUDE_CONFIG_DIR")" = "$DEFAULT_REAL" ]; then
         run_default "$@"
@@ -67,7 +84,7 @@ detect="${CC_SWITCH_DETECT:-}"
 # when cc-detect could not answer. Any pin path that cannot be read plainly (JSON
 # escapes) counts as a match, so a doubt always fails closed.
 may_be_pinned() {
-    local pins="$SWITCH_DIR/pins.json" real_folder line path
+    local pins="$SWITCH_DIR/pins.json" real_folder line path parsed=0 keys
     [ -e "$pins" ] || return 1
     { [ -f "$pins" ] && [ -r "$pins" ]; } || return 0
     real_folder="$(resolved "$folder")"
@@ -75,12 +92,16 @@ may_be_pinned() {
         path="${line#*\"path\"*:*\"}"
         path="${path%%\"*}"
         case "$line" in *\\*) return 0 ;; esac
+        parsed=$((parsed + 1))
         [ -n "$path" ] || continue
         case "$real_folder/" in "$path"/*) return 0 ;; esac
         case "$folder/" in "$path"/*) return 0 ;; esac
     done < <(grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*\(\\.[^"]*\)*"' "$pins" 2>/dev/null)
-    # No readable path at all: only an empty pin list is a clear "not pinned".
-    if ! grep -q '"path"' "$pins" 2>/dev/null; then
+    # A "path" key whose value could not be read (a truncated file, say) is a doubt.
+    keys="$(grep -o '"path"' "$pins" 2>/dev/null | wc -l | tr -d ' ')"
+    [ "${keys:-0}" -gt "$parsed" ] && return 0
+    # No path at all: only an empty pin list is a clear "not pinned".
+    if [ "$parsed" -eq 0 ]; then
         tr -d ' \t\r\n' < "$pins" 2>/dev/null | grep -qE '^(\{("version":[0-9]+,?)?("pins":\[\])?,?("version":[0-9]+)?\})?$' && return 1
         return 0
     fi
@@ -94,8 +115,11 @@ fail() {
         printf 'cc-switch: could not decide the account for %s: %s; run cc status\n' "$folder" "$reason" >&2
         exit 1
     fi
-    printf 'cc-switch: could not decide the account for %s: %s; running Claude unchanged\n' "$folder" "$reason" >&2
-    run_unchanged "$@"
+    # Not pinned: run on the default account. An inherited CLAUDE_CONFIG_DIR may name an
+    # account reserved for another folder's pin (the window's last binding, or whatever
+    # VS Code was started with); the default account is never reserved.
+    printf 'cc-switch: could not decide the account for %s: %s; running Claude on the default account\n' "$folder" "$reason" >&2
+    run_default "$@"
 }
 
 if [ ! -x "$detect" ]; then

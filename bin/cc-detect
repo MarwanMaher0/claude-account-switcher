@@ -157,6 +157,11 @@ def slugify(path):
     return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(path))
 
 
+class BindTimeout(BaseException):
+    """`bind` ran out of time. Not an OSError (TimeoutError is one): every `except
+    OSError` on the way would swallow it and carry on with an empty state or no pins."""
+
+
 def _load_json(path, default):
     try:
         with open(path) as fh:
@@ -406,7 +411,12 @@ def canon(path):
     return os.path.realpath(expand(path or os.getcwd()))
 
 
+_BIND_PINS = None          # pins.json as `bind` read it once, validated
+
+
 def load_pins():
+    if _BIND_PINS is not None:
+        return list(_BIND_PINS)
     data = _load_json(PINS, {})
     pins = data.get("pins") if isinstance(data, dict) else None
     return [p for p in pins if isinstance(p, dict) and p.get("path")] if isinstance(pins, list) else []
@@ -583,7 +593,8 @@ def bind_one(folder, state, now):
     if pin is not None and pin.get("vscode") is False:
         pin = None                           # a terminal-only pin: the window is unpinned
     res = {"folder": canon(folder) if folder else None, "pinned": pin is not None,
-           "pin": pin["path"] if pin else None, "fallback": None, "limitedUntil": 0,
+           "pin": pin["path"] if pin else None, "pinAccount": pin.get("account") if pin else None,
+           "fallback": None, "limitedUntil": 0,
            "choice": None}
     if pin is not None:
         check_pin(pin)
@@ -638,26 +649,41 @@ def bind_one(folder, state, now):
     return res
 
 
+def _read_pins_strictly():
+    """pins.json for `bind`: any read failure, and any shape other than
+    {"pins": [{"path": "...", ...}, ...]}, is a ConfigError. A pins file that cannot be
+    read, or is read as "no pins", would run a pinned folder on another account."""
+    try:
+        with open(PINS) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"cannot read {PINS}: {exc}")
+    pins = data.get("pins", []) if isinstance(data, dict) else None
+    if not isinstance(pins, list) or not all(
+            isinstance(p, dict) and isinstance(p.get("path"), str) and p.get("path") for p in pins):
+        raise ConfigError(f"{PINS} is not a cc pins file (expected {{\"pins\": [{{\"path\": ...}}]}})")
+    return pins
+
+
 def bind(folders):
     """The decision for a window with these workspace folders. The first folder decides,
     as it does for the Claude extension; `mixed` is set when the folders fall under
-    different pinned accounts."""
+    different pinned accounts. pins.json is read once, strictly, before anything else."""
+    global _BIND_PINS
+    pins = _read_pins_strictly() if os.path.lexists(PINS) else []
     if not os.path.exists(CONFIG):
-        if load_pins():
+        if pins:
             raise ConfigError(f"{PINS} exists but {CONFIG} does not")
         raise NotSetUp("cc is not set up on this machine")
-    if os.path.exists(PINS):
-        try:
-            with open(PINS) as fh:
-                json.load(fh)
-        except (OSError, ValueError) as exc:
-            # A pins file that cannot be read must not look like "no pins".
-            raise ConfigError(f"cannot read {PINS}: {exc}")
-    state = load_state()
-    now = time.time()
-    rows = [bind_one(None if f in ("-", "") else f, state, now) for f in (folders or ["-"])]
-    out = dict(rows[0])
-    owners = {r["pin"] and pin_account(r["pin"]) for r in rows}
+    _BIND_PINS = pins
+    try:
+        state = load_state()
+        now = time.time()
+        rows = [bind_one(None if f in ("-", "") else f, state, now) for f in (folders or ["-"])]
+        out = dict(rows[0])
+        owners = {r["pin"] and pin_account(r["pin"]) for r in rows}
+    finally:
+        _BIND_PINS = None
     out["mixed"] = len(owners) > 1
     out["folders"] = rows
     out["recheckAt"] = min([r["recheckAt"] for r in rows if r["recheckAt"]] or [0])
@@ -974,7 +1000,7 @@ def fetch_usage(acct):
     Launched exactly as `cc` launches the account: the default one with CLAUDE_CONFIG_DIR
     removed, never set to its own path (see run_acct in cc).
     """
-    env = dict(os.environ, CC_LIVE_PROBE="1")
+    env = dict(os.environ, CC_LIVE_PROBE="1", CC_SWITCH_DIRECT="1")
     if acct.get("isDefault"):
         env.pop("CLAUDE_CONFIG_DIR", None)
     else:
@@ -1377,7 +1403,9 @@ def cmd_bind(args):
     # A hung filesystem must not hang a VS Code spawn: give up instead.
     try:
         import signal
-        signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError()))
+        def _timeout(*_):
+            raise BindTimeout()
+        signal.signal(signal.SIGALRM, _timeout)
         signal.alarm(int(os.environ.get("CC_BIND_TIMEOUT", "5") or 5))
     except (ImportError, ValueError, AttributeError):
         pass
@@ -1388,13 +1416,17 @@ def cmd_bind(args):
         res, code = {"configured": False, "error": str(exc)}, 4
     except ConfigError as exc:
         res, code = {"configured": True, "error": str(exc)}, 3
-    except TimeoutError:
+    except BindTimeout:
         res, code = {"configured": True, "error": "timed out reading cc's state"}, 5
+    try:
+        signal.alarm(0)
+    except (NameError, AttributeError, ValueError):
+        pass
     if fmt == "json":
         print(json.dumps(res))
     else:
         # key=value lines for the wrapper's `read` loop. Not for eval.
-        keys = ("error", "account", "dir", "unset", "verb", "pinned", "pin", "fallback",
+        keys = ("error", "account", "dir", "unset", "verb", "pinned", "pin", "pinAccount", "fallback",
                 "limitedUntil", "mixed", "reason", "recheckAt", "configured")
         for k in keys:
             if k not in res:

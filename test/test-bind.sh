@@ -117,9 +117,29 @@ out="$(detect bind "$HOME/notes" --shell 2>/dev/null)"; rc=$?
 assert_eq "$rc" "3" "BD-15 a pins file that does not parse is an error, not 'no pins'"
 assert_contains "$out" "error=" "BD-15 ...and --shell carries the reason"
 rm -f "$HOME/.claude-switch/pins.json"
+printf '{"pins": {"path": "/x"}}' > "$HOME/.claude-switch/pins.json"
+out="$(detect bind "$HOME/notes" --json 2>/dev/null)"; rc=$?
+assert_eq "$rc" "3" "BD-15 a pins file of another shape is an error too"
+printf '{"pins": [{"account": "acme"}]}' > "$HOME/.claude-switch/pins.json"
+out="$(detect bind "$HOME/notes" --json 2>/dev/null)"; rc=$?
+assert_eq "$rc" "3" "BD-15 ...and so is a pin without a path"
+mv "$HOME/.claude-switch/config.json" "$SANDBOX/config.json"
+printf '{"pins": [' > "$HOME/.claude-switch/pins.json"
+out="$(detect bind "$HOME/notes" --json 2>/dev/null)"; rc=$?
+assert_eq "$rc" "3" "BD-15 no config.json and a broken pins.json: an error, not 'not set up'"
+mv "$SANDBOX/config.json" "$HOME/.claude-switch/config.json"
+rm -f "$HOME/.claude-switch/pins.json"
 printf '{ broken' > "$HOME/.claude-switch/config.json"
 out="$(detect bind "$HOME/notes" --json 2>/dev/null)"; rc=$?
 assert_eq "$rc" "3" "BD-16 a broken config is an error"
+cleanup_home
+
+# ---- BD-19 : the pin's own account is reported, for the companion's carry rule ---------------
+new_home >/dev/null; companies
+"$BIN/cc" pin "$HOME/work/acme" --account acme --fallback personal >/dev/null 2>&1
+detect mark acme "$future" >/dev/null
+assert_eq "$(field account pinAccount -- "$HOME/work/acme")" "personal acme" "BD-19 on the fallback, pinAccount still names the pin's account"
+assert_eq "$(field pinAccount -- "$HOME/notes")" "None" "BD-19 ...and is empty for an unpinned folder"
 cleanup_home
 
 # ---- BD-17/BD-18 : fast and quiet --------------------------------------------------------------
