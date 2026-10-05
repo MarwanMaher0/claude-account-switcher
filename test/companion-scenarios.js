@@ -248,12 +248,169 @@ const scenarios = {
     const { binder } = ext.activate(context());
     await until(() => rec.executed.length > 0, 2000);
     const notes = msgs('info').filter((m) => m.items.includes('Reload Window'));
-    check('C-8 one notice: chats are right, history may lag until a reload', notes.length === 1
-      && notes[0].msg.includes('history list may show the previous account'), rec.messages);
+    check('C-8 one notice: a reload restarts the open chats, which are in the history on acme', notes.length === 1
+      && notes[0].msg.includes('Reloading the window restarts the open Claude chats; they will be in the history list on acme.'),
+      rec.messages);
     check('C-8 ...it does not claim a reload is needed for the chats', !notes[0].msg.includes('must'), notes[0].msg);
     check('C-8 the button reloads the window', rec.executed.some((e) => e[0] === 'workbench.action.reloadWindow'), rec.executed);
     await binder.rebind('again');
     check('C-8 ...once', msgs('info').filter((m) => m.items.includes('Reload Window')).length === 1);
+    ext.deactivate();
+  },
+
+  // C-18: the incident. A folder pinned after it was used: its chats are in the default
+  // account and in one reserved for another folder. Claude Code is already running.
+  // Before the window is bound they are linked into the pin's account, and only then
+  // is a reload offered, saying plainly that it restarts the open chats.
+  async adopt_first_bind() {
+    binding();
+    rec.folders = [ACME];
+    delete process.env.CLAUDE_CONFIG_DIR;
+    const VAULT = path.join(ACME, 'vault');
+    fs.mkdirSync(VAULT, { recursive: true });
+    detect('pin', VAULT, 'globex', 'switch', 'personal', '1');   // a pin inside, written without cc pin
+    const D1 = path.join(HOME, '.claude');
+    const slug = detect('slug', ACME);
+    const chat = (dir, s, id, cwd, days) => {
+      const f = path.join(dir, 'projects', s, `${id}.jsonl`);
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, `{"type":"summary"}\n{"type":"user","cwd":${JSON.stringify(cwd)}}\n`);
+      if (days) { const t = Date.now() / 1000 - days * 86400; fs.utimesSync(f, t, t); }
+      return f;
+    };
+    const old = chat(D1, slug, 'old', ACME, 40);
+    fs.mkdirSync(path.join(D1, 'projects', slug, 'old', 'subagents'), { recursive: true });
+    fs.writeFileSync(path.join(D1, 'projects', slug, 'old', 'subagents', 'a.jsonl'), '{}\n');
+    fs.mkdirSync(path.join(D1, 'file-history', 'old'), { recursive: true });
+    fs.writeFileSync(path.join(D1, 'file-history', 'old', 'f@v1'), 'v1\n');
+    fs.mkdirSync(path.join(D1, 'projects', slug, 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(D1, 'projects', slug, 'memory', 'MEMORY.md'), 'from personal\n');
+    fs.writeFileSync(path.join(D1, 'projects', slug, 'memory', 'extra.md'), 'extra\n');
+    const fromGlobex = chat(D3, detect('slug', path.join(ACME, 'api')), 'g1', path.join(ACME, 'api'));
+    const vaultChat = chat(D1, detect('slug', VAULT), 'v1', VAULT);
+    fs.mkdirSync(path.join(D2, 'projects', slug, 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(D2, 'projects', slug, 'memory', 'MEMORY.md'), 'acme own\n');
+    const ino = (f) => { try { return fs.statSync(f).ino; } catch (_) { return null; } };
+    const srcBefore = [old, fromGlobex, vaultChat].map((f) => `${ino(f)}:${fs.readFileSync(f, 'utf8')}`).join('|');
+
+    rec.extensions['anthropic.claude-code'] = { isActive: true };
+    rec.answer = (kind, msg, items) => items.find((i) => i === 'Reload Window');
+    const ext = load();
+    const order = [];
+    const B = ext._Binder.prototype;
+    const setEnv = B.setEnv;
+    B.setEnv = function (r) {
+      order.push(`env:${r.account}`);
+      order.push(`present:${ino(path.join(D2, 'projects', slug, 'old.jsonl')) === ino(old)}`);
+      return setEnv.call(this, r);
+    };
+    const notify = B.notify;
+    B.notify = function (kind, msg, items, then) { order.push(`notify:${kind}`); return notify.call(this, kind, msg, items, then); };
+    const { binder } = ext.activate(context());
+    check('C-18 the window is bound to the pin\'s account at activation', process.env.CLAUDE_CONFIG_DIR === D2,
+      process.env.CLAUDE_CONFIG_DIR);
+    check('C-18 the chats were in acme before the env switched', order[0] === 'env:acme' && order[1] === 'present:true', order);
+    await until(() => rec.executed.length > 0, 4000);
+    const dst = (s, id) => path.join(D2, 'projects', s, id);
+    check('C-18 a chat over a week old came along, with its session folder and checkpoints',
+      fs.existsSync(dst(slug, 'old/subagents/a.jsonl')) && fs.existsSync(path.join(D2, 'file-history', 'old', 'f@v1')));
+    check('C-18 a chat held by an account reserved for another folder came along',
+      ino(dst(detect('slug', path.join(ACME, 'api')), 'g1.jsonl')) === ino(fromGlobex));
+    check('C-18 a missing memory note was added', fs.existsSync(dst(slug, 'memory/extra.md')));
+    check('C-18 acme\'s own MEMORY.md was not overwritten', fs.readFileSync(dst(slug, 'memory/MEMORY.md'), 'utf8') === 'acme own\n');
+    check('C-18 a chat of the pinned folder inside it stayed out of acme',
+      !fs.existsSync(dst(detect('slug', VAULT), 'v1.jsonl')));
+    const srcAfter = [old, fromGlobex, vaultChat].map((f) => `${ino(f)}:${fs.readFileSync(f, 'utf8')}`).join('|');
+    check('C-18 the sources are untouched', srcAfter === srcBefore);
+    const notes = msgs('info').filter((m) => m.items.includes('Reload Window'));
+    check('C-18 one reload notice, after the env was bound', notes.length === 1 && order.indexOf('notify:info') > order.indexOf('env:acme'),
+      { order, messages: rec.messages });
+    const text = notes.length ? notes[0].msg : '';
+    check('C-18 it says plainly that reloading restarts the open chats, and where they will be',
+      text.includes('Reloading the window restarts the open Claude chats; they will be in the history list on acme.'), text);
+    check('C-18 ...and how many chats came over', text.includes('2 chats of this folder from other accounts are now in acme'), text);
+    check('C-18 ...and that a differing file was left alone', text.includes('left as they are'), text);
+    check('C-18 the window reloads only on the button', rec.executed.length === 1
+      && rec.executed[0][0] === 'workbench.action.reloadWindow', rec.executed);
+    const snapshot = () => fs.readdirSync(path.join(D2, 'projects')).sort().join(',');
+    const before = snapshot();
+    await binder.rebind('again');
+    check('C-18 a re-check adopts nothing more and offers no second reload', snapshot() === before
+      && msgs('info').filter((m) => m.items.includes('Reload Window')).length === 1);
+    const again = JSON.parse(cp.execFileSync(path.join(BIN, 'cc-vscode'), ['adopt', '--folder', ACME, '--json'],
+      { encoding: 'utf8' }));
+    check('C-18 adopting again is a no-op', again.ok && again.chats === 0 && again.files === 0 && again.already === 2, again);
+    B.setEnv = setEnv;
+    B.notify = notify;
+    ext.deactivate();
+  },
+
+  // C-19: adopt failed: say so, and never offer a reload
+  async adopt_failure() {
+    const broken = path.join(HOME, 'broken-vscode');
+    fs.writeFileSync(broken, '#!/bin/sh\necho "cc-vscode: disk on fire" >&2\nexit 1\n', { mode: 0o755 });
+    binding({ vscode: broken });
+    rec.folders = [ACME];
+    delete process.env.CLAUDE_CONFIG_DIR;
+    rec.extensions['anthropic.claude-code'] = { isActive: true };
+    rec.answer = (kind, msg, items) => items.find((i) => i === 'Reload Window');
+    const ext = load();
+    ext.activate(context());
+    await until(() => msgs().length > 0, 3000);
+    await sleep(200);
+    const warn = msgs('warning').find((m) => m.msg.includes('could not bring this folder\'s chats into acme'));
+    check('C-19 the failure is reported, with the reason', !!warn && warn.msg.includes('disk on fire'), rec.messages);
+    check('C-19 ...it says not to reload yet, since that restarts the open chats',
+      !!warn && warn.msg.includes('Do not reload this window yet') && warn.msg.includes('restarts the open Claude chats'), warn);
+    check('C-19 no reload is offered, and none happens',
+      !rec.messages.some((m) => m.items.includes('Reload Window')) && rec.executed.length === 0, rec.messages);
+    check('C-19 new chats still follow the pin (the env is bound)', process.env.CLAUDE_CONFIG_DIR === D2,
+      process.env.CLAUDE_CONFIG_DIR);
+    ext.deactivate();
+  },
+
+  // C-20: pinning the open folder: its chats are adopted before the window moves
+  async adopt_on_pin_change() {
+    binding();
+    rec.folders = [NOTES];
+    delete process.env.CLAUDE_CONFIG_DIR;
+    const slug = detect('slug', NOTES);
+    const src = path.join(HOME, '.claude', 'projects', slug, 'n1.jsonl');
+    fs.mkdirSync(path.dirname(src), { recursive: true });
+    fs.writeFileSync(src, `{"type":"user","cwd":${JSON.stringify(NOTES)}}\n`);
+    const ext = load();
+    const { binder } = ext.activate(context());
+    const seen = [];
+    const setEnv = binder.setEnv.bind(binder);
+    binder.setEnv = (r) => { seen.push(`${r.account}:${fs.existsSync(path.join(D2, 'projects', slug, 'n1.jsonl'))}`); return setEnv(r); };
+    detect('pin', NOTES, 'acme', 'switch', 'personal', '1');      // the pin alone, as another tool might write it
+    const moved = await until(() => process.env.CLAUDE_CONFIG_DIR === D2);
+    check('C-20 the window moves to the new pin', moved, process.env.CLAUDE_CONFIG_DIR);
+    check('C-20 ...after the folder\'s chats were linked into acme', seen[seen.length - 1] === 'acme:true', seen);
+    ext.deactivate();
+  },
+
+  // C-21: the first bind's adopt ran out of its budget: it is finished in the background,
+  // and only then is a reload offered
+  async adopt_incomplete() {
+    const fake = path.join(HOME, 'slow-vscode');
+    fs.writeFileSync(fake, '#!/bin/sh\n' +
+      'case " $* " in *" --deadline "*) echo \'{"ok":false,"incomplete":true,"chats":1,"already":0,"files":0,' +
+      '"from":{"personal":1},"left":{},"conflicts":[],"errors":[]}\'; exit 5;; esac\n' +
+      'echo \'{"ok":true,"incomplete":false,"chats":3,"already":0,"files":0,"from":{"personal":3},"left":{},' +
+      '"conflicts":[],"errors":[]}\'\n', { mode: 0o755 });
+    binding({ vscode: fake });
+    rec.folders = [ACME];
+    delete process.env.CLAUDE_CONFIG_DIR;
+    rec.extensions['anthropic.claude-code'] = { isActive: true };
+    const ext = load();
+    ext.activate(context());
+    check('C-21 the env is bound at activation anyway', process.env.CLAUDE_CONFIG_DIR === D2, process.env.CLAUDE_CONFIG_DIR);
+    await until(() => msgs().length > 0, 4000);
+    const note = msgs('info').find((m) => m.items.includes('Reload Window'));
+    check('C-21 the reload is offered once the rest is done, with the full count',
+      !!note && note.msg.includes('3 chats of this folder'), rec.messages);
+    check('C-21 the log says the first run did not finish', rec.log.some((l) => l.includes('not finished')), rec.log);
     ext.deactivate();
   },
 

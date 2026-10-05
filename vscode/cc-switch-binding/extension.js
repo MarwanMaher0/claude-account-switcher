@@ -19,6 +19,11 @@
 // and says what happened.
 //
 // The decision itself is `cc-detect bind`: fast, no network, no live check.
+//
+// Before a pinned window is first bound, and whenever its pin or the pin's account
+// changes, `cc-vscode adopt` links the folder's chats that other accounts hold into the
+// pin's account (chats made before the pin, for instance). Without it the history list
+// would lose them, and tabs reopened by a reload would come back empty.
 
 // The first statement: the value this window was started with, before any change.
 const BASE_ENV = process.env.CLAUDE_CONFIG_DIR;
@@ -34,6 +39,12 @@ const WATCHED = ['state.json', 'pins.json', 'config.json', 'bind-epoch'];
 const DEBOUNCE_MS = 400;
 const DETECT_TIMEOUT_MS = 5000;
 const CARRY_TIMEOUT_MS = 30000;
+// Adopting at activation blocks the extension host, so it gets a budget (adopt stops
+// itself after ADOPT_SYNC_SECONDS and says so); the rest is finished in the background
+// before any reload is offered.
+const ADOPT_SYNC_SECONDS = 4;
+const ADOPT_SYNC_TIMEOUT_MS = 10000;
+const ADOPT_TIMEOUT_MS = 120000;
 const MAX_TIMER_MS = 2147483647;
 
 // Swappable in tests.
@@ -133,8 +144,11 @@ class Binder {
     }
     this.watch();
     // The first decision is synchronous: the env is in place before Claude spawns
-    // anything, whenever the activation order allows it.
-    this.applySafely(this.detectSync(), 'window opened');
+    // anything, whenever the activation order allows it. A pinned folder's chats are
+    // adopted into the pin's account before that.
+    const r = this.detectSync();
+    const adopted = !(r instanceof Error) && r.pin ? this.adoptSync(r.pin) : null;
+    this.queue = this.applySafely(r, 'window opened', adopted);
   }
 
   dispose() {
@@ -235,7 +249,7 @@ class Binder {
     });
   }
 
-  runTool(args) {
+  runTool(args, timeout) {
     return new Promise((resolve) => {
       let cmd, argv;
       try {
@@ -243,12 +257,69 @@ class Binder {
         if (!b.vscode) throw new Error('vscode-binding.json names no cc-vscode');
         [cmd, argv] = this.command(b.vscode, args);
       } catch (err) {
-        resolve({ ok: false, out: String(err.message || err) });
+        resolve({ ok: false, out: String(err.message || err), stdout: '', code: null });
         return;
       }
-      cp.execFile(cmd, argv, { env: this.detectEnv(), timeout: CARRY_TIMEOUT_MS, encoding: 'utf8' },
-        (err, stdout, stderr) => resolve({ ok: !err, out: String(stdout || '') + String(stderr || '') }));
+      cp.execFile(cmd, argv, { env: this.detectEnv(), timeout: timeout || CARRY_TIMEOUT_MS, encoding: 'utf8' },
+        (err, stdout, stderr) => resolve({
+          ok: !err, out: String(stdout || '') + String(stderr || ''), stdout: String(stdout || ''),
+          code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+        }));
     });
+  }
+
+  // ----------------------------------------------------------------- adopt ----
+  // The result of `cc-vscode adopt --json`: { ok, rep, error, incomplete }.
+  adoptResult(ok, code, stdout, out) {
+    let rep = null;
+    try { rep = JSON.parse(String(stdout || '').trim().split('\n').pop()); } catch (_) { rep = null; }
+    if (rep && typeof rep === 'object' && !Array.isArray(rep)) {
+      const errors = Array.isArray(rep.errors) ? rep.errors : [];
+      return {
+        ok: !!rep.ok && ok, rep, incomplete: !!rep.incomplete,
+        error: errors.length ? errors.join('; ') : (rep.incomplete ? 'it ran out of time' : null),
+      };
+    }
+    const msg = String(out || '').trim().split('\n').pop() || `cc-vscode adopt exited with status ${code}`;
+    return { ok: false, rep: null, incomplete: false, error: msg };
+  }
+
+  adoptSync(folder) {
+    try {
+      const tool = this.binding().vscode;
+      if (!tool) throw new Error('vscode-binding.json names no cc-vscode');
+      const [cmd, args] = this.command(tool,
+        ['adopt', '--folder', folder, '--json', '--deadline', String(ADOPT_SYNC_SECONDS)]);
+      const stdout = cp.execFileSync(cmd, args, {
+        env: this.detectEnv(), timeout: ADOPT_SYNC_TIMEOUT_MS, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return this.adoptResult(true, 0, stdout, stdout);
+    } catch (err) {
+      if (err && err.status !== undefined && err.status !== null) {
+        return this.adoptResult(false, err.status, err.stdout, String(err.stdout || '') + String(err.stderr || ''));
+      }
+      const timedOut = err && (err.killed || err.signal);
+      return { ok: false, rep: null, incomplete: !!timedOut,
+        error: timedOut ? 'it ran out of time' : String((err && err.message) || err) };
+    }
+  }
+
+  async adoptAsync(folder) {
+    const res = await this.runTool(['adopt', '--folder', folder, '--json'], ADOPT_TIMEOUT_MS);
+    return this.adoptResult(res.ok, res.code, res.stdout, res.out);
+  }
+
+  logAdopt(folder, a, account) {
+    if (!a) return;
+    const rep = a.rep || {};
+    const from = Object.entries(rep.from || {}).map(([k, v]) => `${v} from ${k}`).join(', ');
+    this.log(`adopt ${folder} -> ${account}: ` + (a.ok
+      ? `${rep.chats || 0} chat(s) linked${from ? ' (' + from + ')' : ''}, ${rep.already || 0} already there`
+      : `${a.incomplete ? 'not finished' : 'failed'}: ${a.error}`));
+    for (const c of rep.conflicts || []) this.log(`  conflict: ${c}`);
+    for (const [k, v] of Object.entries(rep.left || {})) {
+      this.log(`  left ${v} chat(s) in ${k}: this folder is or was pinned to ${k} (cc adopt --from ${k} brings them)`);
+    }
   }
 
   // --------------------------------------------------------------- re-bind ----
@@ -288,10 +359,10 @@ class Binder {
     return this.queue;
   }
 
-  async applySafely(r, trigger) {
+  async applySafely(r, trigger, adopted) {
     try {
       if (r instanceof Error) this.onError(r, trigger);
-      else await this.apply(r, trigger);
+      else await this.apply(r, trigger, adopted);
     } catch (err) {
       this.onError(err, trigger);
     }
@@ -333,13 +404,23 @@ class Binder {
     return this.onFallback(r) || this.onFallback(prev);
   }
 
-  async apply(r, trigger) {
+  async apply(r, trigger, adopted) {
     const prev = this.last;
     const samePin = !!prev && (prev.pin || null) === (r.pin || null) &&
       (prev.pinAccount || null) === (r.pinAccount || null);
     const moved = !!prev && prev.account !== r.account;
     const limitMove = this.isLimitMove(prev, r);
     this.errorShown = false;
+
+    // The folder's chats follow its pin: on the first bind (start() adopted them
+    // synchronously) and whenever the pin, or the account it names, changes. Always
+    // before the env switches. adopt never links the chats of an account this folder
+    // was pinned to before, so a re-pin does not hand them to the new account.
+    let adoption = adopted || null;
+    if (r.pin && !adoption && (!prev || !samePin)) {
+      adoption = await this.adoptAsync(r.pin);
+    }
+    if (adoption) this.logAdopt(r.pin, adoption, r.pinAccount);
 
     // A move caused by a limit (or its end) carries this folder's recent chats first,
     // so the history list and resume keep working on the new account.
@@ -356,6 +437,12 @@ class Binder {
     const after = process.env.CLAUDE_CONFIG_DIR;
     this.last = r;
 
+    // The first bind's adopt ran on a budget; finish it before saying anything.
+    if (!prev && adoption && adoption.incomplete) {
+      adoption = await this.adoptAsync(r.pin);
+      this.logAdopt(r.pin, adoption, r.pinAccount);
+    }
+
     this.log(`${trigger}: ${r.account} (${r.verb}${r.choice ? ', ' + r.choice + ' chosen' : ''}) — ${r.reason}` +
       `; CLAUDE_CONFIG_DIR ${after === undefined ? 'unset' : '= ' + after}`);
     this.updateStatus(r);
@@ -364,12 +451,9 @@ class Binder {
 
     if (!prev && this.claudeWasActive && after !== BASE_ENV && !this.reloadNoticeShown) {
       this.reloadNoticeShown = true;
-      this.notify('info',
-        `Claude Code started before cc-switch bound this window. New chats run on ${r.account} ` +
-        '(the process wrapper decides them), but the history list may show the previous ' +
-        'account until you reload the window.', ['Reload Window'], (pick) => {
-          if (pick === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow');
-        });
+      this.reloadNotice(r, adoption);
+    } else if (prev && adoption && !adoption.ok) {
+      this.adoptFailed(r, adoption, false);
     }
 
     if (moved) this.announceMove(prev, r, samePin && limitMove);
@@ -385,6 +469,63 @@ class Binder {
           'folders in separate windows to keep them apart.', [], null);
       }
     }
+  }
+
+  // Claude Code was running before this window was bound, so its history list and open
+  // tabs still belong to the account it started with. A reload re-reads them from the
+  // bound account, and restarts every open chat. It is offered only once the folder's
+  // chats are known to be there; it is never done without the user's click.
+  reloadNotice(r, adoption) {
+    if (!r.pin) {
+      this.notify('info',
+        `Claude Code started before cc-switch bound this window. New chats run on ${r.account}. ` +
+        'The history list keeps showing the account Claude Code started with until this window ' +
+        `restarts, and chats started there are not moved to ${r.account}.`, [], null);
+      return;
+    }
+    if (!adoption || !adoption.ok) {
+      this.adoptFailed(r, adoption, true);
+      return;
+    }
+    const rep = adoption.rep || {};
+    const acct = r.pinAccount || r.account;
+    const brought = rep.chats ? `${rep.chats} chat${rep.chats === 1 ? '' : 's'} of this folder from other ` +
+      `accounts ${rep.chats === 1 ? 'is' : 'are'} now in ${acct} too. ` : '';
+    const conflicts = (rep.conflicts || []).length
+      ? `${rep.conflicts.length} file(s) already in ${acct} with other content were left as they are (see the cc-switch log). `
+      : '';
+    if (r.account !== acct) {
+      this.notify('info',
+        `Claude Code started before cc-switch bound this window to ${acct}. ${brought}${conflicts}` +
+        `While ${acct} is limited, new chats run on ${r.account}. Do not reload until ${acct} is ` +
+        `available again: reloading restarts the open Claude chats on ${r.account}, where older ones are missing.`,
+        [], null);
+      return;
+    }
+    this.notify('info',
+      `Claude Code started before cc-switch bound this window to ${acct}. ${brought}${conflicts}` +
+      `Reloading the window restarts the open Claude chats; they will be in the history list on ${acct}.`,
+      ['Reload Window'], (pick) => {
+        if (pick === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow');
+      });
+  }
+
+  adoptFailed(r, adoption, beforeReload) {
+    const acct = r.pinAccount || r.account;
+    const why = (adoption && adoption.error) || 'unknown error';
+    this.notify('warning',
+      `cc-switch could not bring this folder's chats into ${acct}: ${why}. ` +
+      (beforeReload
+        ? `Do not reload this window yet: a reload restarts the open Claude chats on ${acct}, where they are missing. `
+        : `Some of its chats may be missing from the history list on ${acct}. `) +
+      `Run \`cc adopt ${r.pin}\` in a terminal to see why.`, ['Retry', 'Show log'], async (pick) => {
+        if (pick === 'Show log') { this.out.show(true); return; }
+        if (pick !== 'Retry') return;
+        const again = await this.adoptAsync(r.pin);
+        this.logAdopt(r.pin, again, acct);
+        if (beforeReload && again.ok) this.reloadNotice(r, again);
+        else if (!again.ok) this.adoptFailed(r, again, beforeReload);
+      });
   }
 
   setEnv(r) {
