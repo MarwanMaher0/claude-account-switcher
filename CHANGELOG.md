@@ -20,6 +20,8 @@
   status line commands. No network call.
 
 ### Fixed
+- Paths under a home folder reached through a symlink (macOS: `/var` -> `/private/var`) now print
+  as `~/...` in `cc pins`, `cc status` and pin messages, instead of the full resolved path.
 - `cc vscode on` carried every account's recent chats into the panel's account. It no longer
   carries chats out of an account reserved for pinned folders.
 - Runs on macOS. It previously did not: macOS ships bash 3.2, which has no associative arrays,

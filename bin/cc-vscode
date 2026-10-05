@@ -67,7 +67,12 @@ CANDIDATES = [
 
 
 def tilde(path):
-    return "~" + path[len(HOME):] if path.startswith(HOME + os.sep) else path
+    # Also match the resolved home: workspace paths are resolved, and on macOS /var is a
+    # link to /private/var.
+    for home in (HOME, os.path.realpath(HOME)):
+        if path.startswith(home + os.sep):
+            return "~" + path[len(home):]
+    return path
 
 
 def detect(*args):
