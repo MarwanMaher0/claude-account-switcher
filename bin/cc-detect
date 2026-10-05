@@ -50,6 +50,11 @@ Pinned folders (~/.claude-switch/pins.json)
   pins                              "<path>\\t<id>\\t<onLimit>\\t<fallback>\\t<vscode>" per pin
   pin-of [dir]                      the pin that applies to a directory (longest match)
   start-for [dir] [forced-id]       "use <id>", "switch <id>", "ask <id>", "stop <id>" or "none"
+  bind <folder|-> [folder...] [--json|--shell]
+                                    the account a VS Code window on these folders runs on.
+                                    Fast and silent: no refresh, no live check. Exit 3 on a
+                                    config error, 4 when cc is not set up, 5 on a timeout
+  choose <dir> <account|stay|clear> answer an `ask` pin for VS Code until its limit passes
   fallback-for <dir> <id> [used,ids]
                                     after <id> hits its limit: "switch <id>", "ask <id>",
                                     "stop <id>" (pinned folder) or "none" (nothing left)
@@ -545,6 +550,123 @@ def fallback_for(path, aid, used=()):
         return limit_rule(state, pin, used)
     nxt = next_free(state, used)
     return ("switch", nxt) if nxt else ("none", "")
+
+
+# ------------------------------------------------------------------ bind ----
+# `bind` is the decision for a VS Code window, made by the process wrapper on every
+# Claude spawn and by the companion extension when a window opens or cc's state
+# changes. It has to be fast and silent: no refresh, no live check, no lock, nothing
+# read from stdin. It reads config.json, pins.json and state.json, which the hooks and
+# the launcher keep current.
+class NotSetUp(Exception):
+    """cc has never been configured on this machine."""
+
+
+def fallback_choice(state, pin, now):
+    """The choice stored for an `ask` pin while its account is limited: the account to
+    use, or None. A choice lasts until the limit it was made for has passed."""
+    chosen = (state.get("fallbackChosen") or {}).get(pin["path"])
+    if not isinstance(chosen, dict):
+        return None
+    until = int(chosen.get("until") or 0)
+    # Made for an earlier limit (the account was free in between, then ran out again):
+    # that answer does not carry over, so ask again.
+    if until <= now or until < limited_until(state, pin["account"]):
+        return None
+    return chosen.get("account") or None
+
+
+def bind_one(folder, state, now):
+    """The account a VS Code window on `folder` runs on, as a dict (see `bind`)."""
+    ids = {a["id"]: a for a in accounts()}
+    pin = pin_for(folder) if folder else None
+    if pin is not None and pin.get("vscode") is False:
+        pin = None                           # a terminal-only pin: the window is unpinned
+    res = {"folder": canon(folder) if folder else None, "pinned": pin is not None,
+           "pin": pin["path"] if pin else None, "fallback": None, "limitedUntil": 0,
+           "choice": None}
+    if pin is not None:
+        check_pin(pin)
+        pa = pin["account"]
+        res["fallback"] = pin.get("fallback")
+        res["limitedUntil"] = limited_until(state, pa) if not free(state, pa, now) else 0
+        if free(state, pa, now):
+            verb, aid, reason = "use", pa, f"pinned to {pa}"
+        else:
+            rule, aid = limit_rule(state, pin, ())
+            until = fmt_until(limited_until(state, pa), now)
+            if rule == "switch":
+                verb, reason = "switch", f"{pa} is limited until {until}; the pin falls back to {aid}"
+            elif rule == "ask":
+                verb = "ask"
+                chosen = fallback_choice(state, pin, now)
+                if chosen == aid:
+                    res["choice"] = "fallback"
+                    reason = f"{pa} is limited until {until}; {aid} was chosen for this pin"
+                elif chosen == pa:
+                    res["choice"] = "stay"
+                    aid, reason = pa, f"{pa} is limited until {until}; staying was chosen"
+                else:
+                    aid, reason = pa, f"{pa} is limited until {until}; the pin asks before using {aid}"
+            else:
+                verb, reason = "stop", f"{pa} is limited until {until} and the pin allows nothing else"
+    else:
+        aid = pick(state)
+        if aid:
+            verb, reason = "use", "not pinned"
+        else:
+            # Nothing unpinned is free. Run on the preferred unpinned account anyway, so
+            # Claude itself shows the limit, rather than failing the window.
+            reserved = reserved_ids()
+            usable = [a["id"] for a in accounts() if a["id"] not in reserved]
+            if not usable:
+                raise ConfigError("every account is pinned to a folder, so an unpinned "
+                                  "folder has no account to run on")
+            preferred = state.get("preferred")
+            aid = preferred if preferred in usable else usable[0]
+            verb, reason = "none", "not pinned, and every unpinned account is limited"
+    acct = ids[aid]
+    adir = expand(acct["dir"])
+    unset = bool(acct.get("isDefault")) or os.path.realpath(adir) == os.path.realpath(DEFAULT_DIR)
+    res.update({"verb": verb, "account": aid, "dir": "" if unset else adir, "unset": unset,
+                "isDefault": bool(acct.get("isDefault")), "reason": reason})
+    # When this decision can next change on its own: the earliest limit, among the
+    # accounts it depends on, that is still running.
+    watch = [a for a in (pin["account"], pin.get("fallback")) if a] if pin else list(ids)
+    ends = [limited_until(state, a) for a in watch if limited_until(state, a) > now]
+    res["recheckAt"] = min(ends) if ends else 0
+    return res
+
+
+def bind(folders):
+    """The decision for a window with these workspace folders. The first folder decides,
+    as it does for the Claude extension; `mixed` is set when the folders fall under
+    different pinned accounts."""
+    if not os.path.exists(CONFIG):
+        if load_pins():
+            raise ConfigError(f"{PINS} exists but {CONFIG} does not")
+        raise NotSetUp("cc is not set up on this machine")
+    if os.path.exists(PINS):
+        try:
+            with open(PINS) as fh:
+                json.load(fh)
+        except (OSError, ValueError) as exc:
+            # A pins file that cannot be read must not look like "no pins".
+            raise ConfigError(f"cannot read {PINS}: {exc}")
+    state = load_state()
+    now = time.time()
+    rows = [bind_one(None if f in ("-", "") else f, state, now) for f in (folders or ["-"])]
+    out = dict(rows[0])
+    owners = {r["pin"] and pin_account(r["pin"]) for r in rows}
+    out["mixed"] = len(owners) > 1
+    out["folders"] = rows
+    out["recheckAt"] = min([r["recheckAt"] for r in rows if r["recheckAt"]] or [0])
+    out["configured"] = True
+    return out
+
+
+def pin_account(path):
+    return next((p.get("account") for p in load_pins() if p["path"] == path), None)
 
 
 def soonest(state=None, exclude=()):
@@ -1218,6 +1340,73 @@ def cmd_status():
             print(f"\n  this folder is pinned · next launch here -> {shown}")
 
 
+def choose(path, answer):
+    """Record the answer to an `ask` pin for VS Code windows: use its fallback, or stay
+    on the limited account. It lasts until the current limit has passed. Returns the
+    account new chats now start on."""
+    pin = pin_for(path)
+    if not pin:
+        raise ConfigError(f"{tilde(canon(path))} is not pinned")
+    check_pin(pin)
+    pa, fb = pin["account"], pin.get("fallback")
+    if answer not in ("clear", "stay", pa) and (pin["onLimit"] == "stop" or answer != fb):
+        raise ConfigError(f"the pin on {tilde(pin['path'])} can only use '{pa}'"
+                          + (f" or '{fb}'" if fb and pin["onLimit"] != "stop" else ""))
+    with state_lock():
+        state = load_state()
+        chosen = state.setdefault("fallbackChosen", {})
+        until = limited_until(state, pa)
+        if answer == "clear" or until <= time.time():
+            chosen.pop(pin["path"], None)
+        else:
+            chosen[pin["path"]] = {"account": pa if answer == "stay" else answer,
+                                   "until": until}
+        save_state(state)
+    res = bind([pin["path"]])
+    return res["account"]
+
+
+def cmd_bind(args):
+    fmt = "json"
+    folders = []
+    for a in args:
+        if a in ("--json", "--shell"):
+            fmt = a[2:]
+        else:
+            folders.append(a)
+    # A hung filesystem must not hang a VS Code spawn: give up instead.
+    try:
+        import signal
+        signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError()))
+        signal.alarm(int(os.environ.get("CC_BIND_TIMEOUT", "5") or 5))
+    except (ImportError, ValueError, AttributeError):
+        pass
+    try:
+        res = bind(folders)
+        code = 0
+    except NotSetUp as exc:
+        res, code = {"configured": False, "error": str(exc)}, 4
+    except ConfigError as exc:
+        res, code = {"configured": True, "error": str(exc)}, 3
+    except TimeoutError:
+        res, code = {"configured": True, "error": "timed out reading cc's state"}, 5
+    if fmt == "json":
+        print(json.dumps(res))
+    else:
+        # key=value lines for the wrapper's `read` loop. Not for eval.
+        keys = ("error", "account", "dir", "unset", "verb", "pinned", "pin", "fallback",
+                "limitedUntil", "mixed", "reason", "recheckAt", "configured")
+        for k in keys:
+            if k not in res:
+                continue
+            v = res[k]
+            v = ("1" if v else "0") if isinstance(v, bool) else ("" if v is None else str(v))
+            print(f"{k}={v.replace(chr(10), ' ')}")
+    if code:
+        print(f"cc-detect: {res['error']}", file=sys.stderr)
+    return code
+
+
 def _print_limit(ev):
     print(f"{ev['resetsAt']} {ev['type'] or ''}".strip())
 
@@ -1421,6 +1610,16 @@ def main(argv):
         verb, aid = start_for(args[0] if args and args[0] else None,
                               args[1] if len(args) > 1 and args[1] else None)
         print(f"{verb} {aid}".strip())
+
+    elif cmd == "bind":
+        return cmd_bind(args)
+
+    elif cmd == "choose":
+        # choose <dir> <account|stay|clear>: the answer to an `ask` pin, for VS Code.
+        if len(args) < 2:
+            print("usage: cc-detect choose <dir> <account|stay|clear>", file=sys.stderr)
+            return 2
+        print(choose(args[0], args[1]))
 
     elif cmd == "fallback-for":
         _refresh_quietly()
