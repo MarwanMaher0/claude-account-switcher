@@ -185,17 +185,23 @@ const scenarios = {
     binding();
     rec.folders = [ACME];
     delete process.env.CLAUDE_CONFIG_DIR;
-    detect('mark', 'acme', String(now() + 2));
+    // Far enough out that slow CI setup (mark, load, the first adopt) cannot reach it first.
+    const end = now() + 6;
+    detect('mark', 'acme', String(end));
     const ext = load();
+    // When each timer fires (set time + delay), so activation work before the timer is
+    // armed — the adopt that runs first, slow on CI — does not move the check.
     const delays = [];
     const set = ext._timers.set;
-    ext._timers.set = (fn, ms) => { delays.push(ms); return set(fn, ms); };
+    ext._timers.set = (fn, ms) => { delays.push(Date.now() + ms); return set(fn, ms); };
     const { binder } = ext.activate(context());
     check('C-5 precondition: limited acme -> personal', !('CLAUDE_CONFIG_DIR' in process.env), process.env.CLAUDE_CONFIG_DIR);
     if (binder.watcher) { binder.watcher.close(); }
     binder.watch = () => {};                        // prove it is the timer, not a file event
-    check('C-5 the timer is set to the end of the limit', delays.some((ms) => ms >= 2500 && ms <= 4500), delays);
-    const back = await until(() => process.env.CLAUDE_CONFIG_DIR === D2, 9000);
+    // armExpiry fires 2 s after the limit ends; `end` is whole seconds, so allow 1 s either side.
+    check('C-5 the timer is set to the end of the limit',
+      delays.some((t) => Math.abs(t - (end * 1000 + 2000)) <= 1000), delays.map((t) => t - end * 1000));
+    const back = await until(() => process.env.CLAUDE_CONFIG_DIR === D2, 15000);
     check('C-5 at the end of the limit the window is back on acme', back, process.env.CLAUDE_CONFIG_DIR);
     await until(() => msgs('info').some((m) => m.msg.includes('available again')), 2000);
     check('C-5 ...and says so', msgs('info').some((m) => m.msg.includes('acme is available again')), rec.messages);
