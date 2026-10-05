@@ -26,6 +26,17 @@ jobs:
       - name: Run test suites
         run: bash test/run-all.sh
 
+      # GitHub's macOS images put Homebrew's bash 5 first on PATH, but a stock Mac (and
+      # the VS Code extension host running cc-claude-wrapper there) has /bin/bash 3.2.
+      # Run everything again with `bash` and `env bash` resolving to /bin/bash.
+      - name: Run test suites under the stock /bin/bash (3.2)
+        if: runner.os == 'macOS'
+        run: |
+          /bin/bash --version | head -1
+          shim="$(mktemp -d)"
+          ln -s /bin/bash "$shim/bash"
+          PATH="$shim:$PATH" /bin/bash -c 'bash --version | head -1; /bin/bash test/run-all.sh'
+
   lint:
     runs-on: ubuntu-latest
     steps:

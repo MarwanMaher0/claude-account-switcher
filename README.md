@@ -206,8 +206,11 @@ list may show another account's chats.
 **When the panel hits a limit:** your next message is not sent. Claude replies with which limit
 ran out and when it resets. Within a second the window moves: **new chats** start on the next
 allowed account, and a notification says so. The chat that hit the limit stays on its account;
-start a new chat, or reopen it from the history list (its transcript was carried over), to go on.
-When the limit resets, the window moves back by itself.
+start a new chat, or close its tab and then reopen it from the history list (its transcript was
+carried over), to go on. Picking a chat whose tab is still open only brings that tab back, on the
+old account. When the limit resets, the window moves back by itself. New chats, the history list
+and resume follow the move at once; the panel's own account label and login status can show the
+old account until **Developer: Reload Window**.
 
 **Upgrading from 2.2 or earlier?** Run `cc vscode migrate`. It shows (and changes nothing) what
 older versions left behind: `CLAUDE_CONFIG_DIR` entries in pinned folders' `.vscode/settings.json`,
@@ -287,14 +290,22 @@ cc unpin ~/work/acme                                       # remove one
 
 With **Terminal and VS Code** and `cc vscode on`, every VS Code window on a pinned folder runs
 Claude on that folder's account, so several windows can run at once, each on a different
-account. Windows that are already open re-check by themselves; no reload is needed. `cc pin`
+account. Windows that are already open re-check by themselves: new chats, the history list and
+resume follow without a reload (only the panel's own account label and login status may lag until
+**Developer: Reload Window**). `cc pin`
 writes nothing into the folder: VS Code only reads the Claude extension's account settings from
 your **user** settings (they are machine-scoped), which is why older versions' per-folder
 `.vscode/settings.json` entries never worked.
 
 - **If cc cannot decide** the account for a pinned folder (a broken pin, a missing `cc-detect`),
   Claude does not start in that window, rather than run on the wrong account. The error says to
-  run `cc status`; the status bar shows `Claude: ? (cc-switch error)`.
+  run `cc status`; the status bar shows `Claude: ? (cc-switch error)`. In an unpinned folder
+  Claude then runs on the default account.
+- **Claude in a terminal** (`claudeCode.useTerminal`) does not use the process wrapper. In that
+  mode the companion puts cc's `claude` shim first on the window's terminal `PATH`, so terminal
+  Claude goes through the wrapper too and fails closed the same way. A shell startup file that
+  puts another `claude` ahead of it on `PATH` (or an alias) bypasses this; check with
+  `type claude` in that terminal.
 - **A workspace with several folders** runs on its first folder's account, as the Claude
   extension does. If the folders are pinned to different accounts, the window warns you and the
   status bar shows `Claude: mixed pins (using acme)`. Open them in separate windows instead.

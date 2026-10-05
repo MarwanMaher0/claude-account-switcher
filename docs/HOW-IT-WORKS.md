@@ -140,9 +140,19 @@ So `cc vscode on` binds both:
    `code` CLI). It activates on `*` in each window, asks `cc-detect bind` for the window's
    folders, and sets that window's extension-host `process.env.CLAUDE_CONFIG_DIR` (deleting it for
    the default account), plus `CC_WINDOW_FOLDER`, so helpers the extension starts in a temp dir
-   still resolve by window. The same value goes to the window's terminals, for
-   `claudeCode.useTerminal`. The panel's history and resume then read the same account the
-   wrapper runs chats on.
+   still resolve by window. The same value goes to the window's terminals. The panel's history
+   and resume then read the same account the wrapper runs chats on.
+3. **Terminal mode.** With `claudeCode.useTerminal` the extension types plain `claude` into a
+   new terminal: no process wrapper, and (with a wrapper set) no `CLAUDE_CONFIG_DIR` of its own.
+   So in that mode the companion prepends `~/.claude-switch/terminal-bin` to the window's
+   terminal `PATH`. Its `claude` (written by `cc vscode on`) execs `cc-claude-wrapper <the next
+   claude on PATH> <args>`, so terminal Claude is decided, and fails closed, like the panel's,
+   even when the companion could not bind. `cc` and the processes it starts set
+   `CC_SWITCH_DIRECT=1` and run Claude directly. A shell startup file that puts another `claude`
+   first on `PATH`, or an alias, bypasses the shim.
+
+The extension passes its bundled binary as the wrapper's first argument. A build without one
+passes only Claude's own arguments; the wrapper then uses the `claude` on `PATH`.
 
 **Deciding: `cc-detect bind`.** It reads `config.json`, `pins.json` and `state.json` and nothing
 else: no refresh, no `claude -p /usage`, no lock.
@@ -157,13 +167,22 @@ unpinned                         ->  the usual pick over unpinned accounts; if a
 ```
 
 A multi-root window is decided by its first folder, as the Claude extension does, and `bind`
-reports `mixed` when the folders fall under different pinned accounts.
+reports `mixed` when the folders fall under different pinned accounts. It also reports
+`pinAccount`, the pin's own account, so the companion can tell a limit move (the pin's account
+to its fallback, or back) from a pin that now names another account. Only a limit move carries
+chats.
+
+`bind` reads `pins.json` once, strictly: a file that cannot be read, does not parse, or is not
+`{"pins": [{"path": ...}]}` is an error, never "no pins". A timeout (`CC_BIND_TIMEOUT`, 5 s) ends
+`bind` with exit 5 wherever it fires.
 
 **Failing closed.** A pin exists to keep one employer's work out of another's account, so no
 failure ever falls back to the default account. If `bind` fails, times out, or `cc-detect` is
 missing, the wrapper refuses to start Claude in a folder that is (or may be) pinned, with
 `cc-switch: could not decide the account for <folder>: <reason>; run cc status`. The companion
 leaves the window's environment as it was and shows `Claude: ? (cc-switch error)` with a Retry.
+In a folder that is clearly not pinned, the wrapper runs Claude on the default account (never on
+an inherited `CLAUDE_CONFIG_DIR`, which may name an account reserved for another folder's pin).
 Only when cc was never set up does the wrapper run Claude unchanged.
 
 **When a limit is hit.** The plugin's `StopFailure` hook records the limit in `state.json`, and
@@ -174,6 +193,15 @@ conversation), then switches the environment, then says: *acme is limited until 
 in this window start on personal; the running chat stays on acme.* A timer set to the end of the
 limit moves the window back. A pin set to **ask** shows **Use personal** / **Stay**; the answer
 lasts until that limit has passed (`cc vscode fallback` records the same from a terminal).
+
+Carrying never crosses pins: a chat is placed by the `cwd` its transcript records (by its project
+folder's name only when it records none and no folder beside the pin could have the same name),
+and a chat of a pinned folder travels only into that pin's own accounts, even when an unpinned
+parent folder's window moves.
+
+New chats, the history list and resume follow a move at once. The panel's own account label,
+cached login status and live-session list may show the old account until **Developer: Reload
+Window**.
 
 **If Claude started first.** When the Claude extension activated before the companion (a panel
 restored at startup can do that), chats are still right, because the wrapper decides them, but

@@ -66,11 +66,20 @@ Check these in order:
    once it is recorded. Plugins are per account. For the first account run `claude plugin list`;
    for an added one run `CLAUDE_CONFIG_DIR=~/.claude-<name> claude plugin list`. Look for
    `cc-switch`. If it is missing, follow [Step 6a in the README](../README.md#step-6-vs-code-users-only).
-4. **The chat was already running.** A running chat keeps its account. Start a new chat, or reopen
-   it from the history list, to continue on the new one.
+4. **The chat was already running.** A running chat keeps its account. Start a new chat, or close
+   its tab and then reopen it from the history list, to continue on the new one. Picking a chat
+   whose tab is still open only brings that tab back, on the old account.
 5. **The history list shows another account's chats.** That happens when the Claude extension
    started before the companion bound the window (the companion says so once). Run
-   **Developer: Reload Window**. New chats are on the right account either way.
+   **Developer: Reload Window**. New chats are on the right account either way. After a limit
+   move the panel's own account label and login status can also lag until a reload.
+6. **Claude runs in a terminal** (`claudeCode.useTerminal`). Run `type claude` in a terminal of
+   that window: it should name `~/.claude-switch/terminal-bin/claude`. If another `claude` comes
+   first, a shell startup file put it ahead on `PATH`; move that line, or turn off
+   `claudeCode.useTerminal`. If the shim is missing, run `cc vscode on` and reload the window.
+7. **Several editors.** `cc vscode on` sets the wrapper in one settings file and installs the
+   companion only in the editor that reads it. For another editor (Insiders, VSCodium) run
+   `cc vscode on --settings <its User/settings.json>`.
 
 Older versions wrote `CLAUDE_CONFIG_DIR` into pinned folders' `.vscode/settings.json`. VS Code
 never reads that setting there (the Claude extension declares it machine-scoped, so only user

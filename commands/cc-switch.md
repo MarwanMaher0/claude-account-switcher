@@ -19,8 +19,9 @@ Then tell them plainly:
    conversation with `--resume`, so context is preserved.
 4. If this session is in the VS Code panel and `cc vscode on` is set, the window
    has already moved: new chats start on the next allowed account, and recent
-   chats were carried over. Start a new chat, or reopen this one from the history
-   list, to continue there. Without it, run `cc vscode on` in a terminal first.
+   chats were carried over. Start a new chat, or close this chat's tab and then
+   reopen it from the history list, to continue there (picking it while its tab is
+   open only shows that tab, still on the old account). Without it, run `cc vscode on` in a terminal first.
 5. If it was started with bare `claude` / `claude2`, nothing switches by itself —
    note the session id so it can be resumed manually.
 

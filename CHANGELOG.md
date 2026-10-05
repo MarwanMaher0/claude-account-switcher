@@ -36,6 +36,17 @@
   PIDs of the processes it starts (so no "live elsewhere" detection, no waiting for another
   process to release a session, no re-run of an interrupted turn), and chats start in the
   `default` permission mode when none was chosen. See docs/HOW-IT-WORKS.md.
+- `claudeCode.useTerminal`, which bypasses the process wrapper, is covered by a `claude` shim the
+  companion puts first on the window's terminal `PATH`; it runs terminal Claude through the
+  wrapper, so it fails closed too.
+- Carrying chats on a move never crosses pins: a re-pin of the same folder carries nothing, and a
+  chat is placed by the `cwd` its transcript records. `migrate` also checks that `cwd`, reports
+  names that fit a pin and an unpinned folder beside it, and keeps a source written in the last
+  minutes when it has to copy across filesystems.
+- `cc-detect bind` reads `pins.json` once and strictly (a wrong shape is an error), and its
+  timeout can no longer be swallowed as a read error. The wrapper runs an unpinned folder on the
+  default account when `bind` fails, and uses the `claude` on `PATH` when the extension passes no
+  bundled binary. `cc vscode sync` warns about a set-up left by cc 2.2.
 
 ### Added — separate projects
 - `cc pin`: keep a folder and its subfolders on one account, chosen from an arrow-key menu (a
