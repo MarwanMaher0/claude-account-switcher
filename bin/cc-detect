@@ -48,6 +48,7 @@ Pinned folders (~/.claude-switch/pins.json)
                                     pin a folder and its subfolders to an account
   unpin <path>                      remove the pin on exactly that folder
   pins                              "<path>\\t<id>\\t<onLimit>\\t<fallback>\\t<vscode>" per pin
+  pin-history                       "<path>\\t<id,id>": accounts each folder was pinned to before
   pin-of [dir]                      the pin that applies to a directory (longest match)
   start-for [dir] [forced-id]       "use <id>", "switch <id>", "ask <id>", "stop <id>" or "none"
   bind <folder|-> [folder...] [--json|--shell]
@@ -107,6 +108,7 @@ CONFIG = os.path.join(SWITCH_DIR, "config.json")
 STATE = os.path.join(SWITCH_DIR, "state.json")
 CACHE = os.path.join(SWITCH_DIR, "scan-cache.json")
 PINS = os.path.join(SWITCH_DIR, "pins.json")
+PIN_HISTORY = os.path.join(SWITCH_DIR, "pin-history.json")
 USAGE_DIR = os.path.join(SWITCH_DIR, "usage")
 RUN_DIR = os.path.join(SWITCH_DIR, "run")
 LOCK = os.path.join(SWITCH_DIR, ".lock")
@@ -426,6 +428,24 @@ def save_pins(pins):
     _write_private(PINS, {"version": 1, "pins": sorted(pins, key=lambda p: p["path"])})
 
 
+def note_former(history, root, aid):
+    """Record that `root` was pinned to `aid`. A folder's chats made under a pin are that
+    account's work: `cc adopt` never brings them into the folder's next account on its
+    own (see cc-vscode adopt)."""
+    if not aid:
+        return
+    folders = history.setdefault("folders", {})
+    rows = [a for a in (folders.get(root) or []) if isinstance(a, str) and a != aid]
+    folders[root] = rows + [aid]
+
+
+def load_pin_history():
+    data = _load_json(PIN_HISTORY, {})
+    if not isinstance(data, dict) or not isinstance(data.get("folders"), dict):
+        data = {"version": 1, "folders": {}}
+    return data
+
+
 def default_id():
     return next((a["id"] for a in accounts() if a.get("isDefault")), None)
 
@@ -481,6 +501,7 @@ def set_pin(path, aid, on_limit, fallback=None, vscode=True):
         raise ConfigError(f"not a folder: {path}")
     dflt = default_id()
     with state_lock():
+        before = next((p for p in load_pins() if p["path"] == root), None)
         pins = [p for p in load_pins() if p["path"] != root]
         pinned = {p["account"] for p in pins} | {aid}
         if fallback and fallback != dflt and fallback in pinned:
@@ -493,6 +514,16 @@ def set_pin(path, aid, on_limit, fallback=None, vscode=True):
                                   f"also be pinned. Change those pins first.")
         pins.append({"path": root, "account": aid, "onLimit": on_limit,
                      "fallback": fallback, "vscode": bool(vscode)})
+        history = load_pin_history()
+        rows = (history["folders"].get(root) or [])
+        changed = aid in rows
+        if changed:
+            history["folders"][root] = [a for a in rows if a != aid]   # current, not former
+        if before is not None and before.get("account") != aid:
+            note_former(history, root, before.get("account"))
+            changed = True
+        if changed:
+            _write_private(PIN_HISTORY, history)
         save_pins(pins)
     return root
 
@@ -504,6 +535,11 @@ def remove_pin(path):
         kept = [p for p in pins if p["path"] != root]
         if len(kept) == len(pins):
             return None
+        history = load_pin_history()
+        for p in pins:
+            if p["path"] == root:
+                note_former(history, root, p.get("account"))
+        _write_private(PIN_HISTORY, history)
         save_pins(kept)
     return root
 
@@ -1629,6 +1665,11 @@ def main(argv):
         for pin in load_pins():
             print("\t".join([pin["path"], pin.get("account") or "", pin.get("onLimit") or "",
                              pin.get("fallback") or "-", "1" if pin.get("vscode") else "0"]))
+
+    elif cmd == "pin-history":
+        for root, ids in sorted(load_pin_history()["folders"].items()):
+            if ids:
+                print(f"{root}\t{','.join(ids)}")
 
     elif cmd == "pin-of":
         pin = pin_for(args[0] if args else None)

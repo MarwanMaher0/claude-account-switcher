@@ -23,6 +23,8 @@
 #   cc pin <folder> --account <id> --fallback <id>|none|ask [--no-vscode]
 #   cc unpin [folder]      remove a pin
 #   cc pins                list pinned folders
+#   cc adopt [folder]      bring a pinned folder's chats from other accounts into its own
+#   cc adopt [folder] --dry-run | --from <id> | --all
 #   cc cloud "<task>"      start a cloud session on the account holding the cloud credit
 #   cc cloud set <id>      choose that account  (cc cloud --acct <id> overrides once)
 #   cc --acct <id>         force a specific account for this run
@@ -298,6 +300,10 @@ cmd_pin() {
         *)         on_limit=switch; fb_id="$fb" ;;
     esac
     "$DETECT" pin "$folder" "$acct" "$on_limit" "$fb_id" "$vscode" >/dev/null || exit $?
+    # The folder's chats follow the pin: link the ones other accounts hold into $acct,
+    # so its history and resume keep showing them. (Open VS Code windows do the same
+    # before they move; this covers the terminal and windows opened later.)
+    adopt_pinned "$folder"
 
     local rule
     case "$on_limit" in
@@ -312,6 +318,45 @@ cmd_pin() {
     fi
     sync_vscode
     return 0
+}
+
+# Link a pinned folder's chats into its account; report what happened, never fail.
+adopt_pinned() {
+    local out line
+    [ -x "$VSCODE" ] || return 0
+    if out="$("$VSCODE" adopt --folder "$1" </dev/null 2>&1)"; then
+        case "$out" in *": nothing to bring over") return 0 ;; esac
+        while IFS= read -r line; do note "$line"; done <<EOF
+$out
+EOF
+    else
+        while IFS= read -r line; do warn "$line"; done <<EOF
+$out
+EOF
+        warn "not every chat of $(tilde "$1") could be brought over; run: cc adopt $(tilde "$1")"
+    fi
+    return 0
+}
+
+cmd_adopt() {
+    [ -x "$VSCODE" ] || die "missing $VSCODE"
+    "$DETECT" accounts >/dev/null || exit 3
+    local args=() folder=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from)
+                { [ $# -ge 2 ] && [ -n "$2" ]; } || die "cc adopt: --from needs an account"
+                args+=("$1" "$2"); shift 2 ;;
+            --dry-run|-n|--all|--json) args+=("$1"); shift ;;
+            -*) die "cc adopt: unknown option $1" ;;
+            *) [ -z "$folder" ] || die "cc adopt: one folder at a time"; folder="$1"; shift ;;
+        esac
+    done
+    case " ${args[*]:-} " in
+        *" --all "*) [ -z "$folder" ] || die "cc adopt: a folder or --all, not both" ;;
+        *) args+=(--folder "${folder:-$PWD}") ;;
+    esac
+    "$VSCODE" adopt "${args[@]}"
 }
 
 cmd_unpin() {
@@ -717,6 +762,7 @@ case "${1:-}" in
     pin)    shift; cmd_pin "$@"; exit $? ;;
     unpin)  shift; cmd_unpin "$@"; exit $? ;;
     pins)   shift; cmd_pins; exit $? ;;
+    adopt)  shift; cmd_adopt "$@"; exit $? ;;
     cloud)  shift; cmd_cloud "$@"; exit $? ;;
     vscode)
         shift
@@ -754,6 +800,9 @@ CONTINUE_MSG=""
 PIN_ACCT=""
 if pin="$("$DETECT" pin-of "$CWD" 2>/dev/null)"; then
     PIN_ACCT="$(printf '%s' "$pin" | cut -f2)"
+    # Chats of this folder made before it was pinned, so /resume finds them. Bounded
+    # and silent: it only adds links, so a slow disk never holds the launch up.
+    [ -x "$VSCODE" ] && "$VSCODE" adopt --folder "${pin%%$'\t'*}" --quick --quiet </dev/null >/dev/null 2>&1
 fi
 # Accounts already used in this run, space-delimited. A plain string rather than
 # an associative array because macOS ships bash 3.2, which has no `declare -A`.

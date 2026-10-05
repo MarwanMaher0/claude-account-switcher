@@ -36,6 +36,13 @@ Subcommands
   carry <id>               link the last week's unpinned chats from other accounts into <id>
   carry --folder <f> --from <a> --to <b>
                            link the last week's chats of one folder from <a> into <b>
+  adopt [<folder> | --folder <f> | --all] [--from <id>]... [--dry-run] [--json] [--quick]
+                           link a pinned folder's chats, of any age, from the other accounts
+                           into the pin's account: transcripts, session folders, checkpoints,
+                           todos and missing memory notes. Never moves, deletes or overwrites;
+                           a chat of another pin, or held by an account this folder was
+                           pinned to before, stays (--from <id> brings the latter). `cc pin`,
+                           `cc vscode on`, the companion and the wrapper run it by themselves
   migrate [--apply|--undo] [--verbose]
                            clean up what older versions wrote into folders' .vscode
                            settings, and move each pinned folder's chats into its pinned
@@ -644,19 +651,23 @@ def transcript_cwd(path, limit=256 * 1024):
     or None when none is found near the start."""
     try:
         with open(path, "rb") as fh:
-            head = fh.read(limit)
+            read = 0
+            while read < limit:          # line by line: most chats name it in the first few
+                raw = fh.readline(limit - read)
+                if not raw:
+                    break
+                read += len(raw)
+                if b'"cwd"' not in raw:
+                    continue
+                try:
+                    obj = json.loads(raw.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                cwd = obj.get("cwd") if isinstance(obj, dict) else None
+                if isinstance(cwd, str) and cwd.startswith("/"):
+                    return cwd
     except OSError:
         return None
-    for raw in head.splitlines():
-        if b'"cwd"' not in raw:
-            continue
-        try:
-            obj = json.loads(raw.decode("utf-8", "replace"))
-        except ValueError:
-            continue
-        cwd = obj.get("cwd") if isinstance(obj, dict) else None
-        if isinstance(cwd, str) and cwd.startswith("/"):
-            return cwd
     return None
 
 
@@ -792,6 +803,325 @@ def hard_link(src, dst):
     if os.environ.get("CC_TEST_NO_HARDLINK") == "1":
         raise OSError(18, "Invalid cross-device link (CC_TEST_NO_HARDLINK)")
     os.link(src, dst)
+
+
+# ------------------------------------------------------------------- adopt ----
+# A pinned folder's chats follow the pin. Claude Code keeps a chat in the account it
+# ran on, so a folder pinned after it was used has its earlier chats in other accounts:
+# the default one, or one reserved for another folder. Once a window on the folder is
+# bound to the pin's account, its history list and every resume read that account,
+# and those chats are gone from view; open tabs reloaded into it come back empty.
+# `adopt` links them into the pin's account first: the transcript, its session folder
+# (subagents, tool results), its rewind checkpoints and todos, and the project's
+# memory notes the account does not have yet. Hard links (a verified copy across
+# filesystems): nothing is moved, deleted or overwritten, and a second run does nothing.
+#
+# Which chats travel. The cwd Claude recorded in a chat proves where it was made, so
+# a chat made in this folder follows it whichever account holds it, including one
+# reserved for another pinned folder (that pin owns its own folder's chats, not these).
+# Never:
+#   - a chat of another pinned folder, a nested pin included (its own pin owns it);
+#   - a chat without a recorded cwd whose project name could also be a folder beside it;
+#   - chats held by an account this folder was pinned to before, or that a pinned
+#     folder around it is or was pinned to (pin-history.json): those were made under
+#     that pin, so they are that account's work. Re-pinning a folder from acme to
+#     globex must not hand acme's chats to globex. They are reported, and
+#     `adopt --from acme` brings them over when the user says so.
+PIN_HISTORY = os.path.join(SWITCH_DIR, "pin-history.json")
+ADOPT_QUICK_SECONDS = 2
+
+
+class AdoptDeadline(BaseException):
+    """The time budget of `adopt --quick` ran out (never an OSError, so no handler on
+    the way swallows it)."""
+
+
+def pin_history():
+    try:
+        with open(PIN_HISTORY) as fh:
+            data = json.load(fh)
+        folders = data.get("folders") if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        folders = None
+    if not isinstance(folders, dict):
+        return {}
+    return {k: [a for a in v if isinstance(a, str)] for k, v in folders.items() if isinstance(v, list)}
+
+
+def former_accounts(root, pin_rows, history):
+    """Accounts whose copies of `root`'s chats stay where they are: the ones `root`, or
+    a pinned folder containing it, is or was pinned to (other than root's own pin)."""
+    out = set()
+    for p in pin_rows:
+        if p["path"] != root and (root + os.sep).startswith(p["path"].rstrip(os.sep) + os.sep):
+            out.add(p["account"])
+    for path, ids in history.items():
+        if (root + os.sep).startswith(path.rstrip(os.sep) + os.sep):
+            out.update(ids)
+    return out
+
+
+def link_new(src, dst):
+    """Make dst the same file as src without ever replacing anything: 'linked',
+    'copied' (another filesystem), 'already' (dst is that file, or has its exact
+    content) or 'conflict' (dst exists with other content, and is left alone)."""
+    if os.path.lexists(dst):
+        return "already" if same_file(src, dst) else "conflict"
+    os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
+    try:
+        hard_link(src, dst)
+        return "linked"
+    except FileExistsError:
+        return "already" if same_file(src, dst) else "conflict"
+    except OSError:
+        pass
+    tmp = f"{dst}.cc-adopt.{os.getpid()}"
+    try:
+        shutil.copy2(src, tmp)
+        if not same_file(src, tmp):
+            raise OSError(f"could not verify the copy of {src}")
+        try:
+            os.link(tmp, dst)            # no-clobber: fails if dst appeared meanwhile
+        except FileExistsError:
+            return "already" if same_file(src, dst) else "conflict"
+        except OSError:                  # no hard links here at all
+            with open(tmp, "rb") as fin, open(dst, "xb") as fout:
+                shutil.copyfileobj(fin, fout)
+            shutil.copystat(tmp, dst)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return "copied"
+
+
+def _files_under(top):
+    out = []
+    for dirpath, dirs, files in os.walk(top):
+        dirs.sort()
+        for name in sorted(files):
+            path = os.path.join(dirpath, name)
+            if not os.path.islink(path) and os.path.isfile(path) \
+                    and not any(t in name for t in (".cc-adopt.", ".cc-carry.", ".cc-migrate.")):
+                out.append(path)
+    return out
+
+
+def adopt_extras(acct, slug_dir, sid, target, put):
+    """A chat's session folder, rewind checkpoints and todos, into the target account."""
+    extras = _files_under(os.path.join(slug_dir, sid))
+    extras += _files_under(os.path.join(acct["dir"], "file-history", sid))
+    extras += sorted(glob.glob(os.path.join(glob.escape(acct["dir"]), "todos", glob.escape(sid) + "-*.json")))
+    for extra in extras:
+        put(extra, os.path.join(target["dir"], os.path.relpath(extra, acct["dir"])), False, acct["id"])
+
+
+def adopt(folder, include=(), dry=False, deadline=None):
+    """Bring the chats of the pin on `folder` into its account (see above). `include`
+    names former accounts whose chats come along anyway. Returns a report."""
+    root = canon(folder)
+    accts = accounts()
+    by_id = {a["id"]: a for a in accts}
+    pin_rows = pins()
+    pin = pin_of_path(root, pin_rows)
+    if pin is None:
+        raise SystemExit(f"cc-vscode: {tilde(root)} is not pinned (cc pin it first)")
+    root = pin["path"]
+    target = by_id.get(pin["account"])
+    if target is None:
+        raise SystemExit(f"cc-vscode: {tilde(root)} is pinned to '{pin['account']}', which is not an account")
+    excluded = former_accounts(root, pin_rows, pin_history()) - {target["id"]} - set(include)
+    tdir = os.path.realpath(target["dir"])
+    rep = {"ok": True, "folder": root, "to": target["id"], "dryRun": bool(dry), "chats": 0,
+           "already": 0, "files": 0, "copied": 0, "from": {}, "left": {}, "conflicts": [],
+           "errors": [], "incomplete": False}
+
+    def put(src, dst, chat, src_acct):
+        try:
+            if dry:
+                how = ("already" if same_file(src, dst) else "conflict") if os.path.lexists(dst) else "new"
+            else:
+                how = link_new(src, dst)
+        except OSError as exc:
+            rep["errors"].append(f"{tilde(src)}: {exc}")
+            return
+        if how == "conflict":
+            rep["conflicts"].append(f"{tilde(dst)} already exists in {target['id']} with other content; "
+                                    f"kept it ({tilde(src)} in {src_acct} differs)")
+        elif how == "already":
+            if chat:
+                rep["already"] += 1
+        else:
+            rep["copied"] += how == "copied"
+            if chat:
+                rep["chats"] += 1
+                rep["from"][src_acct] = rep["from"].get(src_acct, 0) + 1
+            else:
+                rep["files"] += 1
+
+    try:
+        for acct in accts:
+            if acct["id"] == target["id"] or os.path.realpath(acct["dir"]) == tdir:
+                continue
+            proj = os.path.join(acct["dir"], "projects")
+            try:
+                slugs = sorted(n for n in os.listdir(proj) if under(n, root))
+            except OSError:
+                continue
+            for slug in slugs:
+                slug_dir = os.path.join(proj, slug)
+                try:
+                    names = sorted(n for n in os.listdir(slug_dir) if n.endswith(".jsonl"))
+                except OSError:
+                    continue
+                memory = False
+                for name in names:
+                    if deadline is not None and time.time() > deadline:
+                        rep["incomplete"] = True
+                        raise AdoptDeadline()
+                    src = os.path.join(slug_dir, name)
+                    if os.path.islink(src) or not os.path.isfile(src):
+                        continue
+                    sid = name[:-6]
+                    dst_proj = os.path.join(target["dir"], "projects", slug)
+                    if same_inode(src, os.path.join(dst_proj, name)):
+                        # Linked already: the pin's account has this very chat. Only its
+                        # session files may be new (it may have run on here since).
+                        if acct["id"] not in excluded:
+                            rep["already"] += 1
+                            adopt_extras(acct, slug_dir, sid, target, put)
+                            memory = True
+                        continue
+                    cwd, owner, certain = chat_place(src, slug, pin_rows)
+                    if cwd is not None:
+                        if not path_in(cwd, root):
+                            continue
+                    elif not certain or not slug_under(slug, root) or slug_ambiguous(slug, root):
+                        continue
+                    if owner is None or owner["path"] != root:
+                        continue             # another pin's chat: never here
+                    if acct["id"] in excluded:
+                        rep["left"][acct["id"]] = rep["left"].get(acct["id"], 0) + 1
+                        continue
+                    put(src, os.path.join(dst_proj, name), True, acct["id"])
+                    adopt_extras(acct, slug_dir, sid, target, put)
+                    memory = True
+                if memory:                   # the project's notes, where one of its chats came from
+                    for note in _files_under(os.path.join(slug_dir, "memory")):
+                        put(note, os.path.join(target["dir"], os.path.relpath(note, acct["dir"])),
+                            False, acct["id"])
+    except AdoptDeadline:
+        rep["incomplete"] = True
+    rep["ok"] = not rep["errors"] and not rep["incomplete"]
+    return rep
+
+
+def describe_adopt(rep):
+    n = lambda count, what: f"{count} {what}" + ("" if count == 1 else "s")   # noqa: E731
+    lines = []
+    verb = "would bring" if rep["dryRun"] else "brought"
+    if rep["chats"]:
+        frm = ", ".join(f"{n(c, 'chat')} from {a}" for a, c in sorted(rep["from"].items()))
+        extra = f" (+{n(rep['files'], 'session, checkpoint or memory file')})" if rep["files"] else ""
+        lines.append(f"{tilde(rep['folder'])} -> {rep['to']}: {verb} {frm}{extra}")
+    elif rep["files"]:
+        lines.append(f"{tilde(rep['folder'])} -> {rep['to']}: {verb} "
+                     f"{n(rep['files'], 'session, checkpoint or memory file')}")
+    else:
+        lines.append(f"{tilde(rep['folder'])} -> {rep['to']}: nothing to bring over")
+    if rep["already"]:
+        lines.append(f"  {n(rep['already'], 'chat')} already in {rep['to']}")
+    if rep["copied"]:
+        lines.append(f"  {rep['copied']} copied rather than linked (another filesystem)")
+    for acct, count in sorted(rep["left"].items()):
+        lines.append(f"  left {n(count, 'chat')} in {acct}: this folder (or one around it) is or was "
+                     f"pinned to {acct}, so they are {acct}'s; `cc adopt {tilde(rep['folder'])} "
+                     f"--from {acct}` brings them")
+    for c in rep["conflicts"]:
+        lines.append(f"  conflict: {c}")
+    for e in rep["errors"]:
+        lines.append(f"  ! {e}")
+    if rep["incomplete"]:
+        lines.append("  ! ran out of time; run it again to finish")
+    return "\n".join(lines)
+
+
+def cmd_adopt(args):
+    usage = ("usage: cc-vscode adopt [--folder <f> | <f> | --all] [--from <id>]... "
+             "[--dry-run] [--json] [--quick] [--quiet]")
+    folder, include, every = None, [], False
+    dry = quick = quiet = as_json = False
+    deadline = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("--folder", "--from", "--deadline"):
+            if i + 1 >= len(args):
+                print(usage, file=sys.stderr)
+                return 2
+            v = args[i + 1]
+            i += 2
+            if a == "--folder":
+                folder = v
+            elif a == "--from":
+                include.append(v)
+            else:
+                try:
+                    deadline = time.time() + float(v)
+                except ValueError:
+                    print(usage, file=sys.stderr)
+                    return 2
+            continue
+        if a == "--all":
+            every = True
+        elif a in ("--dry-run", "-n"):
+            dry = True
+        elif a == "--quick":
+            quick = True
+        elif a in ("--quiet", "-q"):
+            quiet = True
+        elif a == "--json":
+            as_json = True
+        elif a.startswith("-") or folder is not None:
+            print(usage, file=sys.stderr)
+            return 2
+        else:
+            folder = a
+        i += 1
+    if quick:
+        # The wrapper's call, on the way to starting Claude: bounded, silent, and never
+        # a reason not to start (it changes nothing that exists, so stopping is safe).
+        deadline = time.time() + ADOPT_QUICK_SECONDS if deadline is None else deadline
+        try:
+            import signal
+
+            def _stop(*_):
+                raise AdoptDeadline()
+            signal.signal(signal.SIGALRM, _stop)
+            signal.alarm(ADOPT_QUICK_SECONDS + 1)
+        except (ImportError, ValueError, AttributeError):
+            pass
+    try:
+        if every:
+            roots = [p["path"] for p in pins()]
+        else:
+            roots = [folder or os.getcwd()]
+        reps = [adopt(r, include=include, dry=dry, deadline=deadline) for r in roots]
+    except AdoptDeadline:
+        return 5
+    if as_json:
+        print(json.dumps(reps if every else reps[0]))
+    elif not quiet:
+        if dry:
+            print("cc adopt: dry run, nothing is changed. Without --dry-run it does this:")
+        if every and not reps:
+            print("No pinned folders.")
+        for rep in reps:
+            print(describe_adopt(rep))
+    if any(r["incomplete"] for r in reps):
+        return 5
+    return 0 if all(r["ok"] for r in reps) else 1
 
 
 # ----------------------------------------------------------------- windows ----
@@ -981,6 +1311,7 @@ def plan_chats(dirs):
     pin_rows = pins()
     accts = accounts()
     by_id = {a["id"]: a for a in accts}
+    history = pin_history()
     for acct in accts:
         proj = os.path.join(acct["dir"], "projects")
         try:
@@ -992,6 +1323,13 @@ def plan_chats(dirs):
                 continue
             owner = slug_owner_checked(os.path.join(proj, slug), slug, pin_rows, notes)
             if owner is None or owner["account"] == acct["id"] or owner["account"] not in by_id:
+                continue
+            if acct["id"] in former_accounts(owner["path"], pin_rows, history):
+                # Made under an earlier pin (or a pin around it) on this account: that
+                # account's work, never handed to the folder's new account (as adopt).
+                notes.append(f"{tilde(os.path.join(proj, slug))}: {tilde(owner['path'])} is or was pinned "
+                             f"to {acct['id']}, so these chats are {acct['id']}'s; left there "
+                             f"(`cc adopt {tilde(owner['path'])} --from {acct['id']}` links them)")
                 continue
             dest_root = by_id[owner["account"]]["dir"]
             sessions = set()
@@ -1355,6 +1693,15 @@ def cmd_on(args):
         print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
         return 1
 
+    # 0. Each pinned folder's chats into its pin's account, before any window is bound
+    #    there: otherwise its history list and its reopened tabs come up empty.
+    adopted = []
+    for p in pins():
+        try:
+            adopted.append(adopt(p["path"]))
+        except SystemExit as exc:
+            print(f"cc-vscode: {exc}", file=sys.stderr)
+
     # 1. The companion first: settings change only once it is in place, so no window is
     #    left on an account its history does not match.
     try:
@@ -1425,6 +1772,9 @@ def cmd_on(args):
         print("  companion  NOT installed (--wrapper-only): the history list may show another account")
     if backup:
         print(f"  backup     {tilde(backup)}")
+    for rep in adopted:
+        if rep["chats"] or rep["files"] or rep["left"] or rep["conflicts"] or not rep["ok"]:
+            print("  chats      " + describe_adopt(rep).replace("\n", "\n             "))
     print("  Open windows re-check within a few seconds. A chat already running stays where it is.")
     if load_ws() or any(a["kind"] == "move" for a in plan_chats(account_dirs())[0]):
         print("  Older versions wrote folder settings or left chats in the wrong account:\n"
@@ -1582,6 +1932,9 @@ def main(argv):
             return 2
         print(carry(args[0]))
         return 0
+
+    if cmd == "adopt":
+        return cmd_adopt(args)
 
     if cmd == "current":
         r = bind_for(args[0] if args else os.getcwd())

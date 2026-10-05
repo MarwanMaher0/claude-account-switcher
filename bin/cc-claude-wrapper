@@ -22,6 +22,7 @@
 #
 # It is on the path of every Claude spawn, including `auth status --json`, so it
 # must stay fast and must never read stdin (that is Claude's stream-json channel).
+# Only a resume in a pinned folder does more: a bounded `cc-vscode adopt --quick`.
 # Plain bash 3.2.
 
 # The extension passes its bundled binary first. A build or platform without one
@@ -129,10 +130,11 @@ fi
 out="$(CC_LIVE_CHECK=0 CC_BIND_TIMEOUT="${CC_BIND_TIMEOUT:-5}" "$detect" bind "$folder" --shell </dev/null 2>/dev/null)"
 rc=$?
 
-account="" dir="" unset_="" error="" configured=""
+account="" dir="" unset_="" error="" configured="" pin=""
 while IFS= read -r line; do
     case "$line" in
         account=*)    account="${line#account=}" ;;
+        pin=*)        pin="${line#pin=}" ;;
         dir=*)        dir="${line#dir=}" ;;
         unset=*)      unset_="${line#unset=}" ;;
         error=*)      error="${line#error=}" ;;
@@ -147,6 +149,23 @@ if [ "$rc" -eq 4 ] && [ "$configured" = "0" ]; then
 fi
 if [ "$rc" -ne 0 ] || [ -z "$account" ]; then
     fail "${error:-cc-detect bind exited with status $rc}" "$@"
+fi
+
+# Resuming in a pinned folder: link the folder's chats that other accounts hold into
+# the pin's account first, so the session being resumed is there (it may predate the
+# pin). Only for a resume, never for the many other spawns; bounded by adopt itself
+# (--quick: about two seconds, then it stops), output dropped, its status ignored. It
+# only adds links, so stopping early or failing never stands in the way of the launch.
+if [ -n "$pin" ]; then
+    for a in "$@"; do
+        case "$a" in
+            --resume|--resume=*|-r|--continue|-c)
+                vscode_tool="$(dirname "$detect")/cc-vscode"
+                [ -x "$vscode_tool" ] && CC_LIVE_CHECK=0 "$vscode_tool" adopt --folder "$pin" --quick --quiet \
+                    </dev/null >/dev/null 2>&1
+                break ;;
+        esac
+    done
 fi
 
 if [ "$unset_" = "1" ]; then
