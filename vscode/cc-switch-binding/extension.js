@@ -9,7 +9,9 @@
 //     or deletes it for the default account (it is never set to ~/.claude);
 //   - process.env.CC_WINDOW_FOLDER to the window's first folder, so cc-claude-wrapper
 //     resolves helper processes started in a temp dir by window;
-//   - the same CLAUDE_CONFIG_DIR in the window's terminals (claudeCode.useTerminal).
+//   - the same CLAUDE_CONFIG_DIR in the window's terminals, and, with
+//     claudeCode.useTerminal (which bypasses the process wrapper), cc's `claude` shim
+//     first on their PATH, so terminal Claude goes through the wrapper too.
 // The process wrapper (claudeCode.claudeProcessWrapper = cc-claude-wrapper) decides the
 // account of every Claude process on its own and fails closed, so a chat never runs on
 // the wrong account even when this extension could not bind. This extension makes the
@@ -118,6 +120,15 @@ class Binder {
         vscode.workspace.onDidChangeWorkspaceFolders(() => {
           this.setWindowFolder();
           this.schedule('workspace folders changed', 0);
+        }));
+    }
+    this.setTerminal();
+    if (vscode.workspace.onDidChangeConfiguration) {
+      this.context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((e) => {
+          if (!e || !e.affectsConfiguration || e.affectsConfiguration('claudeCode.useTerminal')) {
+            this.setTerminal();
+          }
         }));
     }
     this.watch();
@@ -298,23 +309,42 @@ class Binder {
     this.errorShown = true;
     Promise.resolve(vscode.window.showErrorMessage(
       `cc-switch could not decide this window's Claude account: ${msg}. ` +
-      'Claude will not start in a pinned folder until this is fixed (run `cc status` in a terminal).',
+      'Claude will not start in a pinned folder until this is fixed (run `cc status` in a terminal).' +
+      (this.useTerminal() && !this.terminalLogged
+        ? ' Claude in a terminal (claudeCode.useTerminal) is not covered: run `cc vscode on`.' : ''),
       'Retry', 'Show log')).then((pick) => {
       if (pick === 'Retry') { this.errorShown = false; this.rebind('retry'); }
       if (pick === 'Show log') this.out.show(true);
     }, () => {});
   }
 
+  // True when the window moves between accounts because of a limit (or its end), with
+  // the folder's pin unchanged. Only such a move carries chats. A pin that now names
+  // another account (cc pin <same folder> --account other) must never carry: that
+  // would link one employer's chats into another's account.
+  isLimitMove(prev, r) {
+    if (!prev || prev.account === r.account) return false;
+    if ((prev.pin || null) !== (r.pin || null)) return false;
+    if ((prev.pinAccount || null) !== (r.pinAccount || null)) return false;
+    if (!r.pin) return !prev.pinned && !r.pinned;     // unpinned: pick() moved on a limit
+    if (!r.pinAccount || !r.fallback || (prev.fallback || null) !== r.fallback) return false;
+    const pair = [prev.account, r.account].sort().join('|');
+    if (pair !== [r.pinAccount, r.fallback].sort().join('|')) return false;
+    return this.onFallback(r) || this.onFallback(prev);
+  }
+
   async apply(r, trigger) {
     const prev = this.last;
-    const samePin = prev && (prev.pin || null) === (r.pin || null);
-    const moved = prev && prev.account !== r.account;
+    const samePin = !!prev && (prev.pin || null) === (r.pin || null) &&
+      (prev.pinAccount || null) === (r.pinAccount || null);
+    const moved = !!prev && prev.account !== r.account;
+    const limitMove = this.isLimitMove(prev, r);
     this.errorShown = false;
 
     // A move caused by a limit (or its end) carries this folder's recent chats first,
     // so the history list and resume keep working on the new account.
-    if (moved && samePin) {
-      const folder = r.pin || (r.folder) || this.folders()[0];
+    if (limitMove) {
+      const folder = r.pin || r.folder || this.folders()[0];
       if (folder) {
         const res = await this.runTool(['carry', '--folder', folder, '--from', prev.account, '--to', r.account]);
         this.log(`carried chats of ${folder} from ${prev.account} to ${r.account}: ` +
@@ -342,7 +372,7 @@ class Binder {
         });
     }
 
-    if (moved) this.announceMove(prev, r, samePin);
+    if (moved) this.announceMove(prev, r, samePin && limitMove);
     if (r.verb === 'ask' && !r.choice) this.askFallback(r);
     if (r.mixed) {
       const key = (r.folders || []).map((f) => `${f.folder}=${f.account}`).join(',');
@@ -376,6 +406,52 @@ class Binder {
       if (coll) coll.delete('CLAUDE_CONFIG_DIR');
     }
     this.setWindowFolder();
+    this.setTerminal();
+  }
+
+  useTerminal() {
+    try {
+      return !!vscode.workspace.getConfiguration('claudeCode').get('useTerminal');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // claudeCode.useTerminal runs plain `claude` from PATH in a terminal: no process
+  // wrapper, and no CLAUDE_CONFIG_DIR from the Claude extension. So in that mode this
+  // window's terminals get cc's shim first on PATH, which runs `claude` through
+  // cc-claude-wrapper: the account is decided, and fails closed, exactly as for the
+  // panel, whether or not this extension could bind. Set before the first decision.
+  setTerminal() {
+    const coll = this.context.environmentVariableCollection;
+    if (!coll) return;
+    coll.persistent = false;
+    const first = this.folders()[0];
+    if (first) coll.replace('CC_WINDOW_FOLDER', first);
+    else coll.delete('CC_WINDOW_FOLDER');
+    if (!this.useTerminal()) {
+      coll.delete('PATH');
+      return;
+    }
+    let dir = null;
+    try { dir = this.binding().terminalBin || null; } catch (_) { dir = null; }
+    if (dir && fs.existsSync(path.join(dir, 'claude'))) {
+      coll.prepend('PATH', dir + path.delimiter);
+      if (!this.terminalLogged) this.log(`claudeCode.useTerminal: terminals run claude through ${dir}/claude`);
+      this.terminalLogged = true;
+    } else {
+      coll.delete('PATH');
+      this.terminalLogged = false;
+      this.log('claudeCode.useTerminal is on but cc\'s terminal shim is missing (run `cc vscode on`): ' +
+        'Claude in a terminal does not go through the wrapper');
+      if (!this.terminalWarned) {
+        this.terminalWarned = true;
+        this.notify('warning',
+          'cc-switch: Claude runs in a terminal here (claudeCode.useTerminal), and cc\'s terminal ' +
+          'shim is missing, so that Claude is not bound to this folder\'s account. Run `cc vscode on` ' +
+          'in a terminal, then reload the window.', [], null);
+      }
+    }
   }
 
   setWindowFolder() {

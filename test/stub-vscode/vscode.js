@@ -1,7 +1,8 @@
 'use strict';
 // A recording stand-in for the `vscode` module, enough to run the cc-switch companion
 // under plain node. Everything the extension does is kept in `record`; scenarios set
-// `record.folders`, `record.remoteName`, `record.extensions` and `record.answer`.
+// `record.folders`, `record.remoteName`, `record.extensions`, `record.config` and
+// `record.answer`.
 const record = {
   folders: [],
   remoteName: undefined,
@@ -13,6 +14,8 @@ const record = {
   executed: [],
   folderListeners: [],
   answer: null,          // (kind, msg, items) => item to click, or undefined
+  config: {},            // 'section.key' => value, for workspace.getConfiguration
+  configListeners: [],
 };
 
 function show(kind) {
@@ -53,6 +56,8 @@ module.exports = {
       return record.folders.map((p) => (typeof p === 'string' ? { uri: { scheme: 'file', fsPath: p } } : p));
     },
     onDidChangeWorkspaceFolders: (fn) => { record.folderListeners.push(fn); return { dispose() {} }; },
+    getConfiguration: (section) => ({ get: (key) => record.config[`${section}.${key}`] }),
+    onDidChangeConfiguration: (fn) => { record.configListeners.push(fn); return { dispose() {} }; },
   },
   extensions: { getExtension: (id) => record.extensions[id] },
   env: { get remoteName() { return record.remoteName; } },

@@ -66,7 +66,7 @@ if pin="$("$DETECT" pin-of "$cwd" 2>/dev/null)"; then
                 msg="$hit Exit this session and cc continues it on '$next', with the conversation carried over."
             elif [ "$in_vscode" = "1" ] && [ "$pin_vscode" = "1" ] && [ "$vscode_on" = "1" ]; then
                 [ -x "$VSCODE" ] && "$VSCODE" sync --quiet >/dev/null 2>&1
-                msg="$hit This folder falls back to '$next': new chats in this VS Code window start on '$next', and this chat stays on '$id' until the reset. Start a new chat, or reopen this one from the history list, to continue on '$next'."
+                msg="$hit This folder falls back to '$next': new chats in this VS Code window start on '$next', and this chat stays on '$id' until the reset. Start a new chat, or close this chat's tab and then reopen it from the history list, to continue on '$next' (picking it while its tab is open only shows that tab, still on '$id')."
             elif [ "$in_vscode" = "1" ]; then
                 msg="$hit This folder falls back to '$next'. Run \`cc vscode on\` in a terminal so new chats in VS Code move there by themselves."
             else
@@ -95,7 +95,7 @@ elif [ "${CC_MANAGED:-}" = "1" ]; then
     msg="$hit Exit this session and cc continues it on '$next', with the conversation carried over."
 elif [ "$in_vscode" = "1" ] && [ "$vscode_on" = "1" ]; then
     [ -x "$VSCODE" ] && "$VSCODE" sync --quiet >/dev/null 2>&1
-    msg="$hit New chats in this VS Code window start on '$next'; this chat stays on '$id' until the reset. Start a new chat, or reopen this one from the history list, to continue on '$next'."
+    msg="$hit New chats in this VS Code window start on '$next'; this chat stays on '$id' until the reset. Start a new chat, or close this chat's tab and then reopen it from the history list, to continue on '$next' (picking it while its tab is open only shows that tab, still on '$id')."
 elif [ "$in_vscode" = "1" ]; then
     msg="$hit Run \`cc vscode on\` in a terminal so new chats in VS Code move to '$next' by themselves."
 else

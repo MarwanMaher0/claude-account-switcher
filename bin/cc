@@ -45,6 +45,10 @@ VSCODE="$HERE/cc-vscode"
 AUTOKILL=1
 AUTO_CONTINUE=1
 RUN_DIR="$HOME/.claude-switch/run"
+# cc chooses the account of every Claude it starts. In a VS Code terminal whose PATH
+# leads `claude` through cc-claude-wrapper (claudeCode.useTerminal), this tells cc's
+# terminal shim to run Claude directly.
+export CC_SWITCH_DIRECT=1
 
 c_dim=$'\033[2m'; c_yel=$'\033[33m'; c_grn=$'\033[32m'; c_bold=$'\033[1m'; c_rst=$'\033[0m'
 note() { printf '%s[cc]%s %s\n' "$c_dim" "$c_rst" "$*" >&2; }

@@ -53,6 +53,10 @@ elif what == "scope":
     f["settings"]["claudeCode.environmentVariables"]["scope"] = "resource"
 elif what == "marker":
     f["markers"]["child env from {...process.env}"] = False
+elif what == "argv":
+    f["markers"]["wrapper argv: [bundled binary] or []"] = False
+elif what == "terminal":
+    f["notes"]["terminal mode runs plain claude"] = False
 print(json.dumps(f))
 PY
     python3 "$CONTRACT" check "$SANDBOX/mutated.json"
@@ -66,6 +70,12 @@ assert_contains "$out" "NOTE claudeCode.environmentVariables is now scope 'resou
 out="$(mutate marker)"; rc=$?
 assert_eq "$rc" "1" "XC-4 a missing env marker fails the contract"
 assert_contains "$out" "re-verify the binding" "XC-4 ...and says what to do"
+out="$(mutate argv)"; rc=$?
+assert_eq "$rc" "1" "XC-7 a change to how the wrapper is called (<wrapper> <binary> <args>) fails the contract"
+assert_contains "$out" "wrapper argv" "XC-7 ...naming it"
+out="$(mutate terminal)"; rc=$?
+assert_eq "$rc" "0" "XC-8 a change to terminal mode is noted, not failed"
+assert_contains "$out" "claudeCode.useTerminal" "XC-8 ...and named"
 
 # ---- XC-5 : cc writes no folder-level Claude setting anywhere ------------------------------
 hits="$(grep -n '\.vscode' "$REPO/bin/cc" "$REPO/bin/cc-detect" "$REPO/bin/cc-claude-wrapper" "$REPO/bin/cc-watch" \

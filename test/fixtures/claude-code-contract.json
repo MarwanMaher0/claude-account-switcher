@@ -8,7 +8,11 @@
     "child env from {...process.env}": true,
     "reads claudeProcessWrapper": true,
     "reads process.env.CLAUDE_CONFIG_DIR": true,
-    "viaProcessWrapper": true
+    "viaProcessWrapper": true,
+    "wrapper argv: [bundled binary] or []": true
+  },
+  "notes": {
+    "terminal mode runs plain claude": true
   },
   "settings": {
     "claudeCode.claudeProcessWrapper": {

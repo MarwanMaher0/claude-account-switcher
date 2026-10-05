@@ -25,6 +25,16 @@ MARKERS = {
     "child env from {...process.env}": r"\{\.\.\.process\.env\}",
     # the wrapper setting is read where the binary is chosen
     "reads claudeProcessWrapper": r"[\"']claudeProcessWrapper[\"']",
+    # the call shape cc-claude-wrapper relies on: <wrapper> <bundled claude, when there is
+    # one> <args>, i.e. executableArgs is [binary] or [] and the binary comes first
+    "wrapper argv: [bundled binary] or []":
+        r"executableArgs:(\w+)\?\[\1\]:\[\],env:\w+,viaProcessWrapper:!0",
+}
+# Facts that change how cc covers a mode, without breaking the design: a NOTE when absent.
+NOTE_MARKERS = {
+    # useTerminal types plain `claude` into a terminal, and passes no CLAUDE_CONFIG_DIR
+    # when a wrapper is set: the reason for cc's terminal shim
+    "terminal mode runs plain claude": r"\(\w+\(\w+\(\\?\"environmentVariables\\?\"\)\),process\.env\.CLAUDE_CONFIG_DIR,Boolean\(\w+\(\\?\"claudeProcessWrapper\\?\"\)\)\)",
 }
 
 
@@ -46,6 +56,7 @@ def facts(ext_dir):
         "settings": {k: ({"type": props[k].get("type"), "scope": props[k].get("scope")} if k in props else None)
                      for k in SETTINGS},
         "markers": {name: bool(re.search(rx, js)) for name, rx in MARKERS.items()},
+        "notes": {name: bool(re.search(rx, js)) for name, rx in NOTE_MARKERS.items()},
     }
 
 
@@ -68,6 +79,10 @@ def check(f):
         if not present:
             fail.append(f"extension.js no longer contains the marker '{name}': the extension changed, "
                         "re-verify the binding")
+    for name, present in (f.get("notes") or {}).items():
+        if not present:
+            note.append(f"extension.js no longer matches '{name}': check how claudeCode.useTerminal "
+                        "starts Claude (cc's terminal shim assumes plain `claude` from PATH)")
     if "*" in f.get("activationEvents", []):
         note.append("the Claude extension activates on '*': it may start before the companion binds")
     return fail, note
@@ -75,7 +90,7 @@ def check(f):
 
 def compare(a, b):
     out = []
-    for key in ("version", "activationEvents", "views", "settings", "markers"):
+    for key in ("version", "activationEvents", "views", "settings", "markers", "notes"):
         if a.get(key) != b.get(key):
             out.append(f"{key}: {json.dumps(a.get(key))} -> {json.dumps(b.get(key))}")
     return out

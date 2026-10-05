@@ -221,6 +221,55 @@ assert_no_file "$HOME/.claude-switch/windows/999999.json" "V-11 ...whose file is
 assert_contains "$("$BIN/cc" status 2>&1)" "VS Code window ~/work -> two" "V-11 cc status shows them too"
 cleanup_home
 
+# ---- V-12 : the companion goes only to the editor whose settings get the wrapper ----------
+new_home >/dev/null; three_accounts
+mkdir -p "$SANDBOX/clis"
+cat > "$SANDBOX/clis/snap" <<'STUB'
+#!/usr/bin/env bash
+# a stand-in for /usr/bin/snap: every snap command is a link to it, named for its snap
+name="$(basename "$0")"; d="$(dirname "$0")"
+printf '%s %s\n' "$name" "$*" >> "$d/calls.log"
+case "${1:-}" in
+  --install-extension) echo "cc-switch.cc-switch-binding" > "$d/$name.installed" ;;
+  --list-extensions) cat "$d/$name.installed" 2>/dev/null ;;
+  --uninstall-extension) rm -f "$d/$name.installed" ;;
+esac
+exit 0
+STUB
+chmod 755 "$SANDBOX/clis/snap"
+ln -s "$SANDBOX/clis/snap" "$SANDBOX/clis/code"; ln -s "$SANDBOX/clis/snap" "$SANDBOX/clis/codium"
+new_settings <<<'{}'
+out="$(CC_VSCODE_CLI="$SANDBOX/clis/code:$SANDBOX/clis/codium" "$BIN/cc-vscode" on 2>&1)"; rc=$?
+assert_eq "$rc" "0" "V-12 cc vscode on with Code's settings and two snap editors"
+assert_file "$SANDBOX/clis/code.installed" "V-12 the companion is installed in Code"
+assert_no_file "$SANDBOX/clis/codium.installed" "V-12 ...not in VSCodium, whose settings get no wrapper"
+assert_contains "$out" "codium keeps its own settings" "V-12 ...and that is said"
+"$BIN/cc-vscode" off >/dev/null 2>&1; rm -f "$SANDBOX/clis/"*.installed
+out="$(CC_VSCODE_CLI="$SANDBOX/clis/code:$SANDBOX/clis/codium" "$BIN/cc-vscode" on --settings "$SANDBOX/custom.json" 2>&1)"
+assert_file "$SANDBOX/clis/codium.installed" "V-12 snap editors are told apart (all links to /usr/bin/snap)"
+assert_file "$SANDBOX/clis/code.installed" "V-12 ...both get the companion for a settings file of unknown kind"
+cleanup_home
+
+# ---- V-13 : a set-up from cc 2.2 (one global account setting) is called out ---------------
+new_home >/dev/null; three_accounts
+python3 - <<'PY'
+import json, os
+p = os.path.expanduser("~/.claude-switch/config.json")
+cfg = json.load(open(p)); cfg["vscode"] = {"enabled": True, "settingsPath": "~/.config/Code/User/settings.json"}
+json.dump(cfg, open(p, "w"))
+PY
+new_settings <<EOF
+{ "claudeCode.environmentVariables": [ { "name": "CLAUDE_CONFIG_DIR", "value": "$HOME/.claude-2" } ] }
+EOF
+out="$("$BIN/cc-vscode" sync 2>&1)"; rc=$?
+assert_eq "$rc" "0" "V-13 sync still succeeds for a 2.2 set-up"
+assert_contains "$out" "set up by an older cc" "V-13 ...and says the global setting no longer moves"
+assert_contains "$out" "cc vscode on" "V-13 ...and what to run"
+assert_eq "$("$BIN/cc-vscode" sync --quiet 2>&1)" "" "V-13 --quiet (hooks, the launcher) stays silent"
+assert_contains "$("$BIN/cc-vscode" status 2>&1)" "older cc" "V-13 status says so too"
+assert_contains "$("$BIN/cc" use two 2>&1)" "set up by an older cc" "V-13 ...and so does cc use"
+cleanup_home
+
 # ---- R-1..R-4 : limits hit outside cc are learned, and pinned correctly ---------
 new_home >/dev/null; three_accounts
 p1="$HOME/.claude/projects/-work"; p2="$HOME/.claude-2/projects/-work"; p3="$HOME/.claude-3/projects/-work"

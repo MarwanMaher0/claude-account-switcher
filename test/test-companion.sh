@@ -24,12 +24,17 @@ EOF
     "$BIN/cc" pin "$HOME/work/globex" --account globex --fallback ask:personal >/dev/null 2>&1
 }
 
+# One node process per scenario. Its exit status counts as well as its "ok"/"not ok"
+# lines: a crash before any check (a missing stub, a require-time error) is a failure,
+# and so is a scenario that never reports it finished.
 scenario() {
-    local out line
+    local out line nrc finished=0
     new_home >/dev/null; companies
     out="$(cd "$REPO" && NODE_PATH="$REPO/test/stub-vscode" node "$REPO/test/companion-scenarios.js" "$1" 2>&1)"
+    nrc=$?
     while IFS= read -r line; do
         case "$line" in
+            "done "*)   finished=1 ;;
             "ok "*)     ok "${line#ok }" ;;
             "not ok "*) no "${line#not ok }" ;;
             *)          [ -n "$line" ] && printf '      %s\n' "$line" ;;
@@ -37,11 +42,14 @@ scenario() {
     done <<EOF
 $out
 EOF
+    [ "$nrc" -eq 0 ] || no "scenario $1: node exited with status $nrc"
+    [ "$finished" -eq 1 ] || no "scenario $1: did not run to the end"
     cleanup_home
 }
 
 for s in activation default_account failure no_binding rebind_on_limit timer_at_expiry ask mixed \
-         claude_first remote pin_change; do
+         claude_first remote pin_change repin_same_folder unpinned_carry_guard terminal_mode \
+         terminal_mode_failure; do
     scenario "$s"
 done
 

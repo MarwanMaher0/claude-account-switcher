@@ -81,8 +81,8 @@ out="$(cd "$HOME/work/acme" && CC_SWITCH_DETECT="$SANDBOX/nowhere" "$WRAP" "$FAK
 assert_eq "$rc/$( [ -f "$FAKE_OUT" ] && echo ran || echo not-run)" "1/not-run" "WR-7 cc-detect missing in a pinned folder: fail closed"
 out="$(cd "$HOME/notes" && CC_SWITCH_DETECT="$broken" CLAUDE_CONFIG_DIR="$HOME/.claude-3" "$WRAP" "$FAKE" </dev/null 2>&1)"; rc=$?
 assert_eq "$rc" "0" "WR-8 an unpinned folder with cc-detect failing still runs"
-assert_eq "$(seen ccd)" "$HOME/.claude-3" "WR-8 ...unchanged (the window's own binding)"
-assert_contains "$out" "running Claude unchanged" "WR-8 ...and says so"
+assert_eq "$(seen ccd)" "UNSET" "WR-8 ...on the default account, never an inherited (maybe reserved) one"
+assert_contains "$out" "running Claude on the default account" "WR-8 ...and says so"
 rm -f "$FAKE_OUT"
 python3 - <<'PY'
 import json, os
@@ -98,6 +98,72 @@ out="$(cd "$HOME/work/acme" && CC_BIND_TIMEOUT=1 "$WRAP" "$FAKE" </dev/null 2>&1
 elapsed=$(python3 -c "import time; print(int(time.time() - $start))")
 assert_eq "$rc/$( [ -f "$FAKE_OUT" ] && echo ran || echo not-run)" "1/not-run" "WR-10 cc's state cannot be read in time: fail closed"
 [ "$elapsed" -lt 5 ] && ok "WR-10 ...after the timeout, not forever (${elapsed}s)" || no "WR-10 ...after the timeout" "${elapsed}s"
+cleanup_home
+
+# ---- WR-15..WR-19 : state that hangs or is malformed never reads as "not pinned" ----------
+new_home >/dev/null; companies; fake_claude
+"$BIN/cc" pin "$HOME/work/acme" --account acme --fallback personal >/dev/null 2>&1
+"$BIN/cc-detect" mark acme "$future" >/dev/null
+rm -f "$HOME/.claude-switch/state.json"; mkfifo "$HOME/.claude-switch/state.json"
+out="$(CC_BIND_TIMEOUT=1 "$BIN/cc-detect" bind "$HOME/work/acme" --shell 2>/dev/null)"; rc=$?
+assert_eq "$rc" "5" "WR-15 state.json hangs: bind times out (exit 5) instead of deciding without the limit"
+out="$(cd "$HOME/work/acme" && CC_BIND_TIMEOUT=1 "$WRAP" "$FAKE" </dev/null 2>&1)"; rc=$?
+assert_eq "$rc/$( [ -f "$FAKE_OUT" ] && echo ran || echo not-run)" "1/not-run" "WR-15 ...and the wrapper fails closed"
+rm -f "$HOME/.claude-switch/state.json"
+mv "$HOME/.claude-switch/config.json" "$SANDBOX/config.json"; mkfifo "$HOME/.claude-switch/config.json"
+start=$(python3 -c 'import time; print(time.time())')
+out="$(cd "$HOME/work/acme" && CC_BIND_TIMEOUT=1 "$WRAP" "$FAKE" </dev/null 2>&1)"; rc=$?
+elapsed=$(python3 -c "import time; print(int(time.time() - $start))")
+assert_eq "$rc/$( [ -f "$FAKE_OUT" ] && echo ran || echo not-run)" "1/not-run" "WR-16 config.json hangs: fail closed"
+[ "$elapsed" -lt 5 ] && ok "WR-16 ...after the timeout (${elapsed}s)" || no "WR-16 ...after the timeout" "${elapsed}s"
+rm -f "$HOME/.claude-switch/config.json"; mv "$SANDBOX/config.json" "$HOME/.claude-switch/config.json"
+
+cp "$HOME/.claude-switch/pins.json" "$SANDBOX/pins.json"
+python3 - <<'PY'
+import json, os
+p = os.path.expanduser("~/.claude-switch/pins.json")
+json.dump(json.load(open(p))["pins"], open(p, "w"))       # a bare list: the wrong shape
+PY
+out="$(cd "$HOME/work/acme" && "$WRAP" "$FAKE" </dev/null 2>&1)"; rc=$?
+assert_eq "$rc/$( [ -f "$FAKE_OUT" ] && echo ran || echo not-run)" "1/not-run" "WR-17 pins.json of the wrong shape: fail closed, not 'no pins'"
+assert_contains "$out" "not a cc pins file" "WR-17 ...naming the problem"
+cp "$SANDBOX/pins.json" "$HOME/.claude-switch/pins.json"
+mv "$HOME/.claude-switch/config.json" "$SANDBOX/config.json"
+printf '{"pins":[{"path":' > "$HOME/.claude-switch/pins.json"
+out="$(cd "$HOME/work/acme" && CLAUDE_CONFIG_DIR="$HOME/.claude-3" "$WRAP" "$FAKE" </dev/null 2>&1)"; rc=$?
+assert_eq "$rc/$( [ -f "$FAKE_OUT" ] && echo ran || echo not-run)" "1/not-run" \
+    "WR-18 config.json gone and pins.json truncated: fail closed, not 'cc is not set up'"
+mv "$SANDBOX/config.json" "$HOME/.claude-switch/config.json"
+cp "$SANDBOX/pins.json" "$HOME/.claude-switch/pins.json"
+
+# WR-19: no bundled binary (the extension then passes only Claude's arguments)
+mkdir -p "$SANDBOX/pathbin"; cp "$FAKE" "$SANDBOX/pathbin/claude"
+(cd "$HOME/work/acme" && PATH="$SANDBOX/pathbin:$PATH" "$WRAP" --output-format stream-json </dev/null)
+assert_eq "$(seen arg0) $(seen arg1)" "--output-format stream-json" "WR-19 no binary given: every argument goes to the claude on PATH"
+assert_eq "$(seen ccd)" "$HOME/.claude-2" "WR-19 ...on the folder's account"
+rm -f "$FAKE_OUT"
+out="$(cd "$HOME/work/acme" && PATH="/usr/bin:/bin" "$WRAP" --output-format stream-json </dev/null 2>&1)"; rc=$?
+assert_eq "$rc" "1" "WR-19 ...and with no claude on PATH, a clear error"
+assert_contains "$out" "none is on PATH" "WR-19 ...saying so"
+cleanup_home
+
+# ---- WR-20 : the terminal shim (claudeCode.useTerminal) -----------------------------------
+new_home >/dev/null; companies; fake_claude
+"$BIN/cc" pin "$HOME/work/acme" --account acme --fallback personal >/dev/null 2>&1
+CC_VSCODE_CLI="" "$BIN/cc-vscode" on --settings "$SANDBOX/settings.json" --wrapper-only >/dev/null 2>&1
+shim="$HOME/.claude-switch/terminal-bin/claude"
+assert_file "$shim" "WR-20 cc vscode on writes the terminal shim"
+mkdir -p "$SANDBOX/pathbin"; cp "$FAKE" "$SANDBOX/pathbin/claude"
+TPATH="$HOME/.claude-switch/terminal-bin:$SANDBOX/pathbin:$PATH"
+(cd "$HOME/work/acme" && PATH="$TPATH" CLAUDE_CONFIG_DIR="$HOME/.claude-3" claude hello </dev/null)
+assert_eq "$(seen ccd) $(seen arg0)" "$HOME/.claude-2 hello" "WR-20 terminal claude in a pinned folder goes through the wrapper"
+(cd "$HOME/notes" && PATH="$TPATH" CLAUDE_CONFIG_DIR="$HOME/.claude-2" claude </dev/null)
+assert_eq "$(seen ccd)" "UNSET" "WR-20 ...an inherited CLAUDE_CONFIG_DIR is dropped for the default account"
+(cd "$HOME/notes" && PATH="$TPATH" CC_SWITCH_DIRECT=1 CLAUDE_CONFIG_DIR="$HOME/.claude-3" claude </dev/null)
+assert_eq "$(seen ccd)" "$HOME/.claude-3" "WR-20 ...but cc's own launches run Claude directly"
+rm -f "$FAKE_OUT"
+out="$(cd "$HOME/work/acme" && PATH="$TPATH" CC_SWITCH_DETECT="$SANDBOX/nowhere" claude </dev/null 2>&1)"; rc=$?
+assert_eq "$rc/$( [ -f "$FAKE_OUT" ] && echo ran || echo not-run)" "1/not-run" "WR-20 ...and it fails closed in a pinned folder"
 cleanup_home
 
 # ---- WR-11..WR-13 : never ~/.claude, pass-through when cc is not set up --------------------

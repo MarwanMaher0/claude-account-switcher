@@ -49,6 +49,7 @@ function context() {
       persistent: true,
       description: '',
       replace(k, v) { ops.push(['replace', k, v]); },
+      prepend(k, v) { ops.push(['prepend', k, v]); },
       delete(k) { ops.push(['delete', k]); },
     },
   };
@@ -117,7 +118,7 @@ const scenarios = {
     check('C-3 CC_WINDOW_FOLDER is set even so, for the wrapper', process.env.CC_WINDOW_FOLDER === ACME);
     check('C-3 on a failure the env is left as it was (no default fallback)', process.env.CLAUDE_CONFIG_DIR === D3,
       process.env.CLAUDE_CONFIG_DIR);
-    check('C-3 ...and nothing is written to terminals', ctx.ops.length === 0, ctx.ops);
+    check('C-3 ...and no account is written to terminals', !ctx.ops.some((o) => o[1] === 'CLAUDE_CONFIG_DIR'), ctx.ops);
     check('C-3 the status bar says so', rec.status[rec.status.length - 1] === 'Claude: ? (cc-switch error)', rec.status);
     const errs = msgs('error');
     check('C-3 one error notification, with Retry', errs.length === 1 && errs[0].items.includes('Retry')
@@ -287,6 +288,111 @@ const scenarios = {
     check('C-12 ...without carrying chats from the old account', !calls.includes('carry'), calls);
     ext.deactivate();
   },
+
+  // C-14: re-pinning the same folder to another account never carries chats
+  async repin_same_folder() {
+    binding();
+    rec.folders = [ACME];
+    delete process.env.CLAUDE_CONFIG_DIR;
+    const slug = detect('slug', ACME);
+    const chatDir = path.join(D2, 'projects', slug);
+    fs.mkdirSync(chatDir, { recursive: true });
+    fs.writeFileSync(path.join(chatDir, 'secret.jsonl'), `{"type":"user","cwd":${JSON.stringify(ACME)}}\n`);
+    const ext = load();
+    const { binder } = ext.activate(context());
+    const calls = [];
+    const runTool = binder.runTool.bind(binder);
+    binder.runTool = async (args) => { calls.push(args[0]); return runTool(args); };
+    check('C-14 precondition: on acme', process.env.CLAUDE_CONFIG_DIR === D2, process.env.CLAUDE_CONFIG_DIR);
+    cp.execFileSync(path.join(BIN, 'cc'), ['pin', ACME, '--account', 'globex', '--fallback', 'personal'],
+      { stdio: 'ignore' });
+    const moved = await until(() => process.env.CLAUDE_CONFIG_DIR === D3);
+    check('C-14 re-pinning the open folder to globex moves the window', moved, process.env.CLAUDE_CONFIG_DIR);
+    await binder.queue;
+    check('C-14 ...without carrying acme\'s chats', !calls.includes('carry'), calls);
+    check('C-14 ...so globex holds none of them', !fs.existsSync(path.join(D3, 'projects', slug, 'secret.jsonl')));
+    ext.deactivate();
+  },
+
+  // C-15: an unpinned window moving on a limit never carries a pinned subfolder's chats
+  async unpinned_carry_guard() {
+    const WORK = path.join(HOME, 'work');
+    const D4 = path.join(HOME, '.claude-4');
+    fs.mkdirSync(D4, { recursive: true });
+    const cfgPath = path.join(SW, 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    cfg.accounts.push({ id: 'other', dir: '~/.claude-4' });
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+    binding();
+    rec.folders = [WORK];
+    delete process.env.CLAUDE_CONFIG_DIR;
+    const own = path.join(HOME, '.claude', 'projects', detect('slug', WORK));
+    const sub = path.join(HOME, '.claude', 'projects', detect('slug', ACME));
+    fs.mkdirSync(own, { recursive: true });
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(own, 'mine.jsonl'), `{"type":"user","cwd":${JSON.stringify(WORK)}}\n`);
+    fs.writeFileSync(path.join(sub, 'acme-secret.jsonl'), `{"type":"user","cwd":${JSON.stringify(ACME)}}\n`);
+    const ext = load();
+    const { binder } = ext.activate(context());
+    check('C-15 precondition: the unpinned window is on personal', !('CLAUDE_CONFIG_DIR' in process.env),
+      process.env.CLAUDE_CONFIG_DIR);
+    const calls = [];
+    const runTool = binder.runTool.bind(binder);
+    binder.runTool = async (args) => { calls.push(args[0]); return runTool(args); };
+    detect('mark', 'personal', String(now() + 3600));
+    const moved = await until(() => process.env.CLAUDE_CONFIG_DIR === D4);
+    check('C-15 personal limited: the unpinned window moves to other', moved, process.env.CLAUDE_CONFIG_DIR);
+    await binder.queue;
+    check('C-15 the folder\'s own chats are carried',
+      fs.existsSync(path.join(D4, 'projects', detect('slug', WORK), 'mine.jsonl')), calls);
+    check('C-15 ...but not the pinned subfolder\'s',
+      !fs.existsSync(path.join(D4, 'projects', detect('slug', ACME), 'acme-secret.jsonl')));
+    ext.deactivate();
+  },
+
+  // C-16: claudeCode.useTerminal: terminals run claude through cc's shim
+  async terminal_mode() {
+    const shimDir = path.join(SW, 'terminal-bin');
+    fs.mkdirSync(shimDir, { recursive: true });
+    fs.writeFileSync(path.join(shimDir, 'claude'), '#!/bin/sh\n', { mode: 0o755 });
+    binding({ terminalBin: shimDir });
+    rec.config['claudeCode.useTerminal'] = true;
+    rec.folders = [NOTES];
+    delete process.env.CLAUDE_CONFIG_DIR;
+    const ext = load();
+    const ctx = context();
+    ext.activate(ctx);
+    check('C-16 the shim is first on the terminals\' PATH',
+      ctx.ops.some((o) => o[0] === 'prepend' && o[1] === 'PATH' && o[2] === shimDir + path.delimiter), ctx.ops);
+    check('C-16 ...with the window\'s folder for the wrapper',
+      ctx.ops.some((o) => o[0] === 'replace' && o[1] === 'CC_WINDOW_FOLDER' && o[2] === NOTES), ctx.ops);
+    rec.config['claudeCode.useTerminal'] = false;
+    ctx.ops.length = 0;
+    rec.configListeners.forEach((fn) => fn({ affectsConfiguration: (k) => k === 'claudeCode.useTerminal' }));
+    check('C-16 turning useTerminal off takes the shim away',
+      ctx.ops.some((o) => o[0] === 'delete' && o[1] === 'PATH'), ctx.ops);
+    ext.deactivate();
+  },
+
+  // C-17: useTerminal and a failed bind: the shim is in place anyway (it fails closed)
+  async terminal_mode_failure() {
+    const shimDir = path.join(SW, 'terminal-bin');
+    fs.mkdirSync(shimDir, { recursive: true });
+    fs.writeFileSync(path.join(shimDir, 'claude'), '#!/bin/sh\n', { mode: 0o755 });
+    const broken = path.join(HOME, 'broken-detect');
+    fs.writeFileSync(broken, '#!/bin/sh\necho "cc-detect: boom" >&2\nexit 3\n', { mode: 0o755 });
+    binding({ detect: broken, terminalBin: shimDir });
+    rec.config['claudeCode.useTerminal'] = true;
+    rec.folders = [ACME];
+    delete process.env.CLAUDE_CONFIG_DIR;
+    const ext = load();
+    const ctx = context();
+    ext.activate(ctx);
+    check('C-17 bind failed', rec.status[rec.status.length - 1] === 'Claude: ? (cc-switch error)', rec.status);
+    check('C-17 ...terminal Claude still goes through the shim (and so fails closed)',
+      ctx.ops.some((o) => o[0] === 'prepend' && o[1] === 'PATH' && o[2] === shimDir + path.delimiter), ctx.ops);
+    ext.deactivate();
+  },
 };
 
 (async () => {
@@ -297,6 +403,7 @@ const scenarios = {
   }
   try {
     await scenarios[name]();
+    console.log(`done ${name}`);
   } catch (err) {
     failed += 1;
     console.log(`not ok ${name} threw -- ${err && err.stack}`);
