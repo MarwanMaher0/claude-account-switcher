@@ -27,12 +27,30 @@
   account this folder, or a pinned folder around it, is or was pinned to. That last rule keeps
   the 2.3.0 re-pin guarantee: re-pinning a folder from acme to globex does not hand acme's chats
   to globex. `cc pin` and `cc unpin` record former pins in `~/.claude-switch/pin-history.json`;
-  `cc adopt <folder> --from acme` brings those chats when you ask. `cc vscode migrate` follows the
-  same rule.
+  `cc adopt <folder> --from acme` brings those chats when you ask, and is remembered for that pin.
+  `cc vscode migrate` follows the same rule.
+- **Upgrading from 2.2:** re-pins and unpins made before `pin-history.json` existed are unknown,
+  so on an install that already had pins (or with a missing or unreadable history file) the
+  automatic runs bring chats only from the default account. Chats in other accounts are listed
+  as left; the companion offers **Bring N from &lt;account&gt;**, or run
+  `cc adopt <folder> --from <account>`. A fresh install records every pin and needs no click.
+- Memory notes come along only from a project that is wholly the pin's: no chat of another
+  folder in it, and no other pinned folder with the same project name (`~/w/app` and `~/w-app`
+  share one).
+- The wrapper's resume handles the session being resumed first, whatever the backlog, and when
+  the pin is limited links that session on into the fallback account Claude runs on. A window
+  first bound while its pin is limited gets the folder's chats of every age on the fallback.
+- Copies across filesystems are published only once complete and verified, so a deadline,
+  alarm or SIGTERM never leaves a truncated transcript; re-runs compare size and mtime instead of
+  re-hashing, and a copy that went on in the pin's account is not reported as a conflict.
 - The companion's notice when Claude Code started before the window was bound now appears only
   after the folder's chats are in the pin's account, and says that reloading restarts the open
   chats and that they will be in the history list on that account. If they could not be brought
-  over it says so, with the reason, and offers no reload. It never reloads by itself.
+  over, if some stay in another account, or if the pin's account holds a different copy of one,
+  it says so, with the reason, and offers no reload. It never reloads by itself. If the first
+  adopt runs out of its 4-second budget, the window keeps its starting environment until the rest
+  is linked. Re-pinning or unpinning an open folder (and `cc unpin`) says its chats stay in the
+  old account.
 - `cc vscode migrate` counts chats `adopt` already linked as "already there".
 
 ### Fixed — VS Code windows ignored pins

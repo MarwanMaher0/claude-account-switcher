@@ -303,12 +303,15 @@ another company's. `cc pin` links them into the pin's account (hard links: nothi
 deleted or overwritten), and so do `cc vscode on`, each VS Code window before it is bound, and a
 resume. Your history list and open tabs keep working. A chat of another pinned folder never
 travels, and neither do chats an account holds because this folder was pinned to it before:
-re-pinning a folder from `acme` to `globex` leaves acme's chats with acme.
+re-pinning a folder from `acme` to `globex` leaves acme's chats with acme. On an install
+upgraded from 2.2, whose earlier re-pins cc never recorded, only the default account's chats
+come by themselves; for the rest the VS Code window offers **Bring N from &lt;account&gt;** (or run
+`cc adopt --from <account>`), which is then remembered for that pin.
 
 ```bash
 cc adopt --dry-run          # what would be brought into this folder's account
 cc adopt ~/work/acme        # do it by hand (it normally runs by itself)
-cc adopt --from acme        # also bring the chats a former pin's account holds
+cc adopt --from acme        # also bring the chats a former (or possible former) pin's account holds
 ```
 
 - **If cc cannot decide** the account for a pinned folder (a broken pin, a missing `cc-detect`),

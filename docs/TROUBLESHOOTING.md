@@ -78,9 +78,13 @@ Check these in order:
 6. **Older chats of a pinned folder are missing from the history list** (or a reloaded tab is
    empty). They are in the account they ran on. Run `cc adopt --dry-run` in the folder to see
    what would come over, then `cc adopt`. It reports what it leaves on purpose: chats an account
-   holds because this folder was pinned to it before (`cc adopt --from <id>` brings these), and
-   conflicts, where the pin's account already has a file of that name with other content. If the
-   companion said it could not bring the chats over, do not reload until `cc adopt` succeeds.
+   holds because this folder was pinned to it before, or, on an install upgraded from 2.2 (no
+   complete pin history), chats in any account but the default one, since cc cannot tell whether
+   the folder was pinned there; `cc adopt <folder> --from <id>` brings these, or the companion's
+   **Bring N from &lt;id&gt;** button. Also reported: memory notes of a project that holds other
+   folders' chats too, and conflicts, where the pin's account already has a file of that name
+   with other content. If the companion said it could not bring the chats over, or that some
+   stay elsewhere, do not reload until they are in.
 7. **Claude runs in a terminal** (`claudeCode.useTerminal`). Run `type claude` in a terminal of
    that window: it should name `~/.claude-switch/terminal-bin/claude`. If another `claude` comes
    first, a shell startup file put it ahead on `PATH`; move that line, or turn off

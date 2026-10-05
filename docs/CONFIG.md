@@ -130,10 +130,22 @@ Rules, checked whenever a pin is saved and whenever one is used:
   runs on another account.
 - Inside a pinned folder the paid [fallbacks](#fallbacks) are not used.
 
-`~/.claude-switch/pin-history.json` (mode `600`, written by `cc pin` and `cc unpin`) records,
-per folder, the accounts it was pinned to before: `{"version": 1, "folders": {"/home/you/work/x":
-["acme"]}}`. `cc adopt` and `cc vscode migrate` never bring a folder's chats out of those accounts
-on their own (`cc adopt --from <id>` does, when asked). Deleting the file forgets that history.
+`~/.claude-switch/pin-history.json` (mode `600`, written by `cc pin`, `cc unpin` and
+`cc adopt --from`) records, per folder, the accounts it was pinned to before, and the accounts
+the user let its chats come from:
+
+```json
+{"version": 1, "complete": true, "since": 1790000000,
+ "folders": {"/home/you/work/x": ["acme"]},
+ "allowed": {"/home/you/work/x": {"globex": ["work"]}}}
+```
+
+`cc adopt` and `cc vscode migrate` never bring a folder's chats out of a former pin's account on
+their own; `cc adopt --from <id>` does, and adds `<id>` to `allowed` for the current pin (cleared
+when the pin changes or is removed). `complete` is true only when the file was started before
+any pin existed. Without it (an install that had pins before this file, a missing or unreadable
+file), the history is unknown, and chats in accounts other than the default one also wait for
+`--from`. Deleting the file never widens what is brought over.
 
 `cc pin` writes nothing into the folder. Versions up to 2.2 wrote VS Code settings into it and
 recorded that in `~/.claude-switch/vscode-workspaces.json`; `cc vscode migrate` undoes it.

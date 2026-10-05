@@ -223,13 +223,24 @@ pinned folder it links into the pin's account every chat whose recorded `cwd` is
 
 - the session folder `<slug>/<session>/` (subagents, tool results, workflows),
 - `file-history/<session>/` (rewind checkpoints) and `todos/<session>-*.json`,
-- the project's `memory/` notes that the account does not have yet.
+- the project's `memory/` notes that the account does not have yet, but only when that project
+  is wholly this pin's: every chat in it was made in this folder, no other pinned folder has the
+  same project name, and no folder beside this one could have it (a slug turns `~/w/app` and
+  `~/w-app` into one name). Otherwise the notes stay where they are and are reported.
+
+A session id is used in a path only when it looks like one (letters, digits, `-`, `_`): a
+transcript named `...jsonl` never makes adopt walk out of the session's own files.
 
 It hard-links each file (one inode: a resumed chat stays one conversation in both accounts), or,
 across filesystems, makes a copy it verifies. It creates files only with no-clobber operations:
 it never moves, deletes or overwrites anything, and a destination file with other content (a
-`MEMORY.md` of its own, a transcript copied earlier and grown since) is kept and reported as a
-conflict. A second run does nothing.
+`MEMORY.md` of its own, an older copy of a transcript) is kept and reported as a conflict. A
+copied transcript that went on in the pin's account (the copy is the source plus more at the
+end) is not a conflict. A copy is written under a temp name, verified, and only then given its
+name (a hard link, or, where the filesystem has none, a reserved name replaced with signals
+held), so a run stopped by its deadline, an alarm or SIGTERM never leaves a partial transcript.
+Re-runs compare size and mtime before hashing anything, so a repeat over copies costs a few
+`stat` calls. A second run does nothing.
 
 **Which accounts it takes chats from.** Every account, including one reserved for another
 folder's pin: a chat's `cwd` proves where it belongs, and the other pin owns its own folder's
@@ -243,7 +254,16 @@ reserved for `~/clients/atlas`. It never takes:
   `cc pin ~/work/x --account globex` after `--account acme` brings globex the chats `~/work/x`
   has in the default account and elsewhere, but never acme's. `cc pin` and `cc unpin` record
   former pins in `~/.claude-switch/pin-history.json` for this. `cc adopt --from acme` brings
-  acme's chats when the user decides to. Pins changed before this file existed are not known.
+  acme's chats when the user decides to, and is remembered for that pin (until the pin
+  changes), so the automatic runs then bring acme's chats too.
+- when the pin history is not complete, chats held by any account other than the default one.
+  The history is complete only when it was started before any pin existed (a fresh install).
+  An install that had pins before `pin-history.json` existed may have re-pinned or unpinned a
+  folder unrecorded, and a file that cannot be read says nothing either: unknown history is never
+  treated as empty. Those chats are reported as left, and the companion offers a
+  **Bring N from &lt;account&gt;** button (`cc adopt --from`). This means the incident case on an
+  upgraded install (chats in `work`, reserved for another folder) takes one click, while on a
+  fresh install it needs none.
 
 **When it runs.** Always before anything switches to the pin's account:
 
@@ -251,8 +271,8 @@ reserved for `~/clients/atlas`. It never takes:
 |---|---|
 | `cc pin` | after the pin is saved (new pin, or its account changed) |
 | `cc vscode on` | for every pin, before VS Code settings change |
-| companion | before a window's first bind (synchronously, with a 4-second budget; any rest is finished before a reload is offered), and before a re-bind whose pin or pin account changed |
-| `cc-claude-wrapper` | when the extension resumes a chat (`--resume`, `--continue`) in a pinned folder |
+| companion | before a window's first bind (synchronously, with a 4-second budget; if that runs out, the window keeps its starting environment until the rest is linked, then moves), and before a re-bind whose pin or pin account changed |
+| `cc-claude-wrapper` | when the extension resumes a chat (`--resume`, `--continue`) in a pinned folder; the session being resumed first |
 | `cc` | before a launch in a pinned folder |
 
 `cc pin` saves the pin before it adopts, so an invalid pin never links anything; an open window
@@ -263,10 +283,25 @@ The wrapper sits on every Claude spawn, so it adopts only for a resume, and thro
 status ignored. A scan lists each account's `projects/` once, keeps only project names that can
 be inside the folder, and reads a transcript's head only for chats not yet linked, so a repeat
 costs little more than a few `stat` calls. Stopping early is safe because nothing it does is
-destructive; the next run finishes. By the time the user can resume anything the window has
-adopted already, so the wrapper's run is the safety net for terminals and for pins made while
-VS Code was closed. It adopts into the pin's account; while a window runs on the pin's fallback,
-the limit-move carry (last week's chats) still decides what that account has.
+destructive; the next run finishes. A run handles, in order: the session a resume names
+(`--session`, never subject to the budget), chats not yet in the pin's account, then chats
+there already (only their newer session files can be missing), so a bounded run always makes
+progress. The wrapper's run is the safety net for terminals and for pins made while VS Code was
+closed.
+
+**While the pin is limited.** A window first bound while its pin's account is limited runs on
+the pin's fallback. Before its environment is set, the companion links the folder's chats of
+every age from the pin's account into the fallback (`carry --any-age`), after adopting them into
+the pin's account, so the tabs Claude Code restores there are not empty. The wrapper does the
+same for one chat: a resume that runs on the fallback links that session from the pin's account
+into the fallback first (`adopt --session <id> --also-to <fallback>`).
+
+**What the companion says.** A **Reload Window** button is offered only when every chat of the
+folder is in the pin's account. When some stay in another account (a former pin's, or one cc
+cannot rule out) or the pin's account holds a different copy of one, the notice names the
+account and the reason, warns that a reload reopens those tabs empty, and offers **Bring N from
+&lt;account&gt;** instead. Re-pinning or unpinning an open folder says the same: the chats made under
+the old pin stay in its account. `cc unpin` prints it too.
 
 `cc vscode migrate` stays correct alongside it: chats `adopt` linked count as "already there"
 (migrate then removes the extra link in the other account, and `--undo` restores it), and
