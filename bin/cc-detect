@@ -25,9 +25,11 @@ Subcommands
   pick                              account to start on: the preferred one if free, else the first free
   next-free [used,ids]              first free account in config order, skipping those listed
   soonest [exclude]                 "<id> <epoch>" for the limited account freeing up first
-  status                            human-readable state
+  status                            human-readable state, with live usage per account
   use <id>                          prefer this account for new sessions
   refresh                           learn limits hit outside cc (the VS Code panel, a bare claude)
+  live [ids]                        ask Anthropic for each account's real usage and correct the
+                                    recorded limits (all accounts when no ids are given)
   scan <dir> <session> [cwd] [offset]   "<resetsAt> [type]" if this run hit a limit
   size <dir> <session> [cwd]        transcript size, used as the scan offset
   session-limit <transcript> <id> <session> [own|recent]
@@ -65,6 +67,16 @@ Usage percentage (opt-in early switch, read from Claude Code's own status line i
 pick, next-free, soonest and status refresh first, so a limit hit in the VS Code panel
 is known before the next launch. An account pinned to a folder is reserved for its
 pins: pick and next-free never choose it outside them (the default account excepted).
+
+Then they re-check, live, every account still recorded
+as limited: a recorded window can be stale (the window rolled over early, the limit was
+lifted), and a stale one keeps a usable account out of rotation — the way `cc` once
+refused to start although an account had 99 % of its quota left.
+
+The live check runs `claude -p /usage` as the account and reads the figures Claude Code
+prints. No prompt reaches a model, so it spends no quota, and this tool itself still never
+opens a credentials file or the network — Claude Code does the asking, and renews its own
+login if it has to. Turn it off with CC_LIVE_CHECK=0 or "liveCheck": false in config.json.
 """
 import fcntl
 import glob
@@ -73,9 +85,16 @@ import os
 import re
 import stat
 import sys
+import subprocess
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:                     # Python < 3.9
+    ZoneInfo = None
 
 HOME = os.path.expanduser("~")
 SWITCH_DIR = os.path.join(HOME, ".claude-switch")
@@ -97,6 +116,14 @@ HORIZON = 8 * 86400
 # How much of a transcript's end is read the first time it is seen. Nothing useful
 # can follow a limit on the same account, so a live one sits near the end.
 TAIL = 1024 * 1024
+
+# Windows that stop every model. A model-scoped weekly window only blocks when it is the
+# one a transcript already recorded as hit.
+BLOCKING = ("five_hour", "seven_day")
+# Automatic re-checks are skipped when the account was checked this recently, so hooks
+# calling next-free and soonest back to back do not ask twice.
+LIVE_TTL = 300
+LIVE_TIMEOUT = 30
 
 LIMIT_NAMES = {"five_hour": "5-hour", "seven_day": "weekly",
                "seven_day_opus": "weekly Opus", "seven_day_sonnet": "weekly Sonnet"}
@@ -729,10 +756,189 @@ def refresh():
             if owner is None and ev["uuid"]:
                 held = holders.get((session, ev["uuid"]), set())
                 owner = next(iter(held)) if len(held) == 1 else None
-            if owner in ids:
+            if owner in ids and not _superseded(state, owner, ev):
                 changed = raise_limit(state, owner, ev["resetsAt"], ev["type"]) or changed
         if changed:
             save_state(state)
+
+
+# ------------------------------------------------------------ live usage ----
+class LiveError(Exception):
+    """Why an account's usage could not be read. Shown, never fatal."""
+
+
+def _superseded(state, aid, ev):
+    """True when a live check made after this limit event found the account usable.
+
+    Without this, the transcript that recorded the old 429 would put the stale window
+    straight back on the next refresh — the event stays "unexpired" until its resetsAt.
+    """
+    checked = state.get("accounts", {}).get(aid, {}).get("liveCheckedAt", 0)
+    if not checked:
+        return False
+    return ev["ts"] is None or ev["ts"] <= checked
+
+
+def live_enabled():
+    # CC_LIVE_PROBE marks the probe's own claude process: its SessionStart hook calls
+    # next-free, which must not probe again.
+    if os.environ.get("CC_LIVE_PROBE"):
+        return False
+    if os.environ.get("CC_LIVE_CHECK", "1") in ("0", "false", "no", "off"):
+        return False
+    try:
+        return load_config().get("liveCheck", True) is not False
+    except ConfigError:
+        return False
+
+
+# "Current session: 12% used · resets Sep 24, 1:50pm (Africa/Cairo)"
+# "Current week (all models): 17% used · resets Sep 29, 4pm (Africa/Cairo)"
+USAGE_LINE = re.compile(r"^\s*Current (session|week)(?: \(([^)]+)\))?:\s*(\d+(?:\.\d+)?)% used"
+                        r"(?:\s*·\s*resets\s+(.+?))?\s*$")
+
+
+def _window_name(kind, scope):
+    if kind == "session":
+        return "five_hour"
+    if not scope or scope.lower() == "all models":
+        return "seven_day"
+    return "seven_day_" + re.sub(r"[^a-z0-9]+", "_", scope.lower()).strip("_")
+
+
+def parse_reset(text, now=None):
+    """Epoch for "Sep 24, 1:50pm (Africa/Cairo)", "Sep 28, 7am" or "1:50pm"; 0 if unreadable."""
+    now = time.time() if now is None else now
+    m = re.match(r"^(.*?)\s*(?:\(([^)]+)\))?$", text.strip())
+    body, zone = m.group(1).strip(), m.group(2)
+    tz = None
+    if zone and ZoneInfo:
+        try:
+            tz = ZoneInfo(zone)
+        except Exception:
+            tz = None
+    ref = datetime.fromtimestamp(now, tz)
+    for fmt in ("%b %d, %I:%M%p", "%b %d, %I%p", "%I:%M%p", "%I%p"):
+        try:
+            parsed = datetime.strptime(body, fmt)     # %b and %p match case-insensitively
+        except ValueError:
+            continue
+        if "%b" in fmt:
+            dt = parsed.replace(year=ref.year, tzinfo=tz)
+            if dt.timestamp() < now - 86400:        # "Jan 2" read in late December
+                dt = dt.replace(year=ref.year + 1)
+        else:
+            dt = ref.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
+            if dt.timestamp() < now - 60:
+                dt = datetime.fromtimestamp(dt.timestamp() + 86400, tz)
+        return int(dt.timestamp())
+    return 0
+
+
+def parse_usage(text, now=None):
+    usage = {}
+    for line in text.splitlines():
+        m = USAGE_LINE.match(line)
+        if m:
+            kind, scope, pct, resets = m.groups()
+            usage[_window_name(kind, scope)] = {
+                "pct": float(pct), "resetsAt": parse_reset(resets, now) if resets else 0}
+    return usage
+
+
+def fetch_usage(acct):
+    """The account's usage windows as {window: {"pct": n, "resetsAt": epoch}}.
+
+    Launched exactly as `cc` launches the account: the default one with CLAUDE_CONFIG_DIR
+    removed, never set to its own path (see run_acct in cc).
+    """
+    env = dict(os.environ, CC_LIVE_PROBE="1")
+    if acct.get("isDefault"):
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = expand(acct["dir"])
+    os.makedirs(SWITCH_DIR, exist_ok=True)
+    try:
+        res = subprocess.run(["claude", "-p", "/usage", "--no-session-persistence", "--strict-mcp-config"],
+                             env=env, cwd=SWITCH_DIR, stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=LIVE_TIMEOUT)
+    except FileNotFoundError:
+        raise LiveError("claude is not on PATH") from None
+    except subprocess.TimeoutExpired:
+        raise LiveError(f"claude /usage did not answer in {LIVE_TIMEOUT} s") from None
+    usage = parse_usage(res.stdout)
+    if not usage:
+        said = next((ln.strip() for ln in (res.stdout + res.stderr).splitlines() if ln.strip()), "")
+        raise LiveError(f"no usage figures from claude /usage{': ' + said[:80] if said else ''}")
+    return usage
+
+
+def live_limit(usage, recorded_type=None, now=None):
+    """(resetsAt, type) for the latest-ending exhausted window, or (0, None)."""
+    now = time.time() if now is None else now
+    names = list(BLOCKING)
+    if recorded_type and recorded_type not in names:
+        names.append(recorded_type)
+    # An exhausted window whose reset time could not be read still counts: assume half an
+    # hour and let the next check correct it, rather than launch into a certain 429.
+    hits = [(w["resetsAt"] if w["resetsAt"] > now else int(now) + 1800, n) for n in names
+            for w in [usage.get(n)] if w and w["pct"] >= 100]
+    return max(hits) if hits else (0, None)
+
+
+def live_check(ids=None, force=False):
+    """Ask Anthropic for the real usage of some accounts and correct the state.
+
+    Unlike `raise`, this may SHORTEN or CLEAR a recorded window: the server's answer is
+    authoritative, a transcript is only a past observation. Returns {id: usage or
+    LiveError}. Accounts checked in the last LIVE_TTL seconds are skipped unless forced.
+    """
+    state, now = load_state(), time.time()
+    targets = [a for a in accounts() if ids is None or a["id"] in ids]
+    if not force:
+        targets = [a for a in targets
+                   if now - state.get("accounts", {}).get(a["id"], {}).get("liveCheckedAt", 0) > LIVE_TTL]
+    results = {}
+
+    def one(acct):
+        try:
+            results[acct["id"]] = fetch_usage(acct)
+        except LiveError as exc:
+            results[acct["id"]] = exc
+
+    threads = [threading.Thread(target=one, args=(a,), daemon=True) for a in targets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(LIVE_TIMEOUT + 2)
+
+    fresh = {aid: u for aid, u in results.items() if isinstance(u, dict)}
+    if fresh:
+        with state_lock():
+            state, now = load_state(), time.time()
+            for aid, usage in fresh.items():
+                entry = state.setdefault("accounts", {}).setdefault(aid, {})
+                resets, ltype = live_limit(usage, entry.get("limitType"), now)
+                entry["usage"] = usage
+                entry["liveCheckedAt"] = int(now)
+                if resets:
+                    entry["limitedUntil"] = resets
+                    entry["limitType"] = ltype
+                else:
+                    entry["limitedUntil"] = 0
+                    entry.pop("limitType", None)
+            save_state(state)
+    return results
+
+
+def _verify_limited():
+    """Re-check, live, the accounts the state says are limited. Quiet on failure."""
+    if not live_enabled():
+        return
+    state, now = load_state(), time.time()
+    limited = {a["id"] for a in accounts() if limited_until(state, a["id"]) > now}
+    if limited:
+        live_check(limited)
 
 
 def _refresh_quietly():
@@ -742,6 +948,12 @@ def _refresh_quietly():
         raise
     except Exception as exc:  # bookkeeping must never stop a launch
         print(f"cc-detect: could not read transcripts for limits: {exc}", file=sys.stderr)
+    try:
+        _verify_limited()
+    except ConfigError:
+        raise
+    except Exception as exc:
+        print(f"cc-detect: live usage check failed: {exc}", file=sys.stderr)
 
 
 # ----------------------------------------------------------------- usage ----
@@ -916,6 +1128,22 @@ def fmt_left(seconds):
     return f"{days} d {hours} h"
 
 
+SHORT = {"five_hour": "5h", "seven_day": "wk", "seven_day_opus": "wk-opus",
+         "seven_day_sonnet": "wk-sonnet"}
+
+
+def fmt_usage(entry, now):
+    """"5h 12% · wk 3%  (2 min ago)" from the last live check, or "" if there was none."""
+    usage, checked = entry.get("usage") or {}, entry.get("liveCheckedAt", 0)
+    names = sorted(usage, key=lambda n: (n not in SHORT, list(SHORT).index(n) if n in SHORT else 0, n))
+    parts = [f"{SHORT.get(n, 'wk-' + n[len('seven_day_'):])} {usage[n]['pct']:.0f}%" for n in names]
+    if not parts:
+        return ""
+    age = now - checked
+    when = "just now" if age < 60 else f"{fmt_left(age)} ago"
+    return f"{' · '.join(parts)}  ({when})"
+
+
 def cmd_status():
     state = load_state()
     now = time.time()
@@ -939,6 +1167,9 @@ def cmd_status():
         print(f"  {'▶' if aid == nxt else ' '} {aid:<{width}}  {label:<44} "
               f"{emails[aid] or 'not logged in':<30} {tilde(expand(acct['dir']))}"
               f"{'  (' + ', '.join(tags) + ')' if tags else ''}")
+        used = fmt_usage(state.get("accounts", {}).get(aid, {}), now)
+        if used:
+            print(f"    {'':<{width}}  usage: {used}")
 
     # Group logins that draw on one limit: the same account and organization, not merely
     # the same email address.
@@ -1056,6 +1287,8 @@ def main(argv):
 
     elif cmd == "status":
         _refresh_quietly()
+        if live_enabled():
+            live_check()                        # every account, for the usage figures
         cmd_status()
 
     elif cmd == "use":
@@ -1068,6 +1301,28 @@ def main(argv):
 
     elif cmd == "refresh":
         refresh()
+
+    elif cmd == "live":
+        # Forced, and shown: the user asked for it. Exit 1 if no account could be read.
+        ids = set(args) or None
+        for aid in ids or ():
+            account_by_id(aid)
+        results = live_check(ids, force=True)
+        now = time.time()
+        for acct in accounts():
+            res = results.get(acct["id"])
+            if res is None:
+                continue
+            if isinstance(res, LiveError):
+                print(f"  {acct['id']}: could not check — {res}")
+                continue
+            resets, ltype = live_limit(res, None, now)
+            verdict = (f"LIMITED ({LIMIT_NAMES.get(ltype, ltype)}) until {fmt_until(resets, now)}"
+                       if resets else "has quota left")
+            print(f"  {acct['id']}: {verdict} — "
+                  f"{fmt_usage({'usage': res, 'liveCheckedAt': now}, now).split('  (')[0]}")
+        if not any(isinstance(r, dict) for r in results.values()):
+            return 1
 
     elif cmd == "size":
         print(size_of(args[0], args[1], args[2] if len(args) > 2 else None))

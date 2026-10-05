@@ -62,6 +62,9 @@ new_home() {
     local tmp="${TMPDIR:-/tmp}"
     SANDBOX="$(mktemp -d "${tmp%/}/cc-test-XXXXXX")"
     export HOME="$SANDBOX"
+    # Live usage checks run `claude -p /usage`; off unless a suite turns them on, so
+    # the stub's call log stays exactly what each test launched.
+    export CC_LIVE_CHECK=0
     mkdir -p "$HOME/.claude" "$HOME/.claude-2"
     printf '{"oauthAccount":{"emailAddress":"first@example.com","subscriptionType":"max"}}\n' \
         > "$HOME/.claude.json"
@@ -94,6 +97,8 @@ cleanup_home() {
 #   login     — create an oauthAccount in the config dir (simulates a login);
 #               STUB_EMAIL, STUB_ACCOUNT and STUB_ORG choose who signs in
 #   nologin   — exit without logging in
+# `claude -p /usage` prints <config dir>/usage.txt when it exists, else fails as a
+# signed-out account does.
 # Every invocation's arguments are appended to $STUB_LOG. `claude auth login` behaves
 # per $STUB_MODE; any other `auth` subcommand does nothing. STUB_NO_AUTH=1 makes `auth`
 # an unknown command, as in a build that predates it.
@@ -105,6 +110,11 @@ stub_claude() {
     cat > "$STUBDIR/claude" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${STUB_LOG:-/dev/null}"
+if [ "${1:-}" = "-p" ] && [ "${2:-}" = "/usage" ]; then
+  f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/usage.txt"
+  [ -f "$f" ] && { cat "$f"; exit 0; }
+  echo "Not logged in · Please run /login"; exit 1
+fi
 if [ "${1:-}" = "auth" ]; then
   [ -n "${STUB_NO_AUTH:-}" ] && { echo "error: unknown command 'auth'" >&2; exit 1; }
   [ "${2:-}" = "login" ] || exit 0

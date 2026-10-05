@@ -12,6 +12,7 @@
 #   cc                     start on a healthy account (the preferred one while it is free)
 #   cc use <id>            prefer an account for new sessions — terminal and VS Code panel
 #   cc status              which accounts are limited, by which window, until when
+#   cc refresh             ask Anthropic for each account's real usage and fix stale limits
 #   cc add <id>            create, sign in and register another account
 #   cc add <id> --email X  pre-fill the login with X and refuse any other account
 #   cc remove <id>         deregister an account  (--purge also deletes its dir)
@@ -21,6 +22,8 @@
 #   cc pin <folder> --account <id> --fallback <id>|none|ask [--no-vscode] [--yes]
 #   cc unpin [folder]      remove a pin, and the VS Code setting it wrote
 #   cc pins                list pinned folders
+#   cc cloud "<task>"      start a cloud session on the account holding the cloud credit
+#   cc cloud set <id>      choose that account  (cc cloud --acct <id> overrides once)
 #   cc --acct <id>         force a specific account for this run
 #   cc --manual            never end a run automatically on a limit
 #   cc --no-auto-continue  after a switch, wait for you instead of carrying on by itself
@@ -369,6 +372,16 @@ cmd_status() {
     echo
 }
 
+# ---- cc refresh -------------------------------------------------------------
+# A recorded limit is only what a transcript once said. This asks the server, so an
+# account whose window has rolled over is back in rotation at once.
+cmd_refresh() {
+    echo
+    "$DETECT" live "$@" || warn "no account's usage could be read — recorded limits left as they were"
+    sync_vscode
+    cmd_status
+}
+
 # ---- cc add -----------------------------------------------------------------
 cmd_add() {
     local id="" dir="" adopt=0 want_email=""
@@ -664,11 +677,54 @@ cmd_clear() {
     sync_vscode
 }
 
+# ---- cc cloud ---------------------------------------------------------------
+# Cloud sessions run on Anthropic's servers against a GitHub repo and draw on the
+# account's cloud session credit first, so they go to one fixed account — the one
+# holding the credit — even while its local 5-hour or weekly window is exhausted.
+cloud_account() {
+    python3 - <<'PY' 2>/dev/null
+import json, os
+cfg = json.load(open(os.path.expanduser("~/.claude-switch/config.json")))
+print((cfg.get("cloud") or {}).get("account") or "")
+PY
+}
+
+cmd_cloud() {
+    local id=""
+    if [ "${1:-}" = "set" ]; then
+        id="${2:-}"
+        [ -n "$id" ] || die "usage: cc cloud set <id>"
+        acct_dir "$id" >/dev/null || die "no account '$id' — see \`cc status\`"
+        python3 - "$id" <<'PY' || exit 1
+import json, os, sys
+CONFIG = os.path.expanduser("~/.claude-switch/config.json")
+cfg = json.load(open(CONFIG))
+cfg.setdefault("cloud", {})["account"] = sys.argv[1]
+tmp = CONFIG + ".tmp"
+json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, CONFIG)
+PY
+        good "cloud sessions now start on $(acct_label "$id")"
+        return 0
+    fi
+    if [ "${1:-}" = "--acct" ]; then
+        { [ $# -ge 2 ] && [ -n "$2" ]; } || die "cc cloud: --acct needs a value"
+        id="$2"; shift 2
+    fi
+    [ -n "$id" ] || id="$(cloud_account)"
+    [ -n "$id" ] || die "no cloud account set — run: cc cloud set <id>   (the account holding the cloud credit)"
+    acct_dir "$id" >/dev/null || die "no account '$id' — see \`cc status\`"
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || warn "$PWD is not a git repo — a cloud session needs a GitHub repo to work on"
+    note "cloud session on $(acct_label "$id")"
+    run_acct "$id" --cloud "$@"
+}
+
 usage() { sed -n 's/^#   \(cc .*\)/  \1/p' "${BASH_SOURCE[0]}"; }
 
 # ---- argument parsing -------------------------------------------------------
 case "${1:-}" in
     status) cmd_status; exit $? ;;
+    refresh) shift; cmd_refresh "$@"; exit $? ;;
     add)    shift; cmd_add "$@"; exit $? ;;
     remove) shift; cmd_remove "$@"; exit $? ;;
     use)    shift; cmd_use "$@"; exit $? ;;
@@ -676,6 +732,7 @@ case "${1:-}" in
     pin)    shift; cmd_pin "$@"; exit $? ;;
     unpin)  shift; cmd_unpin "$@"; exit $? ;;
     pins)   shift; cmd_pins; exit $? ;;
+    cloud)  shift; cmd_cloud "$@"; exit $? ;;
     vscode)
         shift
         [ -x "$VSCODE" ] || die "missing $VSCODE"
