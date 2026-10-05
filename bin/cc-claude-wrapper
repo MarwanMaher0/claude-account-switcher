@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# cc-claude-wrapper — the account switch for Claude in VS Code.
+#
+# Set once, in VS Code's USER settings, as claudeCode.claudeProcessWrapper (cc vscode on
+# does it). The Claude extension then starts every Claude process as
+#
+#     cc-claude-wrapper <bundled claude binary> <args...>
+#
+# with the session's folder as the working directory. This script asks
+# `cc-detect bind` which account that folder runs on and execs the binary on it:
+#   - the default account: CLAUDE_CONFIG_DIR removed, never set to ~/.claude
+#   - any other account:   CLAUDE_CONFIG_DIR=<that account's dir>, exactly as cc writes it
+# An inherited CLAUDE_CONFIG_DIR is always overridden.
+#
+# The folder is $CC_WINDOW_FOLDER when set (the cc-switch companion extension exports
+# the window's folder, so helper processes started in a temp dir still resolve by
+# window), else the working directory.
+#
+# Fails closed: when the account cannot be decided for a folder that is, or may be,
+# pinned, nothing runs. When cc was never set up, Claude runs unchanged.
+#
+# It is on the path of every Claude spawn, including `auth status --json`, so it
+# must stay fast and must never read stdin (that is Claude's stream-json channel).
+# Plain bash 3.2.
+
+real="${1:-}"
+if [ -z "$real" ]; then
+    echo "cc-switch: cc-claude-wrapper expects the Claude binary as its first argument" >&2
+    exit 1
+fi
+shift
+
+SWITCH_DIR="$HOME/.claude-switch"
+folder="${CC_WINDOW_FOLDER:-$PWD}"
+[ -n "$folder" ] || folder="$PWD"
+
+# The resolved form of a directory, or the path itself when it cannot be entered.
+resolved() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
+
+DEFAULT_REAL="$(resolved "$HOME/.claude")"
+
+# Run Claude with CLAUDE_CONFIG_DIR removed (the default account).
+run_default() { exec env -u CLAUDE_CONFIG_DIR "$real" "$@"; }
+
+# Run Claude unchanged, except that an inherited CLAUDE_CONFIG_DIR naming the default
+# account's own dir is removed: that value makes Claude Code replace its login.
+run_unchanged() {
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$(resolved "$CLAUDE_CONFIG_DIR")" = "$DEFAULT_REAL" ]; then
+        run_default "$@"
+    fi
+    exec "$real" "$@"
+}
+
+# cc was never set up here: nothing to decide.
+if [ ! -e "$SWITCH_DIR/config.json" ] && [ ! -e "$SWITCH_DIR/pins.json" ]; then
+    run_unchanged "$@"
+fi
+
+# cc-detect: an explicit override, then the copy installed beside this script, then
+# ~/.local/bin.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+detect="${CC_SWITCH_DETECT:-}"
+[ -n "$detect" ] || detect="$here/cc-detect"
+[ -x "$detect" ] || detect="$HOME/.local/bin/cc-detect"
+
+# Whether the folder is, or might be, under a pin, judged without cc-detect: used only
+# when cc-detect could not answer. Any pin path that cannot be read plainly (JSON
+# escapes) counts as a match, so a doubt always fails closed.
+may_be_pinned() {
+    local pins="$SWITCH_DIR/pins.json" real_folder line path
+    [ -e "$pins" ] || return 1
+    { [ -f "$pins" ] && [ -r "$pins" ]; } || return 0
+    real_folder="$(resolved "$folder")"
+    while IFS= read -r line; do
+        path="${line#*\"path\"*:*\"}"
+        path="${path%%\"*}"
+        case "$line" in *\\*) return 0 ;; esac
+        [ -n "$path" ] || continue
+        case "$real_folder/" in "$path"/*) return 0 ;; esac
+        case "$folder/" in "$path"/*) return 0 ;; esac
+    done < <(grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*\(\\.[^"]*\)*"' "$pins" 2>/dev/null)
+    # No readable path at all: only an empty pin list is a clear "not pinned".
+    if ! grep -q '"path"' "$pins" 2>/dev/null; then
+        tr -d ' \t\r\n' < "$pins" 2>/dev/null | grep -qE '^(\{("version":[0-9]+,?)?("pins":\[\])?,?("version":[0-9]+)?\})?$' && return 1
+        return 0
+    fi
+    return 1
+}
+
+fail() {
+    local reason="$1"
+    shift
+    if may_be_pinned; then
+        printf 'cc-switch: could not decide the account for %s: %s; run cc status\n' "$folder" "$reason" >&2
+        exit 1
+    fi
+    printf 'cc-switch: could not decide the account for %s: %s; running Claude unchanged\n' "$folder" "$reason" >&2
+    run_unchanged "$@"
+}
+
+if [ ! -x "$detect" ]; then
+    fail "cc-detect was not found" "$@"
+fi
+
+out="$(CC_LIVE_CHECK=0 CC_BIND_TIMEOUT="${CC_BIND_TIMEOUT:-5}" "$detect" bind "$folder" --shell </dev/null 2>/dev/null)"
+rc=$?
+
+account="" dir="" unset_="" error="" configured=""
+while IFS= read -r line; do
+    case "$line" in
+        account=*)    account="${line#account=}" ;;
+        dir=*)        dir="${line#dir=}" ;;
+        unset=*)      unset_="${line#unset=}" ;;
+        error=*)      error="${line#error=}" ;;
+        configured=*) configured="${line#configured=}" ;;
+    esac
+done <<EOF
+$out
+EOF
+
+if [ "$rc" -eq 4 ] && [ "$configured" = "0" ]; then
+    run_unchanged "$@"                    # cc is not set up after all
+fi
+if [ "$rc" -ne 0 ] || [ -z "$account" ]; then
+    fail "${error:-cc-detect bind exited with status $rc}" "$@"
+fi
+
+if [ "$unset_" = "1" ]; then
+    run_default "$@"
+fi
+if [ -z "$dir" ]; then
+    fail "no directory for account '$account'" "$@"
+fi
+# Never point CLAUDE_CONFIG_DIR at the default account's own dir, whatever bind said.
+if [ "$(resolved "$dir")" = "$DEFAULT_REAL" ]; then
+    run_default "$@"
+fi
+exec env CLAUDE_CONFIG_DIR="$dir" "$real" "$@"
