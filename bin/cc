@@ -360,7 +360,7 @@ cmd_adopt() {
 }
 
 cmd_unpin() {
-    local path="${1:-$PWD}" folder pin
+    local path="${1:-$PWD}" folder pin old_acct now_acct
     "$DETECT" accounts >/dev/null || exit 3
     folder="$("$DETECT" canon "$path")"
     if ! "$DETECT" pins | cut -f1 | grep -qxF "$folder"; then
@@ -369,9 +369,18 @@ cmd_unpin() {
         fi
         die "$(tilde "$folder") is not pinned"
     fi
+    old_acct="$("$DETECT" pins | awk -F'\t' -v f="$folder" '$1 == f { print $2; exit }')"
     "$DETECT" unpin "$folder" >/dev/null
     sync_vscode
     good "unpinned $(tilde "$folder")"
+    # Its chats stay in the account it was pinned to; nothing moves them on an unpin.
+    if [ -n "$old_acct" ]; then
+        now_acct="$("$VSCODE" current "$folder" 2>/dev/null)"
+        if [ -n "$now_acct" ] && [ "$now_acct" != "$old_acct" ]; then
+            note "its chats stay in $old_acct. New chats here start on $now_acct, whose history does not list them:"
+            note "an open VS Code window on it restarts its open chats empty if reloaded. Run \`cc --acct $old_acct\` here to resume one."
+        fi
+    fi
 }
 
 cmd_pins() {

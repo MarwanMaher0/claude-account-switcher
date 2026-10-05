@@ -130,11 +130,12 @@ fi
 out="$(CC_LIVE_CHECK=0 CC_BIND_TIMEOUT="${CC_BIND_TIMEOUT:-5}" "$detect" bind "$folder" --shell </dev/null 2>/dev/null)"
 rc=$?
 
-account="" dir="" unset_="" error="" configured="" pin=""
+account="" dir="" unset_="" error="" configured="" pin="" pin_account=""
 while IFS= read -r line; do
     case "$line" in
         account=*)    account="${line#account=}" ;;
         pin=*)        pin="${line#pin=}" ;;
+        pinAccount=*) pin_account="${line#pinAccount=}" ;;
         dir=*)        dir="${line#dir=}" ;;
         unset=*)      unset_="${line#unset=}" ;;
         error=*)      error="${line#error=}" ;;
@@ -156,16 +157,35 @@ fi
 # pin). Only for a resume, never for the many other spawns; bounded by adopt itself
 # (--quick: about two seconds, then it stops), output dropped, its status ignored. It
 # only adds links, so stopping early or failing never stands in the way of the launch.
+# The session being resumed goes first, so a large backlog never crowds it out. While
+# the pin is limited and Claude runs on its fallback, that session is linked on into
+# the fallback account too (--also-to), where this resume reads it.
 if [ -n "$pin" ]; then
+    resume="" sid="" prev=""
     for a in "$@"; do
-        case "$a" in
-            --resume|--resume=*|-r|--continue|-c)
-                vscode_tool="$(dirname "$detect")/cc-vscode"
-                [ -x "$vscode_tool" ] && CC_LIVE_CHECK=0 "$vscode_tool" adopt --folder "$pin" --quick --quiet \
-                    </dev/null >/dev/null 2>&1
-                break ;;
+        case "$prev" in
+            --resume|-r) case "$a" in -*) ;; *) sid="$a" ;; esac ;;
         esac
+        case "$a" in
+            --resume|-r|--continue|-c) resume=1 ;;
+            --resume=*) resume=1; sid="${a#--resume=}" ;;
+        esac
+        prev="$a"
     done
+    if [ -n "$resume" ]; then
+        vscode_tool="$(dirname "$detect")/cc-vscode"
+        if [ ! -x "$vscode_tool" ]; then
+            :
+        elif [ -z "$sid" ]; then
+            CC_LIVE_CHECK=0 "$vscode_tool" adopt --folder "$pin" --quick --quiet </dev/null >/dev/null 2>&1
+        elif [ -n "$pin_account" ] && [ "$account" != "$pin_account" ]; then
+            CC_LIVE_CHECK=0 "$vscode_tool" adopt --folder "$pin" --quick --quiet --session "$sid" \
+                --also-to "$account" </dev/null >/dev/null 2>&1
+        else
+            CC_LIVE_CHECK=0 "$vscode_tool" adopt --folder "$pin" --quick --quiet --session "$sid" \
+                </dev/null >/dev/null 2>&1
+        fi
+    fi
 fi
 
 if [ "$unset_" = "1" ]; then

@@ -34,15 +34,19 @@ Subcommands
                            answer a pin that asks: new chats use the fallback (default) or
                            stay on the limited account, until the limit has passed
   carry <id>               link the last week's unpinned chats from other accounts into <id>
-  carry --folder <f> --from <a> --to <b>
-                           link the last week's chats of one folder from <a> into <b>
+  carry --folder <f> --from <a> --to <b> [--any-age]
+                           link the last week's (or all) chats of one folder from <a> into <b>
   adopt [<folder> | --folder <f> | --all] [--from <id>]... [--dry-run] [--json] [--quick]
+        [--session <id> [--also-to <id>]] [--deadline <s>]
                            link a pinned folder's chats, of any age, from the other accounts
                            into the pin's account: transcripts, session folders, checkpoints,
-                           todos and missing memory notes. Never moves, deletes or overwrites;
-                           a chat of another pin, or held by an account this folder was
-                           pinned to before, stays (--from <id> brings the latter). `cc pin`,
-                           `cc vscode on`, the companion and the wrapper run it by themselves
+                           todos and memory notes the project alone owns. Never moves, deletes
+                           or overwrites; a chat of another pin, or held by an account this
+                           folder was (or, with no complete pin history, may have been) pinned
+                           to before, stays (--from <id> brings those, and is remembered for
+                           the pin). --session handles that chat first; --also-to links it on
+                           into the account a limited pin falls back to. `cc pin`,
+                           `cc vscode on`, `cc`, the companion and the wrapper run it by themselves
   migrate [--apply|--undo] [--verbose]
                            clean up what older versions wrote into folders' .vscode
                            settings, and move each pinned folder's chats into its pinned
@@ -721,7 +725,7 @@ def chat_place(src, slug, pin_rows):
     return None, owner, owner is None or not slug_ambiguous(slug, owner["path"])
 
 
-def carry(to_id, from_ids=None, folder=None):
+def carry(to_id, from_ids=None, folder=None, days=CARRY_DAYS):
     """Link the last week's chats from other accounts into <to_id>.
 
     By default that is every other account, except accounts reserved for pinned folders
@@ -743,7 +747,7 @@ def carry(to_id, from_ids=None, folder=None):
         reserved = {p["account"] for p in pinned} - {default}
         from_ids = [a["id"] for a in accts if a["id"] not in reserved]
     folder_pin = pin_of_path(folder, pinned) if folder is not None else None
-    horizon = time.time() - CARRY_DAYS * 86400
+    horizon = time.time() - days * 86400 if days is not None else 0
     moved = 0
     for acct in accts:
         if acct["id"] == to_id or acct["id"] not in from_ids:
@@ -826,26 +830,49 @@ def hard_link(src, dst):
 #     folder around it is or was pinned to (pin-history.json): those were made under
 #     that pin, so they are that account's work. Re-pinning a folder from acme to
 #     globex must not hand acme's chats to globex. They are reported, and
-#     `adopt --from acme` brings them over when the user says so.
+#     `adopt --from acme` brings them over when the user says so (and is remembered
+#     for this pin, so later runs bring that account's chats too).
+#   - when the pin history is not complete (an install that had pins before
+#     pin-history.json existed, or a file that cannot be read): chats held by any
+#     account other than the default one. Any of them may be a former pin of this
+#     folder that was never recorded, so nothing is assumed: they are reported as
+#     left, with the same `--from` to bring them. History is unknown, never empty.
+# A project's memory notes come along only when the project folder is wholly this
+# pin's: no chat in it belongs elsewhere, and no other pinned folder has the same
+# project name (a slug turns ~/w/app and ~/w-app into one).
 PIN_HISTORY = os.path.join(SWITCH_DIR, "pin-history.json")
 ADOPT_QUICK_SECONDS = 2
+# Claude names a transcript after its session id (a UUID). Anything else, such as
+# '..', is never used to build a path.
+SID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 class AdoptDeadline(BaseException):
-    """The time budget of `adopt --quick` ran out (never an OSError, so no handler on
-    the way swallows it)."""
+    """The time budget of `adopt --quick` ran out, or the process was asked to stop
+    (never an OSError, so no handler on the way swallows it)."""
 
 
 def pin_history():
+    """{"complete", "folders", "allowed"} from pin-history.json. A missing or unreadable
+    file is unknown history (complete False), never an empty one."""
+    out = {"complete": False, "folders": {}, "allowed": {}}
     try:
         with open(PIN_HISTORY) as fh:
             data = json.load(fh)
-        folders = data.get("folders") if isinstance(data, dict) else None
     except (OSError, ValueError):
-        folders = None
-    if not isinstance(folders, dict):
-        return {}
-    return {k: [a for a in v if isinstance(a, str)] for k, v in folders.items() if isinstance(v, list)}
+        return out
+    if not isinstance(data, dict) or not isinstance(data.get("folders"), dict):
+        return out
+    out["complete"] = data.get("complete") is True
+    out["folders"] = {k: [a for a in v if isinstance(a, str)]
+                      for k, v in data["folders"].items() if isinstance(v, list)}
+    allowed = data.get("allowed")
+    if isinstance(allowed, dict):
+        for root, per in allowed.items():
+            if isinstance(per, dict):
+                out["allowed"][root] = {t: [a for a in ids if isinstance(a, str)]
+                                        for t, ids in per.items() if isinstance(ids, list)}
+    return out
 
 
 def former_accounts(root, pin_rows, history):
@@ -861,43 +888,146 @@ def former_accounts(root, pin_rows, history):
     return out
 
 
+SAMPLE = 1 << 20
+
+
+def _same_range(a, b, size):
+    """True when b's first `size` bytes look like a's: compared whole up to 2 MiB, else
+    the first and last MiB of the range (transcripts only ever grow at the end)."""
+    spans = [(0, size)] if size <= 2 * SAMPLE else [(0, SAMPLE), (size - SAMPLE, SAMPLE)]
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            for off, n in spans:
+                fa.seek(off)
+                fb.seek(off)
+                if fa.read(n) != fb.read(n):
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def content_state(src, dst):
+    """'same' (one file, or the same content), 'grown' (dst is src with more at the end:
+    a copied chat that went on in the pin's account) or 'differs'. Cheap on a re-run:
+    a copy keeps its source's size and mtime, and only a new size match is hashed.
+    Either way nothing is written, so this only decides what is reported."""
+    try:
+        s, d = os.stat(src), os.stat(dst)
+    except OSError:
+        return "differs"
+    if (s.st_dev, s.st_ino) == (d.st_dev, d.st_ino):
+        return "same"
+    if not (stat.S_ISREG(s.st_mode) and stat.S_ISREG(d.st_mode)):
+        return "differs"
+    if s.st_size == d.st_size:
+        if s.st_mtime_ns == d.st_mtime_ns:
+            return "same"
+        return "same" if sha256(src) == sha256(dst) else "differs"
+    if d.st_size > s.st_size and _same_range(src, dst, s.st_size):
+        return "grown"
+    return "differs"
+
+
+def _verdict(src, dst):
+    return "already" if content_state(src, dst) in ("same", "grown") else "conflict"
+
+
+class _SignalsHeld:
+    """Hold SIGALRM, SIGTERM and SIGINT for a few system calls, so a deadline or a kill
+    never lands between reserving a file name and filling it."""
+
+    def __enter__(self):
+        self.old = None
+        try:
+            import signal
+            self.old = signal.pthread_sigmask(signal.SIG_BLOCK,
+                                              {signal.SIGALRM, signal.SIGTERM, signal.SIGINT})
+        except (ImportError, AttributeError, ValueError, OSError):
+            self.old = None
+        return self
+
+    def __exit__(self, *exc):
+        if self.old is not None:
+            import signal
+            signal.pthread_sigmask(signal.SIG_SETMASK, self.old)
+        return False
+
+
+def _sweep_stale(dst):
+    """Temp copies left by an adopt that was killed (SIGKILL, power loss)."""
+    for old in glob.glob(glob.escape(dst) + ".cc-adopt.*"):
+        try:
+            pid = int(old.rsplit(".", 1)[1])
+        except ValueError:
+            continue
+        if pid != os.getpid() and not pid_alive(pid):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+
+
 def link_new(src, dst):
     """Make dst the same file as src without ever replacing anything: 'linked',
-    'copied' (another filesystem), 'already' (dst is that file, or has its exact
-    content) or 'conflict' (dst exists with other content, and is left alone)."""
+    'copied' (another filesystem), 'already' (dst is that file, or has its content,
+    or that content and more) or 'conflict' (dst exists with other content, and is
+    left alone). dst only ever appears complete: a copy is made and verified under a
+    temp name first, and an interrupted run leaves no partial dst."""
     if os.path.lexists(dst):
-        return "already" if same_file(src, dst) else "conflict"
+        return _verdict(src, dst)
     os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
     try:
         hard_link(src, dst)
         return "linked"
     except FileExistsError:
-        return "already" if same_file(src, dst) else "conflict"
+        return _verdict(src, dst)
     except OSError:
         pass
+    _sweep_stale(dst)
     tmp = f"{dst}.cc-adopt.{os.getpid()}"
     try:
         shutil.copy2(src, tmp)
-        if not same_file(src, tmp):
+        delay = os.environ.get("CC_TEST_COPY_DELAY")      # tests: a slow disk
+        if delay:
+            time.sleep(float(delay))
+        if os.path.getsize(src) != os.path.getsize(tmp) or sha256(src) != sha256(tmp):
             raise OSError(f"could not verify the copy of {src}")
         try:
-            os.link(tmp, dst)            # no-clobber: fails if dst appeared meanwhile
+            hard_link(tmp, dst)          # no-clobber: fails if dst appeared meanwhile
+            return "copied"
         except FileExistsError:
-            return "already" if same_file(src, dst) else "conflict"
+            return _verdict(src, dst)
         except OSError:                  # no hard links here at all
-            with open(tmp, "rb") as fin, open(dst, "xb") as fout:
-                shutil.copyfileobj(fin, fout)
-            shutil.copystat(tmp, dst)
+            pass
+        with _SignalsHeld():
+            # Reserve the name (fails if it exists), then put the verified copy in its
+            # place. Signals wait until both are done, so dst is never left empty.
+            try:
+                fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            except FileExistsError:
+                return _verdict(src, dst)
+            os.close(fd)
+            try:
+                os.replace(tmp, dst)
+            except BaseException:
+                try:
+                    os.remove(dst)       # our own empty reservation
+                except OSError:
+                    pass
+                raise
+        return "copied"
     finally:
         try:
             os.remove(tmp)
         except OSError:
             pass
-    return "copied"
 
 
 def _files_under(top):
     out = []
+    if os.path.islink(top):
+        return out
     for dirpath, dirs, files in os.walk(top):
         dirs.sort()
         for name in sorted(files):
@@ -908,18 +1038,66 @@ def _files_under(top):
     return out
 
 
+def _inside(path, top):
+    rel = os.path.relpath(path, top)
+    return rel != os.curdir and not rel.startswith(os.pardir + os.sep) and rel != os.pardir
+
+
 def adopt_extras(acct, slug_dir, sid, target, put):
-    """A chat's session folder, rewind checkpoints and todos, into the target account."""
-    extras = _files_under(os.path.join(slug_dir, sid))
-    extras += _files_under(os.path.join(acct["dir"], "file-history", sid))
-    extras += sorted(glob.glob(os.path.join(glob.escape(acct["dir"]), "todos", glob.escape(sid) + "-*.json")))
-    for extra in extras:
+    """A chat's session folder, rewind checkpoints and todos, into the target account.
+    Only ever files under <slug>/<sid>, file-history/<sid> and todos/<sid>-*.json."""
+    if not SID_RE.match(sid):
+        return
+    tops = [os.path.join(slug_dir, sid), os.path.join(acct["dir"], "file-history", sid)]
+    extras = []
+    for top in tops:
+        extras += [(f, top) for f in _files_under(top)]
+    todos = os.path.join(acct["dir"], "todos")
+    extras += [(f, todos) for f in
+               sorted(glob.glob(os.path.join(glob.escape(todos), glob.escape(sid) + "-*.json")))]
+    for extra, top in extras:
+        if not _inside(extra, top):
+            continue
         put(extra, os.path.join(target["dir"], os.path.relpath(extra, acct["dir"])), False, acct["id"])
 
 
-def adopt(folder, include=(), dry=False, deadline=None):
+def _owns_chat(src, slug, root, pin_rows):
+    """True when the transcript `src` was made in `root` and belongs to its pin."""
+    cwd, owner, certain = chat_place(src, slug, pin_rows)
+    if cwd is not None:
+        if not path_in(cwd, root):
+            return False
+    elif not certain or not slug_under(slug, root) or slug_ambiguous(slug, root):
+        return False
+    return owner is not None and owner["path"] == root
+
+
+def memory_owned(slug_dir, slug, root, pin_rows):
+    """A project's memory notes belong to `root`'s pin only when nothing else could
+    have written them: no other pinned folder has this project name, the name is not
+    one a folder beside root could have, and every chat in the project is root's."""
+    for p in pin_rows:
+        if p["path"] != root and under(slug, p["path"]):
+            return False
+    if slug_ambiguous(slug, root):
+        return False
+    try:
+        names = [n for n in os.listdir(slug_dir) if n.endswith(".jsonl")]
+    except OSError:
+        return False
+    for name in names:
+        src = os.path.join(slug_dir, name)
+        if os.path.islink(src) or not os.path.isfile(src):
+            continue
+        if not _owns_chat(src, slug, root, pin_rows):
+            return False
+    return True
+
+
+def adopt(folder, include=(), dry=False, deadline=None, session=None):
     """Bring the chats of the pin on `folder` into its account (see above). `include`
-    names former accounts whose chats come along anyway. Returns a report."""
+    names accounts whose chats come along anyway (`--from`). `session`, a session id,
+    is handled before anything else (a resume waits for it). Returns a report."""
     root = canon(folder)
     accts = accounts()
     by_id = {a["id"]: a for a in accts}
@@ -931,86 +1109,131 @@ def adopt(folder, include=(), dry=False, deadline=None):
     target = by_id.get(pin["account"])
     if target is None:
         raise SystemExit(f"cc-vscode: {tilde(root)} is pinned to '{pin['account']}', which is not an account")
-    excluded = former_accounts(root, pin_rows, pin_history()) - {target["id"]} - set(include)
+    hist = pin_history()
+    allowed = set((hist["allowed"].get(root) or {}).get(target["id"]) or [])
+    asked = set(include) | allowed
+    former = former_accounts(root, pin_rows, hist["folders"]) - {target["id"]} - asked
+    default = next((a["id"] for a in accts if a["default"]), None)
+    unknown = set() if hist["complete"] else \
+        {a["id"] for a in accts if a["id"] != default} - {target["id"]} - asked - former
+    excluded = former | unknown
     tdir = os.path.realpath(target["dir"])
     rep = {"ok": True, "folder": root, "to": target["id"], "dryRun": bool(dry), "chats": 0,
-           "already": 0, "files": 0, "copied": 0, "from": {}, "left": {}, "conflicts": [],
-           "errors": [], "incomplete": False}
+           "already": 0, "files": 0, "copied": 0, "from": {}, "left": {}, "leftWhy": {},
+           "historyKnown": hist["complete"], "conflicts": [], "chatConflicts": 0, "memoryLeft": [],
+           "errors": [], "incomplete": False, "session": None}
 
     def put(src, dst, chat, src_acct):
         try:
             if dry:
-                how = ("already" if same_file(src, dst) else "conflict") if os.path.lexists(dst) else "new"
+                how = (_verdict(src, dst)) if os.path.lexists(dst) else "new"
             else:
                 how = link_new(src, dst)
         except OSError as exc:
             rep["errors"].append(f"{tilde(src)}: {exc}")
-            return
+            return False
         if how == "conflict":
             rep["conflicts"].append(f"{tilde(dst)} already exists in {target['id']} with other content; "
                                     f"kept it ({tilde(src)} in {src_acct} differs)")
-        elif how == "already":
+            if chat:
+                rep["chatConflicts"] += 1
+            return False
+        if how == "already":
             if chat:
                 rep["already"] += 1
+            return True
+        rep["copied"] += how == "copied"
+        if chat:
+            rep["chats"] += 1
+            rep["from"][src_acct] = rep["from"].get(src_acct, 0) + 1
         else:
-            rep["copied"] += how == "copied"
-            if chat:
-                rep["chats"] += 1
-                rep["from"][src_acct] = rep["from"].get(src_acct, 0) + 1
-            else:
-                rep["files"] += 1
+            rep["files"] += 1
+        return True
 
-    try:
-        for acct in accts:
-            if acct["id"] == target["id"] or os.path.realpath(acct["dir"]) == tdir:
+    # Every candidate first (directory listings only), then the work: the session a
+    # resume waits for, then chats not yet in the pin's account, then the ones there
+    # already (only their newer session files can be missing). A bounded run so
+    # always gets to new chats before re-checking old ones.
+    items = []
+    for acct in accts:
+        if acct["id"] == target["id"] or os.path.realpath(acct["dir"]) == tdir:
+            continue
+        proj = os.path.join(acct["dir"], "projects")
+        try:
+            slugs = sorted(n for n in os.listdir(proj) if under(n, root))
+        except OSError:
+            continue
+        for slug in slugs:
+            slug_dir = os.path.join(proj, slug)
+            if os.path.islink(slug_dir):
                 continue
-            proj = os.path.join(acct["dir"], "projects")
             try:
-                slugs = sorted(n for n in os.listdir(proj) if under(n, root))
+                names = sorted(n for n in os.listdir(slug_dir) if n.endswith(".jsonl"))
             except OSError:
                 continue
-            for slug in slugs:
-                slug_dir = os.path.join(proj, slug)
-                try:
-                    names = sorted(n for n in os.listdir(slug_dir) if n.endswith(".jsonl"))
-                except OSError:
-                    continue
-                memory = False
-                for name in names:
-                    if deadline is not None and time.time() > deadline:
-                        rep["incomplete"] = True
-                        raise AdoptDeadline()
-                    src = os.path.join(slug_dir, name)
-                    if os.path.islink(src) or not os.path.isfile(src):
-                        continue
-                    sid = name[:-6]
-                    dst_proj = os.path.join(target["dir"], "projects", slug)
-                    if same_inode(src, os.path.join(dst_proj, name)):
-                        # Linked already: the pin's account has this very chat. Only its
-                        # session files may be new (it may have run on here since).
-                        if acct["id"] not in excluded:
-                            rep["already"] += 1
-                            adopt_extras(acct, slug_dir, sid, target, put)
-                            memory = True
-                        continue
-                    cwd, owner, certain = chat_place(src, slug, pin_rows)
-                    if cwd is not None:
-                        if not path_in(cwd, root):
-                            continue
-                    elif not certain or not slug_under(slug, root) or slug_ambiguous(slug, root):
-                        continue
-                    if owner is None or owner["path"] != root:
-                        continue             # another pin's chat: never here
-                    if acct["id"] in excluded:
-                        rep["left"][acct["id"]] = rep["left"].get(acct["id"], 0) + 1
-                        continue
-                    put(src, os.path.join(dst_proj, name), True, acct["id"])
+            dst_proj = os.path.join(target["dir"], "projects", slug)
+            for name in names:
+                sid = name[:-6]
+                if not SID_RE.match(sid):
+                    continue             # not a session Claude wrote: never a path part
+                rank = 0 if sid == session else (2 if os.path.lexists(os.path.join(dst_proj, name)) else 1)
+                items.append((rank, len(items), acct, slug, slug_dir, name))
+    items.sort(key=lambda t: (t[0], t[1]))
+
+    touched = {}
+    # Tests: stop after this many chats, as a deadline would (deterministic).
+    limit = int(os.environ.get("CC_TEST_ADOPT_LIMIT") or 0) or None
+    done = 0
+    try:
+        for rank, _i, acct, slug, slug_dir, name in items:
+            # The session a resume waits for is always handled; the budget is for the rest.
+            if rank and ((deadline is not None and time.time() > deadline)
+                         or (limit is not None and done >= limit)):
+                raise AdoptDeadline()
+            done += 1
+            src = os.path.join(slug_dir, name)
+            if os.path.islink(src) or not os.path.isfile(src):
+                continue
+            sid = name[:-6]
+            dst = os.path.join(target["dir"], "projects", slug, name)
+            mine = sid == session
+            if same_inode(src, dst):
+                # Linked already: the pin's account has this very chat. Only its
+                # session files may be new (it may have run on here since).
+                if acct["id"] not in excluded:
+                    rep["already"] += 1
                     adopt_extras(acct, slug_dir, sid, target, put)
-                    memory = True
-                if memory:                   # the project's notes, where one of its chats came from
-                    for note in _files_under(os.path.join(slug_dir, "memory")):
-                        put(note, os.path.join(target["dir"], os.path.relpath(note, acct["dir"])),
-                            False, acct["id"])
+                    touched[(acct["id"], slug)] = (acct, slug_dir)
+                    if mine:
+                        rep["session"] = {"id": sid, "from": acct["id"], "status": "already"}
+                continue
+            if not _owns_chat(src, slug, root, pin_rows):
+                continue                 # made elsewhere, or another pin's chat: never here
+            if acct["id"] in excluded:
+                rep["left"][acct["id"]] = rep["left"].get(acct["id"], 0) + 1
+                rep["leftWhy"][acct["id"]] = "former" if acct["id"] in former else "unknown"
+                if mine:
+                    rep["session"] = {"id": sid, "from": acct["id"], "status": "left"}
+                continue
+            if put(src, dst, True, acct["id"]):
+                adopt_extras(acct, slug_dir, sid, target, put)
+                touched[(acct["id"], slug)] = (acct, slug_dir)
+                if mine:
+                    rep["session"] = {"id": sid, "from": acct["id"], "status": "linked"}
+            elif mine:
+                rep["session"] = {"id": sid, "from": acct["id"], "status": "conflict"}
+        for (aid, slug), (acct, slug_dir) in sorted(touched.items()):
+            notes = _files_under(os.path.join(slug_dir, "memory"))
+            if not notes:
+                continue
+            if deadline is not None and time.time() > deadline:
+                raise AdoptDeadline()
+            if not memory_owned(slug_dir, slug, root, pin_rows):
+                rep["memoryLeft"].append(f"{tilde(os.path.join(slug_dir, 'memory'))} in {aid}: that project "
+                                         f"also holds chats of another folder, or shares its name with one")
+                continue
+            for note in notes:
+                put(note, os.path.join(target["dir"], os.path.relpath(note, acct["dir"])), False, aid)
     except AdoptDeadline:
         rep["incomplete"] = True
     rep["ok"] = not rep["errors"] and not rep["incomplete"]
@@ -1035,9 +1258,16 @@ def describe_adopt(rep):
     if rep["copied"]:
         lines.append(f"  {rep['copied']} copied rather than linked (another filesystem)")
     for acct, count in sorted(rep["left"].items()):
-        lines.append(f"  left {n(count, 'chat')} in {acct}: this folder (or one around it) is or was "
-                     f"pinned to {acct}, so they are {acct}'s; `cc adopt {tilde(rep['folder'])} "
-                     f"--from {acct}` brings them")
+        hint = f"`cc adopt {tilde(rep['folder'])} --from {acct}` brings them"
+        if rep.get("leftWhy", {}).get(acct) == "unknown":
+            lines.append(f"  left {n(count, 'chat')} in {acct}: cc cannot tell whether this folder was "
+                         f"pinned to {acct} before (pins changed before pin-history.json are not "
+                         f"recorded), so they stay there; {hint}")
+        else:
+            lines.append(f"  left {n(count, 'chat')} in {acct}: this folder (or one around it) is or was "
+                         f"pinned to {acct}, so they are {acct}'s; {hint}")
+    for m in rep.get("memoryLeft", []):
+        lines.append(f"  memory notes left: {m}")
     for c in rep["conflicts"]:
         lines.append(f"  conflict: {c}")
     for e in rep["errors"]:
@@ -1047,16 +1277,49 @@ def describe_adopt(rep):
     return "\n".join(lines)
 
 
+def carry_session(root, sid, from_id, to_id):
+    """Link one chat of `root` (with its session files) from the pin's account into the
+    account the window runs on while the pin is limited (its fallback), so a resume
+    there finds it. Returns the number of files added."""
+    if not SID_RE.match(sid or ""):
+        return 0
+    by_id = {a["id"]: a for a in accounts()}
+    src_acct, dst_acct = by_id.get(from_id), by_id.get(to_id)
+    if not src_acct or not dst_acct or src_acct is dst_acct:
+        return 0
+    added = 0
+
+    def put(src, dst, _chat, _acct):
+        nonlocal added
+        try:
+            added += link_new(src, dst) in ("linked", "copied")
+        except OSError:
+            pass
+        return True
+    proj = os.path.join(src_acct["dir"], "projects")
+    try:
+        slugs = sorted(n for n in os.listdir(proj) if under(n, root))
+    except OSError:
+        return 0
+    for slug in slugs:
+        src = os.path.join(proj, slug, sid + ".jsonl")
+        if os.path.islink(src) or not os.path.isfile(src):
+            continue
+        put(src, os.path.join(dst_acct["dir"], "projects", slug, sid + ".jsonl"), True, from_id)
+        adopt_extras(src_acct, os.path.join(proj, slug), sid, dst_acct, put)
+    return added
+
+
 def cmd_adopt(args):
-    usage = ("usage: cc-vscode adopt [--folder <f> | <f> | --all] [--from <id>]... "
-             "[--dry-run] [--json] [--quick] [--quiet]")
+    usage = ("usage: cc-vscode adopt [--folder <f> | <f> | --all] [--from <id>]... [--session <id>] "
+             "[--also-to <id>] [--dry-run] [--json] [--quick] [--quiet] [--deadline <s>]")
     folder, include, every = None, [], False
     dry = quick = quiet = as_json = False
-    deadline = None
+    deadline = session = also_to = None
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("--folder", "--from", "--deadline"):
+        if a in ("--folder", "--from", "--deadline", "--session", "--also-to"):
             if i + 1 >= len(args):
                 print(usage, file=sys.stderr)
                 return 2
@@ -1066,6 +1329,10 @@ def cmd_adopt(args):
                 folder = v
             elif a == "--from":
                 include.append(v)
+            elif a == "--session":
+                session = v
+            elif a == "--also-to":
+                also_to = v
             else:
                 try:
                     deadline = time.time() + float(v)
@@ -1089,26 +1356,48 @@ def cmd_adopt(args):
         else:
             folder = a
         i += 1
-    if quick:
-        # The wrapper's call, on the way to starting Claude: bounded, silent, and never
-        # a reason not to start (it changes nothing that exists, so stopping is safe).
-        deadline = time.time() + ADOPT_QUICK_SECONDS if deadline is None else deadline
-        try:
-            import signal
+    try:
+        import signal
 
-            def _stop(*_):
-                raise AdoptDeadline()
+        def _stop(*_):
+            raise AdoptDeadline()
+        # Asked to stop (VS Code's timeout): unwind, so temp copies are removed.
+        signal.signal(signal.SIGTERM, _stop)
+        if quick:
+            # The wrapper's call, on the way to starting Claude: bounded, silent, and
+            # never a reason not to start (it only adds files, so stopping is safe). The
+            # alarm is for a hung filesystem; the deadline is checked between files.
+            deadline = time.time() + ADOPT_QUICK_SECONDS if deadline is None else deadline
             signal.signal(signal.SIGALRM, _stop)
             signal.alarm(ADOPT_QUICK_SECONDS + 1)
-        except (ImportError, ValueError, AttributeError):
-            pass
+    except (ImportError, ValueError, AttributeError):
+        pass
+    reps = []
     try:
         if every:
             roots = [p["path"] for p in pins()]
         else:
             roots = [folder or os.getcwd()]
-        reps = [adopt(r, include=include, dry=dry, deadline=deadline) for r in roots]
+        for r in roots:
+            reps.append(adopt(r, include=include, dry=dry, deadline=deadline, session=session))
+        if also_to and session and reps and not dry:
+            rep = reps[0]
+            if rep["to"] != also_to:
+                carry_session(rep["folder"], session, rep["to"], also_to)
+        if include and not dry and reps:
+            # The user said these accounts' chats of this folder may follow the pin:
+            # remembered for this pin (cleared when it changes), so the automatic runs
+            # (VS Code, the wrapper, cc) bring them too.
+            for rep in reps:
+                res = subprocess.run([DETECT, "pin-allow", rep["folder"], rep["to"], *include],
+                                     capture_output=True, text=True, stdin=subprocess.DEVNULL)
+                if res.returncode != 0:
+                    rep["errors"].append("could not remember --from for this pin: "
+                                         + (res.stderr.strip() or f"status {res.returncode}"))
+                    rep["ok"] = False
     except AdoptDeadline:
+        if as_json and reps:
+            print(json.dumps(reps if every else reps[0]))
         return 5
     if as_json:
         print(json.dumps(reps if every else reps[0]))
@@ -1312,6 +1601,7 @@ def plan_chats(dirs):
     accts = accounts()
     by_id = {a["id"]: a for a in accts}
     history = pin_history()
+    default = next((a["id"] for a in accts if a["default"]), None)
     for acct in accts:
         proj = os.path.join(acct["dir"], "projects")
         try:
@@ -1324,11 +1614,20 @@ def plan_chats(dirs):
             owner = slug_owner_checked(os.path.join(proj, slug), slug, pin_rows, notes)
             if owner is None or owner["account"] == acct["id"] or owner["account"] not in by_id:
                 continue
-            if acct["id"] in former_accounts(owner["path"], pin_rows, history):
+            allowed = (history["allowed"].get(owner["path"]) or {}).get(owner["account"]) or []
+            if acct["id"] not in allowed and \
+                    acct["id"] in former_accounts(owner["path"], pin_rows, history["folders"]):
                 # Made under an earlier pin (or a pin around it) on this account: that
                 # account's work, never handed to the folder's new account (as adopt).
                 notes.append(f"{tilde(os.path.join(proj, slug))}: {tilde(owner['path'])} is or was pinned "
                              f"to {acct['id']}, so these chats are {acct['id']}'s; left there "
+                             f"(`cc adopt {tilde(owner['path'])} --from {acct['id']}` links them)")
+                continue
+            if not history["complete"] and acct["id"] != default and acct["id"] not in allowed:
+                # Pins changed before pin-history.json are unknown: this account may be
+                # a former pin of the folder. Left, as adopt leaves it.
+                notes.append(f"{tilde(os.path.join(proj, slug))}: cc cannot tell whether {tilde(owner['path'])} "
+                             f"was pinned to {acct['id']} before, so these chats stay there "
                              f"(`cc adopt {tilde(owner['path'])} --from {acct['id']}` links them)")
                 continue
             dest_root = by_id[owner["account"]]["dir"]
@@ -1337,7 +1636,8 @@ def plan_chats(dirs):
                 for name in sorted(files):
                     src = os.path.join(dirpath, name)
                     rel = os.path.relpath(src, acct["dir"])
-                    if dirpath == os.path.join(proj, slug) and name.endswith(".jsonl"):
+                    if dirpath == os.path.join(proj, slug) and name.endswith(".jsonl") \
+                            and SID_RE.match(name[:-6]):
                         sessions.add(name[:-6])
                     actions.extend(move_action(src, os.path.join(dest_root, rel), acct["id"],
                                                owner, notes))
@@ -1773,7 +2073,7 @@ def cmd_on(args):
     if backup:
         print(f"  backup     {tilde(backup)}")
     for rep in adopted:
-        if rep["chats"] or rep["files"] or rep["left"] or rep["conflicts"] or not rep["ok"]:
+        if rep["chats"] or rep["files"] or rep["left"] or rep["conflicts"] or rep["memoryLeft"] or not rep["ok"]:
             print("  chats      " + describe_adopt(rep).replace("\n", "\n             "))
     print("  Open windows re-check within a few seconds. A chat already running stays where it is.")
     if load_ws() or any(a["kind"] == "move" for a in plan_chats(account_dirs())[0]):
@@ -1925,7 +2225,10 @@ def main(argv):
                 return args[i + 1]
             folder = opt("--folder") if "--folder" in args else None
             src = opt("--from") if "--from" in args else None
-            print(carry(opt("--to"), from_ids=[src] if src else None, folder=folder))
+            # --any-age: a window first bound while its pin is limited carries the
+            # folder's chats of every age, so the tabs it restores are all there.
+            days = None if "--any-age" in args and folder else CARRY_DAYS
+            print(carry(opt("--to"), from_ids=[src] if src else None, folder=folder, days=days))
             return 0
         if not args:
             print("usage: cc-vscode carry <id> | carry --folder <f> --from <a> --to <b>", file=sys.stderr)

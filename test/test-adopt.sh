@@ -190,4 +190,163 @@ it "AD-15 cc vscode on brings each pinned folder's chats home"
 assert_contains "$out" "/orbit -> orbit: brought 2 chats from personal, 1 chat from work" "AD-15 ...and says so"
 cleanup_home
 
+# ---- memory notes come only from a project that is wholly this pin's ----
+# ~/w/app and ~/w-app share one project name (a slug turns / and - alike). ~/w-app is
+# work's own folder: its notes must never reach orbit by way of one ~/w/app chat.
+world
+mkdir -p "$HOME/w/app" "$HOME/w-app"
+"$BIN/cc" pin "$HOME/w-app" --account work --fallback personal >/dev/null 2>&1
+S="$(slug "$HOME/w/app")"
+chat "$W/projects/$S/s-employer.jsonl" "$HOME/w-app"
+chat "$W/projects/$S/s-mine.jsonl" "$HOME/w/app"
+mkdir -p "$W/projects/$S/memory"
+printf '# EMPLOYER notes\n' > "$W/projects/$S/memory/MEMORY.md"
+printf 'roadmap\n' > "$W/projects/$S/memory/roadmap.md"
+out="$("$BIN/cc" pin "$HOME/w/app" --account orbit --fallback personal 2>&1)"
+it "AD-16 a chat made in the folder comes along from a project name it shares"
+[ "$(ino "$D/projects/$S/s-mine.jsonl")" = "$(ino "$W/projects/$S/s-mine.jsonl")" ] && ok || no "$CURRENT" "$out"
+it "AD-16 ...the other folder's chat does not"
+[ ! -e "$D/projects/$S/s-employer.jsonl" ] && ok || no
+it "AD-16 ...nor that project's memory notes"
+{ [ ! -e "$D/projects/$S/memory/MEMORY.md" ] && [ ! -e "$D/projects/$S/memory/roadmap.md" ]; } && ok || no "$CURRENT" "$out"
+assert_contains "$out" "memory notes left" "AD-16 ...and it says the notes were left"
+# the same with no chat of the other folder left in the project: the pin on ~/w-app alone keeps them out
+rm -f "$W/projects/$S/s-employer.jsonl"
+out="$("$BIN/cc" adopt "$HOME/w/app" 2>&1)"
+it "AD-16 a pinned folder of the same project name keeps its notes out even with no chat of it there"
+[ ! -e "$D/projects/$S/memory/MEMORY.md" ] && ok || no "$CURRENT" "$out"
+cleanup_home
+
+# ---- an install upgraded from a version without pin-history.json ----
+# Re-pins made then are unknown: chats held by any account but the default stay where
+# they are until the user says otherwise. History unknown is never history empty.
+upgrade_world() {
+    world
+    "$BIN/cc" pin "$HOME/orbit" --account acme --fallback personal >/dev/null 2>&1
+    chat "$A/projects/$T/s-acme-own.jsonl" "$HOME/orbit"       # made while pinned to acme
+    "$BIN/cc" pin "$HOME/orbit" --account orbit --fallback personal >/dev/null 2>&1
+    rm -rf "$D/projects" "$HOME/.claude-switch/pin-history.json"   # as 2.2 left it
+}
+upgrade_world
+it "AD-17 precondition: a fresh install's history is complete"
+world >/dev/null; python3 -c 'import json,os,sys; sys.exit(0 if json.load(open(os.path.expanduser("~/.claude-switch/pin-history.json"))).get("complete") is True else 1)' && ok || no
+cleanup_home
+upgrade_world
+out="$("$BIN/cc-vscode" adopt --all 2>&1)"
+it "AD-17 no history: a re-pin made before it never hands acme's chats to orbit (cc vscode on's call)"
+[ ! -e "$D/projects/$T/s-acme-own.jsonl" ] && ok || no "$CURRENT" "$out"
+it "AD-17 ...nor work's (cc cannot rule out that work was a former pin either)"
+[ ! -e "$D/projects/$T/s-work.jsonl" ] && ok || no
+it "AD-17 ...the default account's chats still follow the folder"
+[ "$(ino "$D/projects/$T/s-personal.jsonl")" = "$(ino "$P/projects/$T/s-personal.jsonl")" ] && ok || no
+assert_contains "$out" "cc cannot tell whether this folder was pinned to acme before" "AD-17 ...it says why they stay"
+assert_contains "$out" "--from acme\` brings them" "AD-17 ...and how to bring them"
+(cd "$HOME/orbit" && "$BIN/cc-vscode" adopt --folder "$HOME/orbit" --quick --quiet >/dev/null 2>&1)
+it "AD-17 the silent pre-launch run (--quick) brings them neither"
+[ ! -e "$D/projects/$T/s-acme-own.jsonl" ] && ok || no
+printf '{"folders": ' > "$HOME/.claude-switch/pin-history.json"           # unreadable
+"$BIN/cc-vscode" adopt --all >/dev/null 2>&1
+it "AD-17 an unreadable pin-history.json is unknown history too"
+[ ! -e "$D/projects/$T/s-acme-own.jsonl" ] && ok || no
+out="$("$BIN/cc" adopt "$HOME/orbit" --from work 2>&1)"
+it "AD-17 cc adopt --from work brings work's chats when asked"
+[ -f "$D/projects/$T/s-work.jsonl" ] && [ ! -e "$D/projects/$T/s-acme-own.jsonl" ] && ok || no "$CURRENT" "$out"
+chat "$W/projects/$T/s-work-2.jsonl" "$HOME/orbit"
+"$BIN/cc-vscode" adopt --folder "$HOME/orbit" --quick --quiet >/dev/null 2>&1
+it "AD-17 ...and it is remembered for this pin: later automatic runs bring work's new chats"
+[ -f "$D/projects/$T/s-work-2.jsonl" ] && ok || no
+"$BIN/cc" pin "$HOME/orbit" --account acme --fallback personal >/dev/null 2>&1
+it "AD-17 a re-pin forgets it"
+python3 -c 'import json,os,sys; h=json.load(open(os.path.expanduser("~/.claude-switch/pin-history.json"))); sys.exit(1 if h.get("allowed",{}) else 0)' && ok || no
+cleanup_home
+
+# ---- an interrupted copy never leaves a partial chat behind ----
+world
+"$BIN/cc-detect" pin "$HOME/orbit" orbit switch personal 1 >/dev/null
+start=$(date +%s)
+(cd "$HOME/orbit" && CC_TEST_NO_HARDLINK=1 CC_TEST_COPY_DELAY=6 "$BIN/cc-vscode" adopt --folder "$HOME/orbit" \
+    --quick --quiet >/dev/null 2>&1); rc=$?
+took=$(( $(date +%s) - start ))
+assert_eq "$rc" "5" "AD-18 --quick on a slow disk without hard links stops on its alarm (status 5)"
+it "AD-18 ...within its bound"
+[ "$took" -le 5 ] && ok || no "$CURRENT" "took ${took}s"
+it "AD-18 ...leaving no partial chat and no temp file in the pin's account"
+left_over="$(find "$D" -name '*.jsonl*' 2>/dev/null)"
+[ -z "$left_over" ] && ok || no "$CURRENT" "$left_over"
+CC_TEST_NO_HARDLINK=1 CC_TEST_COPY_DELAY=6 "$BIN/cc-vscode" adopt --folder "$HOME/orbit" --quiet >/dev/null 2>&1 &
+bg=$!
+sleep 2; kill -TERM "$bg" 2>/dev/null; wait "$bg" 2>/dev/null
+it "AD-18 stopped by SIGTERM (VS Code's timeout): no partial chat, no temp file"
+left_over="$(find "$D" -name '*.jsonl*' 2>/dev/null)"
+[ -z "$left_over" ] && ok || no "$CURRENT" "$left_over"
+out="$(CC_TEST_NO_HARDLINK=1 "$BIN/cc" adopt "$HOME/orbit" 2>&1)"
+it "AD-18 a later run completes, with whole copies"
+{ cmp -s "$D/projects/$T/s-work.jsonl" "$W/projects/$T/s-work.jsonl" \
+    && cmp -s "$D/projects/$TB/s-old.jsonl" "$P/projects/$TB/s-old.jsonl"; } && ok || no "$CURRENT" "$out"
+assert_not_contains "$out" ".jsonl already exists" "AD-18 ...with no chat conflict left by the interrupted runs"
+
+it "AD-19 cross-filesystem: a copied chat that went on in the pin's account is not a conflict"
+printf '{"type":"user","cwd":"%s","message":"next turn, on orbit"}\n' "$HOME/orbit" >> "$D/projects/$T/s-work.jsonl"
+out="$(CC_TEST_NO_HARDLINK=1 "$BIN/cc-vscode" adopt --folder "$HOME/orbit" --json 2>&1)"
+python3 -c 'import json,sys; r=json.loads(sys.argv[1]); sys.exit(0 if r["ok"] and r["chatConflicts"]==0 and r["chats"]==0 and not any(".jsonl" in c for c in r["conflicts"]) else 1)' "$out" \
+    && ok || no "$CURRENT" "$out"
+it "AD-19 a bounded run reaches a new chat before re-checking the ones there already"
+chat "$P/projects/$T/zz-new.jsonl" "$HOME/orbit"
+CC_TEST_NO_HARDLINK=1 CC_TEST_ADOPT_LIMIT=1 "$BIN/cc-vscode" adopt --folder "$HOME/orbit" --quiet >/dev/null 2>&1; rc=$?
+{ [ "$rc" = "5" ] && [ -f "$D/projects/$T/zz-new.jsonl" ]; } && ok || no "$CURRENT" "rc=$rc"
+cleanup_home
+
+# ---- a transcript name is never a path ----
+world
+mkdir -p "$W/file-history/x"
+chat "$W/projects/$T/....jsonl" "$HOME/orbit"
+out="$("$BIN/cc" pin "$HOME/orbit" --account orbit --fallback personal 2>&1)"
+it "AD-20 a transcript named '...jsonl' (session id '..') links nothing outside its session"
+{ [ ! -e "$D/.claude.json" ] && [ ! -e "$D/projects/$T/....jsonl" ] && [ ! -e "$D/file-history/x" ]; } && ok || no "$CURRENT" "$out"
+it "AD-20 ...and the ordinary chats still come"
+[ -f "$D/projects/$T/s-work.jsonl" ] && ok || no
+cleanup_home
+
+# ---- the wrapper: the session being resumed first, and on the fallback too ----
+world
+"$BIN/cc-detect" pin "$HOME/orbit" orbit switch personal 1 >/dev/null      # nothing adopted yet
+FAKE="$SANDBOX/fake-claude"
+printf '#!/usr/bin/env bash\necho "CFG=${CLAUDE_CONFIG_DIR:-unset}"\n' > "$FAKE"; chmod 755 "$FAKE"
+i=0
+while [ $i -lt 40 ]; do chat "$P/projects/$T/a-$i.jsonl" "$HOME/orbit"; i=$((i + 1)); done
+chat "$W/projects/$T/zz-resumed.jsonl" "$HOME/orbit"
+res="$(cd "$HOME/orbit" && CC_TEST_ADOPT_LIMIT=1 "$BIN/cc-claude-wrapper" "$FAKE" --resume zz-resumed 2>&1)"
+it "AD-21 --resume <id>: that chat is linked first, however many others are waiting"
+[ "$(ino "$D/projects/$T/zz-resumed.jsonl")" = "$(ino "$W/projects/$T/zz-resumed.jsonl")" ] && ok || no "$CURRENT" "$res"
+it "AD-21 ...the budget still bounds the rest"
+n="$(find "$D/projects/$T" -name 'a-*.jsonl' | wc -l | tr -d ' ')"
+[ "$n" -lt 40 ] && ok || no "$CURRENT" "$n linked"
+assert_eq "$res" "CFG=$D" "AD-21 ...and Claude runs on the pin's account"
+"$BIN/cc-detect" mark orbit "$(( $(date +%s) + 3600 ))" >/dev/null
+chat "$W/projects/$T/zz-limited.jsonl" "$HOME/orbit"
+res="$(cd "$HOME/orbit" && "$BIN/cc-claude-wrapper" "$FAKE" --resume zz-limited 2>&1)"
+assert_eq "$res" "CFG=unset" "AD-22 orbit limited: the resume runs on the fallback (personal)"
+it "AD-22 ...and the chat is in the fallback account, where that resume reads it"
+[ "$(ino "$P/projects/$T/zz-limited.jsonl")" = "$(ino "$W/projects/$T/zz-limited.jsonl")" ] && ok || no "$CURRENT" "$res"
+it "AD-22 ...and in the pin's own account"
+[ -f "$D/projects/$T/zz-limited.jsonl" ] && ok || no
+cleanup_home
+
+# ---- cc itself, launched in a pinned folder ----
+world
+"$BIN/cc-detect" pin "$HOME/orbit" orbit switch personal 1 >/dev/null      # nothing adopted yet
+stub_claude
+out="$(cd "$HOME/orbit" && STUB_MODE=ok "$BIN/cc" --manual 2>&1)"
+it "AD-23 cc launched in a pinned folder links its earlier chats in first"
+[ "$(ino "$D/projects/$T/s-work.jsonl")" = "$(ino "$W/projects/$T/s-work.jsonl")" ] && ok || no "$CURRENT" "$out"
+cleanup_home
+
+# ---- cc unpin says the chats stay ----
+world
+"$BIN/cc" pin "$HOME/orbit" --account orbit --fallback personal >/dev/null 2>&1
+out="$("$BIN/cc" unpin "$HOME/orbit" 2>&1)"
+assert_contains "$out" "its chats stay in orbit" "AD-24 cc unpin says the folder's chats stay in its account"
+assert_contains "$out" "restarts its open chats empty if reloaded" "AD-24 ...and what a reload of an open window does"
+cleanup_home
+
 summary

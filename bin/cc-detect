@@ -49,6 +49,7 @@ Pinned folders (~/.claude-switch/pins.json)
   unpin <path>                      remove the pin on exactly that folder
   pins                              "<path>\\t<id>\\t<onLimit>\\t<fallback>\\t<vscode>" per pin
   pin-history                       "<path>\\t<id,id>": accounts each folder was pinned to before
+  pin-allow <path> <id> <from>...   let <path>'s chats in <from> follow its pin into <id>
   pin-of [dir]                      the pin that applies to a directory (longest match)
   start-for [dir] [forced-id]       "use <id>", "switch <id>", "ask <id>", "stop <id>" or "none"
   bind <folder|-> [folder...] [--json|--shell]
@@ -440,10 +441,43 @@ def note_former(history, root, aid):
 
 
 def load_pin_history():
-    data = _load_json(PIN_HISTORY, {})
+    """pin-history.json: the accounts each folder was pinned to before ("folders"), the
+    former accounts the user said a folder's chats may come from anyway ("allowed",
+    per pin account), and whether every pin change ever made is in it ("complete").
+
+    It is complete only when it was started before any pin existed (pins.json absent):
+    a fresh install. An install that had pins before this file existed may have
+    re-pinned or unpinned folders unrecorded, so, like a file that cannot be read,
+    its history is unknown, and `cc adopt` then brings chats on its own only from the
+    default account (see cc-vscode adopt)."""
+    if not os.path.lexists(PIN_HISTORY):
+        return {"version": 1, "complete": not os.path.lexists(PINS), "since": int(time.time()),
+                "folders": {}, "allowed": {}}
+    data = _load_json(PIN_HISTORY, None)
     if not isinstance(data, dict) or not isinstance(data.get("folders"), dict):
-        data = {"version": 1, "folders": {}}
+        data = {"version": 1, "complete": False, "since": int(time.time()), "folders": {}}
+    data["complete"] = data.get("complete") is True
+    if not isinstance(data.get("allowed"), dict):
+        data["allowed"] = {}
     return data
+
+
+def allow_adopt(path, to_id, from_ids):
+    """Record that `path`'s chats held by `from_ids` may follow its pin into `to_id`
+    (the user ran `cc adopt --from`). Cleared whenever the pin changes."""
+    root = canon(path)
+    with state_lock():
+        pin = next((p for p in load_pins() if p["path"] == root), None)
+        if pin is None or pin.get("account") != to_id:
+            raise ConfigError(f"{tilde(root)} is not pinned to '{to_id}'")
+        history = load_pin_history()
+        rows = history["allowed"].setdefault(root, {})
+        if not isinstance(rows, dict):
+            rows = history["allowed"][root] = {}
+        have = [a for a in (rows.get(to_id) or []) if isinstance(a, str)]
+        rows[to_id] = have + [a for a in from_ids if a not in have and a != to_id]
+        _write_private(PIN_HISTORY, history)
+    return root
 
 
 def default_id():
@@ -514,16 +548,16 @@ def set_pin(path, aid, on_limit, fallback=None, vscode=True):
                                   f"also be pinned. Change those pins first.")
         pins.append({"path": root, "account": aid, "onLimit": on_limit,
                      "fallback": fallback, "vscode": bool(vscode)})
+        # Before save_pins: a history started while no pins.json exists is complete.
         history = load_pin_history()
         rows = (history["folders"].get(root) or [])
-        changed = aid in rows
-        if changed:
+        if aid in rows:
             history["folders"][root] = [a for a in rows if a != aid]   # current, not former
+        if before is None or before.get("account") != aid:
+            history["allowed"].pop(root, None)          # consent was for the old pin
         if before is not None and before.get("account") != aid:
             note_former(history, root, before.get("account"))
-            changed = True
-        if changed:
-            _write_private(PIN_HISTORY, history)
+        _write_private(PIN_HISTORY, history)
         save_pins(pins)
     return root
 
@@ -539,6 +573,7 @@ def remove_pin(path):
         for p in pins:
             if p["path"] == root:
                 note_former(history, root, p.get("account"))
+        history["allowed"].pop(root, None)
         _write_private(PIN_HISTORY, history)
         save_pins(kept)
     return root
@@ -1670,6 +1705,12 @@ def main(argv):
         for root, ids in sorted(load_pin_history()["folders"].items()):
             if ids:
                 print(f"{root}\t{','.join(ids)}")
+
+    elif cmd == "pin-allow":
+        if len(args) < 3:
+            print("usage: cc-detect pin-allow <path> <pin-account> <from-account>...", file=sys.stderr)
+            return 2
+        print(allow_adopt(args[0], args[1], args[2:]))
 
     elif cmd == "pin-of":
         pin = pin_for(args[0] if args else None)
