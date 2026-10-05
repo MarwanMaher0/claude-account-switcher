@@ -109,49 +109,116 @@ A chat can exist in more than one account's folder after a switch. To blame the 
 
 ## The VS Code panel
 
-The panel starts Claude itself, so there is no launcher to restart it. What the extension does
-follow is `CLAUDE_CONFIG_DIR` in VS Code's `claudeCode.environmentVariables` setting. `cc vscode on`
-manages that one setting.
+The panel starts Claude itself, so there is no launcher to restart it, and each VS Code window
+can be on a different folder, and so on a different account. Two facts about the Claude
+extension (verified in 2.1.289, and checked on every run of `test/test-extension-contract.sh`)
+decide how a window can be bound:
 
-1. When the panel's account hits a limit, the plugin's `StopFailure` hook records the limit and
-   points the setting at the next free account.
-2. The panel only resumes a chat it can find in the active account's folder, so the switch
-   hard-links the last week's chats into that account. Claude Code appends to transcripts in
-   place, so a hard-linked chat stays one conversation rather than two copies drifting apart.
-3. Your next message is not sent into another 429. The plugin's `UserPromptSubmit` hook blocks it
-   and explains which limit ran out, when it resets, and to run **Developer: Reload Window**.
-4. After the reload, open chats resume on the new account with their history.
+- **Its account settings are user-level only.** `claudeCode.environmentVariables` and
+  `claudeCode.claudeProcessWrapper` are declared with `"scope": "machine"`, and VS Code ignores a
+  machine-scoped value in a folder's or workspace's `.vscode/settings.json`. Versions up to 2.2
+  wrote `CLAUDE_CONFIG_DIR` there for pinned folders; VS Code never read it, so every window ran
+  on whatever the user-level setting named. `cc vscode migrate` cleans that up (below).
+- **It reads two places.** The chats it starts run with the environment it builds per spawn
+  (`{...process.env}` plus `claudeCode.environmentVariables`). Its own history list, transcript
+  view, resume check and settings come from the config dir in its **extension host's**
+  `process.env.CLAUDE_CONFIG_DIR` (`~/.claude` when unset), read live. With a process wrapper set,
+  it deliberately ignores the config dir the CLI reports.
 
-The default account is never written into that setting. Selecting it removes the variable, for
-the reason in the next section.
+So `cc vscode on` binds both:
 
-### One window per account: pinned folders
+1. **`cc-claude-wrapper`**, set once as the user-level `claudeCode.claudeProcessWrapper`. The
+   extension starts every Claude process as `cc-claude-wrapper <bundled claude> <args>`, chats
+   and helpers alike (`auth status --json`, MCP and plugin commands, worktree clean-up). The
+   wrapper asks `cc-detect bind` for the account of `$CC_WINDOW_FOLDER`, or of its working
+   directory, and execs the binary with `CLAUDE_CONFIG_DIR` set to cc's exact directory string,
+   or removed for the default account. Whatever was inherited is overridden. It reads no stdin
+   (that is Claude's stream-json channel) and runs no live check, so it costs tens of
+   milliseconds.
+2. **The companion extension** `cc-switch.cc-switch-binding` (`vscode/cc-switch-binding`, plain
+   JavaScript, no dependencies; `cc vscode on` zips it into a `.vsix` and installs it with the
+   `code` CLI). It activates on `*` in each window, asks `cc-detect bind` for the window's
+   folders, and sets that window's extension-host `process.env.CLAUDE_CONFIG_DIR` (deleting it for
+   the default account), plus `CC_WINDOW_FOLDER`, so helpers the extension starts in a temp dir
+   still resolve by window. The same value goes to the window's terminals, for
+   `claudeCode.useTerminal`. The panel's history and resume then read the same account the
+   wrapper runs chats on.
 
-The extension reads `claudeCode.environmentVariables` at **workspace** scope as well as user scope.
-Its documentation calls out only `initialPermissionMode` as a setting it reads from user settings
-alone. So `cc pin` writes the setting into `<folder>/.vscode/settings.json`, and each window runs
-on its own folder's account.
+**Deciding: `cc-detect bind`.** It reads `config.json`, `pins.json` and `state.json` and nothing
+else: no refresh, no `claude -p /usage`, no lock.
 
-- VS Code replaces a user-level array with the workspace one rather than merging them. A folder
-  pinned to the default account therefore gets an **empty** list: that keeps a user-level
-  `CLAUDE_CONFIG_DIR`, set by `cc vscode on`, out of the window, without ever writing
-  `CLAUDE_CONFIG_DIR=~/.claude`.
-- The extension accepts `CLAUDE_CONFIG_DIR` only as an absolute path. `cc` always writes one.
-- When the pinned account runs out, the plugin's `StopFailure` hook updates that folder's file to
-  the pin's fallback, and hard-links that folder's chats, and only that folder's, into the
-  fallback account. When the account resets, the next sync points the window back.
-- For a pin set to ask, the window stays put until you run `cc vscode fallback` in that folder.
-- `cc vscode on` never selects a pinned account for the global setting and never carries a pinned
-  account's chats anywhere.
+```
+pinned, account free             ->  use <account>
+pinned, limited, rule switch     ->  switch <fallback>
+pinned, limited, rule stop       ->  stop <account>       (Claude itself shows the limit)
+pinned, limited, rule ask        ->  ask: the answer stored for this limit, else <account>
+unpinned                         ->  the usual pick over unpinned accounts; if all are limited,
+                                     the preferred one anyway (verb none; Claude shows the limit)
+```
+
+A multi-root window is decided by its first folder, as the Claude extension does, and `bind`
+reports `mixed` when the folders fall under different pinned accounts.
+
+**Failing closed.** A pin exists to keep one employer's work out of another's account, so no
+failure ever falls back to the default account. If `bind` fails, times out, or `cc-detect` is
+missing, the wrapper refuses to start Claude in a folder that is (or may be) pinned, with
+`cc-switch: could not decide the account for <folder>: <reason>; run cc status`. The companion
+leaves the window's environment as it was and shows `Claude: ? (cc-switch error)` with a Retry.
+Only when cc was never set up does the wrapper run Claude unchanged.
+
+**When a limit is hit.** The plugin's `StopFailure` hook records the limit in `state.json`, and
+`UserPromptSubmit` stops the next prompt from going into another 429. Every companion watches
+`~/.claude-switch` and re-binds. When its window's account changes because of the limit, it first
+hard-links that folder's recent chats into the new account (one inode, so a chat stays one
+conversation), then switches the environment, then says: *acme is limited until 14:00. New chats
+in this window start on personal; the running chat stays on acme.* A timer set to the end of the
+limit moves the window back. A pin set to **ask** shows **Use personal** / **Stay**; the answer
+lasts until that limit has passed (`cc vscode fallback` records the same from a terminal).
+
+**If Claude started first.** When the Claude extension activated before the companion (a panel
+restored at startup can do that), chats are still right, because the wrapper decides them, but
+the history list may show the previous account until **Developer: Reload Window**. The companion
+says so once.
+
+### What the wrapper changes in the Claude extension
+
+Setting `claudeCode.claudeProcessWrapper` switches a few things off in the extension (2.1.289):
+
+- it no longer tracks the PIDs of the Claude processes it starts, so it cannot tell when a chat
+  is also open elsewhere ("live elsewhere"), does not wait for another process to release a
+  session, and does not re-run an interrupted turn;
+- when no permission mode was chosen, chats start in `default` mode rather than the extension's
+  own default;
+- it skips its update check, and does not open the plan file a CLI writes.
+
+Chats, resume, history, logins and settings work as before.
 
 ### What the panel cannot do
 
 The panel's Claude processes are started by the extension, so `cc` cannot restart them or type
-into them. After a switch, **Developer: Reload Window** is still needed, and tabs wait for you
-afterwards. For hands-free work, use `cc` in the integrated terminal.
+into them. A running chat keeps its account; after a switch only new chats (and chats reopened
+from the history list) start on the next account, and each waits for you. For hands-free work,
+use `cc` in the integrated terminal. Terminals that were already open keep their old
+`CLAUDE_CONFIG_DIR`; open a new one after a move.
 
 `StopFailure`, not `Stop`, is the event that fires when a turn ends on an API error, and its output
 is ignored. That is why the notice comes from `UserPromptSubmit`.
+
+### Upgrading from 2.2: `cc vscode migrate`
+
+A dry run by default; `--apply` does it and writes a manifest, `--undo` reverts the last run.
+
+1. For each folder recorded in `~/.claude-switch/vscode-workspaces.json`, it removes only the
+   `CLAUDE_CONFIG_DIR` entries whose value is one of cc's account dirs, restores a key that
+   existed before from cc's backup, deletes a file cc created if it is now empty, and removes the
+   `.git/info/exclude` line cc added. Anything the user changed since is reported and left.
+2. For each pinned folder, it finds the folder's chats (its own project folder, subfolders and
+   worktrees such as `<slug>--claude-worktrees-*`) in every other account and moves them into the
+   pinned account, with their checkpoints and todo lists: hard link (or a verified copy across
+   devices), check, then unlink the source. A same-named file with different content is left in
+   place and reported. Unpinned folders' chats are not moved.
+
+`install.sh` never runs it.
 
 ## Pinned folders
 

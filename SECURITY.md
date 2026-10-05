@@ -18,12 +18,17 @@ searched for in a newly created one).
 your own machine so the conversation can continue. It never leaves the machine. Directories are
 created `700`; config and state are written `600`.
 
-**Pinned folders.** `cc pin` keeps pins in `~/.claude-switch/pins.json`, not in the project.
-For VS Code it writes one setting, `claudeCode.environmentVariables`, into the folder's
-`.vscode/settings.json`. It backs an existing file up to `~/.claude-switch/vscode-workspace-backups/`
-first, keeps a file it created out of git through `.git/info/exclude` (never `.gitignore`), and
-asks before writing a file that git tracks. A pinned account's chats are only ever carried to that
-pin's own fallback, and only when a limit moves the session there. That copy stays on your machine.
+**Pinned folders.** `cc pin` keeps pins in `~/.claude-switch/pins.json` and writes nothing into
+the project. A pinned account's chats are only ever carried to that pin's own fallback, and only
+when a limit moves the session there. That copy stays on your machine.
+
+**VS Code.** `cc vscode on` sets one user setting, `claudeCode.claudeProcessWrapper`, to
+`cc-claude-wrapper`, removes cc's own `CLAUDE_CONFIG_DIR` entry from
+`claudeCode.environmentVariables`, and backs the settings file up first. It installs a companion
+extension built locally from `vscode/cc-switch-binding` (two files, no dependencies, no network
+use). Both fail closed: if the account for a pinned folder cannot be decided, Claude does not
+start there, rather than run on another account. `cc vscode migrate` moves chats between your
+own account folders only when run with `--apply`, and records every step for `--undo`.
 
 **Early switch (opt-in).** It reads the rate-limit usage that Claude Code passes to status line
 commands, and records the percentages and reset times in `~/.claude-switch/usage/`. No request is

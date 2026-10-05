@@ -26,5 +26,7 @@ Set up the `cc` account switcher that ships inside this plugin.
      an account they have added.
    - **Start sessions with `cc`** instead of `claude`.
    - **VS Code users:** run `cc vscode on`, and install this plugin in each added account.
+     Upgrading from 2.2 or earlier: `cc vscode migrate` shows what older versions left in
+     folders' `.vscode/settings.json` (a dry run; `--apply` cleans up).
 
 Never set `CLAUDE_CONFIG_DIR` to `~/.claude` for any command.

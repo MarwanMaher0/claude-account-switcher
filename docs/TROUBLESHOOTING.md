@@ -51,18 +51,38 @@ Three common reasons:
 2. **`--manual` was used.** That keeps the session open at a limit; `cc` switches when you exit.
 3. **Every account is limited.** `cc status` shows when the first one frees up.
 
-## The VS Code panel did not move to another account
+## A VS Code window is on the wrong account
 
 Check these in order:
 
-1. **Panel sync is on.** The last line of `cc status` should read `VS Code panel -> <name>` with
-   `sync on`. If not, run `cc vscode on`.
-2. **The plugin is installed in the account that hit the limit.** Plugins are per account. For the
-   first account run `claude plugin list`; for an added one run
-   `CLAUDE_CONFIG_DIR=~/.claude-<name> claude plugin list`. Look for `cc-switch`. If it is missing,
-   follow [Step 6a in the README](../README.md#step-6-vs-code-users-only).
-3. **The window was reloaded.** The panel keeps its account until you run
-   **Developer: Reload Window** from the command palette.
+1. **Windows are bound.** `cc status` should list `VS Code: windows follow their folder's
+   account · wrapper set · companion installed`, and a `VS Code window <folder> -> <name>` line
+   for each open window. If not, run `cc vscode on`. The status bar of each window shows
+   `Claude: <name>`; clicking it re-checks.
+2. **The folder is pinned the way you think.** `cc pins` lists pins; a pin made with
+   `--no-vscode` (Terminal only) does not apply in VS Code. A workspace with several folders runs
+   on its first folder's account; the status bar then reads `Claude: mixed pins (using …)`.
+3. **The plugin is installed in the account that hit the limit.** A limit only moves a window
+   once it is recorded. Plugins are per account. For the first account run `claude plugin list`;
+   for an added one run `CLAUDE_CONFIG_DIR=~/.claude-<name> claude plugin list`. Look for
+   `cc-switch`. If it is missing, follow [Step 6a in the README](../README.md#step-6-vs-code-users-only).
+4. **The chat was already running.** A running chat keeps its account. Start a new chat, or reopen
+   it from the history list, to continue on the new one.
+5. **The history list shows another account's chats.** That happens when the Claude extension
+   started before the companion bound the window (the companion says so once). Run
+   **Developer: Reload Window**. New chats are on the right account either way.
+
+Older versions wrote `CLAUDE_CONFIG_DIR` into pinned folders' `.vscode/settings.json`. VS Code
+never reads that setting there (the Claude extension declares it machine-scoped, so only user
+settings count). `cc vscode migrate` shows what is left and `--apply` removes it.
+
+## The Claude panel says "cc-switch: could not decide the account"
+
+The wrapper could not work out which account a pinned folder runs on, so it refused to start
+Claude rather than run it on the wrong account. Run `cc status` in a terminal: it names the
+problem, usually a pin that points at a removed account (`cc pin` again, or `cc unpin`) or a
+`config.json` that does not parse. If `cc` itself was removed, run `cc vscode off`, or remove
+`claudeCode.claudeProcessWrapper` from your VS Code user settings.
 
 ## Installing the plugin fails
 

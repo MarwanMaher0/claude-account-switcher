@@ -17,10 +17,10 @@ Then tell them plainly:
 3. If this session was itself started by `cc`, the handoff is automatic: `cc`
    copies the transcript into the other account's config dir and reopens the same
    conversation with `--resume`, so context is preserved.
-4. If this session is in the VS Code panel and `cc vscode on` is set, the panel
-   already points at the free account with recent chats carried over: run
-   "Developer: Reload Window" and the chat continues there. Without it, run
-   `cc vscode on` in a terminal first.
+4. If this session is in the VS Code panel and `cc vscode on` is set, the window
+   has already moved: new chats start on the next allowed account, and recent
+   chats were carried over. Start a new chat, or reopen this one from the history
+   list, to continue there. Without it, run `cc vscode on` in a terminal first.
 5. If it was started with bare `claude` / `claude2`, nothing switches by itself —
    note the session id so it can be resumed manually.
 

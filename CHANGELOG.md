@@ -2,18 +2,51 @@
 
 ## Unreleased
 
+### Fixed — VS Code windows ignored pins
+- VS Code windows on pinned folders never ran on their pinned account. `cc pin` wrote
+  `CLAUDE_CONFIG_DIR` into the folder's `.vscode/settings.json`, but the Claude extension declares
+  `claudeCode.environmentVariables` (and `claudeCode.claudeProcessWrapper`) machine-scoped, and VS
+  Code ignores machine-scoped values in folder and workspace settings. Every window ran on the
+  user-level account, and pinned folders' VS Code chats piled up there. `cc pin` and `cc unpin`
+  no longer write any file into the folder.
+
+### Added — per-window binding for VS Code
+- `cc-claude-wrapper`, set once as the user-level `claudeCode.claudeProcessWrapper` by
+  `cc vscode on`. Every Claude process the extension starts goes through it and runs on the
+  account `cc-detect bind` picks for the window's folder: the pin's account, its fallback while
+  the pin's account is limited, or what `cc` would pick for an unpinned folder. It never sets
+  `CLAUDE_CONFIG_DIR` to the default account's own dir, and it fails closed: if the account for
+  a pinned folder cannot be decided, Claude does not start there.
+- A companion VS Code extension, `cc-switch.cc-switch-binding` (plain JavaScript, no
+  dependencies; built into a `.vsix` and installed by `cc vscode on`). Per window it binds the
+  extension host's `CLAUDE_CONFIG_DIR`, so the panel's history and resume match the account,
+  re-binds when a limit is recorded or ends, carries the folder's recent chats before a move,
+  says that new chats move while the running chat stays, offers Use/Stay for pins that ask,
+  warns about multi-root windows that mix pins, and shows the account in the status bar.
+  `cc status` lists the open windows.
+- `cc-detect bind` and `cc-detect choose`: the fast, no-network decision both use.
+- `cc vscode migrate`: a dry run by default. `--apply` removes what older versions wrote into
+  folders' `.vscode/settings.json` (only cc's entries, restoring anything cc replaced) and moves
+  each pinned folder's chats, including worktree and subfolder ones, from every other account into
+  the pinned one. `--undo` reverts it. `install.sh` never runs it.
+- `cc vscode on` changes VS Code settings only after the companion install is verified
+  (`--wrapper-only` to skip it), backs the settings up first, and removes only cc's own
+  `CLAUDE_CONFIG_DIR` entry. `cc vscode off [--restore]` and `uninstall.sh` undo it.
+- Setting a process wrapper changes a few things in the Claude extension: it stops tracking the
+  PIDs of the processes it starts (so no "live elsewhere" detection, no waiting for another
+  process to release a session, no re-run of an interrupted turn), and chats start in the
+  `default` permission mode when none was chosen. See docs/HOW-IT-WORKS.md.
+
 ### Added — separate projects
 - `cc pin`: keep a folder and its subfolders on one account, chosen from an arrow-key menu (a
   numbered list when there is no terminal). It can add an account on the spot. Non-interactive
-  form: `cc pin <folder> --account <id> --fallback <id>|none|ask [--no-vscode] [--yes]`. Also
+  form: `cc pin <folder> --account <id> --fallback <id>|none|ask [--no-vscode]`. Also
   `cc unpin`, `cc pins`, and a "Pinned folders" section in `cc status`.
 - Per-pin limit rules: switch to the fallback, stop and wait, or ask. A pinned account is reserved
   for its folders, never another pin's fallback, and never picked outside them. Users without pins
   see no change.
-- VS Code per window: a pinned folder gets its account in its own `.vscode/settings.json`, merged
-  in place, backed up, hidden through `.git/info/exclude` when `cc` created it, and never written
-  while tracked by git without a yes. The plugin's hooks move that window to the pin's fallback and
-  back. `cc vscode fallback` answers a pin that asks.
+- VS Code per window (superseded above: the folder settings it wrote were never read by VS Code).
+  `cc vscode fallback` answers a pin that asks.
 - Auto-continue: after a limit moves a terminal session, `cc` sends "Continue where you left off."
   so the work carries on by itself. Configurable; `cc --no-auto-continue` turns it off.
 - Opt-in early switch at 98% (configurable), between turns, from the usage Claude Code passes to
