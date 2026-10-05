@@ -91,6 +91,81 @@ start. The transcript path is printed so you can carry anything across by hand.
 
 Skipped without complaint when unset or when the binary is not installed.
 
+## Pinned folders
+
+`~/.claude-switch/pins.json`, mode `600`. Written by `cc pin` and `cc unpin`; prefer those over
+hand-editing, because they enforce the rules below.
+
+```json
+{
+  "version": 1,
+  "pins": [
+    { "path": "/home/you/work/acme",   "account": "acme",   "onLimit": "switch", "fallback": "personal", "vscode": true },
+    { "path": "/home/you/work/globex", "account": "globex", "onLimit": "stop",   "fallback": null,       "vscode": true }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `path` | The pinned folder, absolute, with `~` and symlinks resolved. Subfolders are included. |
+| `account` | The account sessions in this folder use. |
+| `onLimit` | `switch` (move to `fallback`), `stop` (wait for the reset), or `ask` (ask about `fallback`). |
+| `fallback` | The one account this folder may move to. `null` with `stop`. |
+| `vscode` | Whether `cc pin` manages the folder's `.vscode/settings.json`. |
+
+Rules, checked whenever a pin is saved and whenever one is used:
+
+- The pin with the **longest** matching path wins, so a pin inside a pinned folder overrides it.
+- A pinned account is **reserved**: outside its pins it is never picked, never a fallback for
+  unpinned folders, and its chats are never carried to another account by `cc vscode on`. The
+  default account is never reserved.
+- A pin's `fallback` can never be an account that is pinned elsewhere, and an account that is some
+  pin's `fallback` cannot itself be pinned. This is what keeps one company's account out of
+  another's work.
+- Once a session has moved to its fallback, a second limit stops. There is no third account.
+- A pin that names an account that no longer exists stops `cc` with an error. It never quietly
+  runs on another account.
+- Inside a pinned folder the paid [fallbacks](#fallbacks) are not used.
+
+`cc pin` also records what it did to each folder's VS Code settings in
+`~/.claude-switch/vscode-workspaces.json`, so `cc unpin` can undo exactly that.
+
+## Auto-continue
+
+```json
+"autoContinue": { "enabled": true, "message": "Continue where you left off." }
+```
+
+When a limit cuts a turn short and `cc` moves the session to another account, it reopens the
+conversation and sends `message` for you, so the work carries on without anyone typing. On by
+default. `cc --no-auto-continue` turns it off for one session, `"enabled": false` for all.
+
+After an [early switch](#switching-before-the-limit) nothing is sent: the turn had already
+finished, and Claude is waiting for you.
+
+## Switching before the limit
+
+```json
+"earlySwitch": { "enabled": true, "percent": 98 }
+```
+
+Off by default. When on, `cc` ends a run **between turns** once the account has used `percent` of
+its 5-hour or weekly limit, records the account as limited until that window resets, and continues
+the conversation on the next allowed account.
+
+Where the number comes from: Claude Code passes the usage it received with each answer
+(`rate_limits.five_hour` and `rate_limits.seven_day`) to the status line command. For runs it
+starts, `cc` adds its own status line, which records that usage in
+`~/.claude-switch/usage/<account>.json`, and a `Stop` hook that marks the end of each turn. Both
+are passed with `--settings` for that run only; your settings files are not changed. If you have a
+status line of your own, it still runs and shows as before.
+
+- **No network call.** The data is what Claude Code already received.
+- **Pro and Max only.** Claude Code reports usage only for those plans. On other plans, such as
+  some company seats, nothing is recorded and `cc` switches at the real limit as usual.
+- **The terminal only.** The VS Code panel is not started by `cc`.
+
 ## Environment variables
 
 | Variable | Effect |
@@ -98,3 +173,4 @@ Skipped without complaint when unset or when the binary is not installed.
 | `CC_INSTALL_DIR` | Where `install.sh` puts the commands. Default `~/.local/bin`. |
 | `CC_WATCH_POLL` | Watcher poll interval, seconds. Default `2`. |
 | `CC_WATCH_GRACE` | Seconds between `SIGTERM` and `SIGKILL`. Default `8`. |
+| `CC_NUMBERED_MENUS` | Set to use numbered menus instead of arrow keys, even on a terminal. |

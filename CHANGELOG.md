@@ -2,7 +2,26 @@
 
 ## Unreleased
 
+### Added — separate projects
+- `cc pin`: keep a folder and its subfolders on one account, chosen from an arrow-key menu (a
+  numbered list when there is no terminal). It can add an account on the spot. Non-interactive
+  form: `cc pin <folder> --account <id> --fallback <id>|none|ask [--no-vscode] [--yes]`. Also
+  `cc unpin`, `cc pins`, and a "Pinned folders" section in `cc status`.
+- Per-pin limit rules: switch to the fallback, stop and wait, or ask. A pinned account is reserved
+  for its folders, never another pin's fallback, and never picked outside them. Users without pins
+  see no change.
+- VS Code per window: a pinned folder gets its account in its own `.vscode/settings.json`, merged
+  in place, backed up, hidden through `.git/info/exclude` when `cc` created it, and never written
+  while tracked by git without a yes. The plugin's hooks move that window to the pin's fallback and
+  back. `cc vscode fallback` answers a pin that asks.
+- Auto-continue: after a limit moves a terminal session, `cc` sends "Continue where you left off."
+  so the work carries on by itself. Configurable; `cc --no-auto-continue` turns it off.
+- Opt-in early switch at 98% (configurable), between turns, from the usage Claude Code passes to
+  status line commands. No network call.
+
 ### Fixed
+- `cc vscode on` carried every account's recent chats into the panel's account. It no longer
+  carries chats out of an account reserved for pinned folders.
 - Runs on macOS. It previously did not: macOS ships bash 3.2, which has no associative arrays,
   so the launcher aborted outright. Also `date -d`, `stat -c`, BSD `wc -l` padding, and a
   `TMPDIR` ending in a slash.

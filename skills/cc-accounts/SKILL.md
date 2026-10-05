@@ -29,6 +29,17 @@ If the `cc` command is not installed, tell the user to run `/cc-setup`. After th
 | `cc remove <name>` | stop using an account |
 | `cc clear <name>` | forget a limit recorded by mistake |
 | `cc vscode on` / `off` | keep the VS Code panel on a free account |
+| `cc pin` | keep a folder (and subfolders) on one account, with its own fallback rule |
+| `cc pins` / `cc unpin` | list or remove pinned folders |
+| `cc vscode fallback` | move a pinned folder's VS Code window to its fallback now |
+
+## Pinned folders
+
+A pinned folder always uses its own account, in the terminal and in its VS Code window. At a
+limit it may only move to the fallback its pin names (normally the default account), or stop, or
+ask. A pinned account is never used outside its folders, and never covers another company's folder.
+Do not suggest switching a pinned folder to an account its pin does not allow; if the user wants
+that, they change the pin with `cc pin` or use `cc --acct <name>` for one session.
 
 ## The rule that matters
 
@@ -36,7 +47,8 @@ If the `cc` command is not installed, tell the user to run `/cc-setup`. After th
 starts. No hook, command or skill can switch it mid-session, so never claim otherwise.
 When the user hits a limit:
 
-- started with `cc`: exiting is enough, and `cc` continues on the next account;
+- started with `cc`: exiting is enough, and `cc` continues on the next allowed account and
+  sends "Continue where you left off." by itself;
 - in the VS Code panel with `cc vscode on`: run **Developer: Reload Window**;
 - started with plain `claude`: exit and run `cc`.
 

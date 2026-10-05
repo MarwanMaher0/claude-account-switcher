@@ -37,9 +37,34 @@ Subcommands
   record-run <id> <session>         note that a session has just started on an account
   slug <cwd>                        the project-dir slug for a path
   fallback <name> <field>           read a fallbacks.<name>.<field> value
+  get <dotted.key> [default]        read any config value, e.g. autoContinue.message
+
+Pinned folders (~/.claude-switch/pins.json)
+  until <id>                        epoch the account's recorded limit ends (0: free)
+  canon <path>                      the absolute, symlink-free form pins are compared in
+  pin <path> <id> <switch|stop|ask> [fallback-id] [vscode 0|1]
+                                    pin a folder and its subfolders to an account
+  unpin <path>                      remove the pin on exactly that folder
+  pins                              "<path>\\t<id>\\t<onLimit>\\t<fallback>\\t<vscode>" per pin
+  pin-of [dir]                      the pin that applies to a directory (longest match)
+  start-for [dir] [forced-id]       "use <id>", "switch <id>", "ask <id>", "stop <id>" or "none"
+  fallback-for <dir> <id> [used,ids]
+                                    after <id> hits its limit: "switch <id>", "ask <id>",
+                                    "stop <id>" (pinned folder) or "none" (nothing left)
+
+Usage percentage (opt-in early switch, read from Claude Code's own status line input)
+  statusline <id> <session>         record rate_limits from stdin, then run the user's own
+                                    status line command and print its output
+  turn-ended                        Stop hook: note where this session's transcript ended
+  early-settings <id> <session> <cwd>
+                                    write the --settings file for an early-switch run
+  early-check <id> <session> <transcript> [percent]
+                                    "<resetsAt> <type>" once the account is past the
+                                    threshold and this session is between turns
 
 pick, next-free, soonest and status refresh first, so a limit hit in the VS Code panel
-is known before the next launch.
+is known before the next launch. An account pinned to a folder is reserved for its
+pins: pick and next-free never choose it outside them (the default account excepted).
 """
 import fcntl
 import glob
@@ -57,9 +82,15 @@ SWITCH_DIR = os.path.join(HOME, ".claude-switch")
 CONFIG = os.path.join(SWITCH_DIR, "config.json")
 STATE = os.path.join(SWITCH_DIR, "state.json")
 CACHE = os.path.join(SWITCH_DIR, "scan-cache.json")
+PINS = os.path.join(SWITCH_DIR, "pins.json")
+USAGE_DIR = os.path.join(SWITCH_DIR, "usage")
+RUN_DIR = os.path.join(SWITCH_DIR, "run")
 LOCK = os.path.join(SWITCH_DIR, ".lock")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+ON_LIMIT = ("switch", "stop", "ask")
+DEFAULT_CONTINUE = "Continue where you left off."
+DEFAULT_EARLY_PERCENT = 98
 
 # A weekly window plus a margin: no older transcript or run can hold a live limit.
 HORIZON = 8 * 86400
@@ -300,15 +331,188 @@ def raise_limit(state, aid, resets, ltype=None):
 
 def pick(state=None):
     """The preferred account if its window has passed, else the first free one in
-    config order, else None."""
+    config order, else None. Accounts reserved for pinned folders are never picked."""
     state = state or load_state()
     now = time.time()
     preferred = state.get("preferred")
+    reserved = reserved_ids()
     ordered = sorted(accounts(), key=lambda a: a["id"] != preferred)  # stable sort
     for acct in ordered:
+        if acct["id"] in reserved:
+            continue
         if limited_until(state, acct["id"]) <= now:
             return acct["id"]
     return None
+
+
+def next_free(state=None, exclude=()):
+    """First free, unreserved account in config order, skipping `exclude`."""
+    state = state or load_state()
+    now = time.time()
+    reserved = reserved_ids()
+    for acct in accounts():
+        aid = acct["id"]
+        if aid in exclude or aid in reserved:
+            continue
+        if limited_until(state, aid) <= now:
+            return aid
+    return None
+
+
+# ------------------------------------------------------------------ pins ----
+# A pin ties a folder, and everything under it, to one account. It exists to keep
+# separate employers' work apart, so every rule here fails closed: a pin naming an
+# account that no longer exists is an error, never a silent move to another account,
+# and a pinned account may only fall back to an account that is not itself pinned.
+def canon(path):
+    """Absolute, `~`-expanded, symlink-free: the one form pins are compared in."""
+    return os.path.realpath(expand(path or os.getcwd()))
+
+
+def load_pins():
+    data = _load_json(PINS, {})
+    pins = data.get("pins") if isinstance(data, dict) else None
+    return [p for p in pins if isinstance(p, dict) and p.get("path")] if isinstance(pins, list) else []
+
+
+def save_pins(pins):
+    _write_private(PINS, {"version": 1, "pins": sorted(pins, key=lambda p: p["path"])})
+
+
+def default_id():
+    return next((a["id"] for a in accounts() if a.get("isDefault")), None)
+
+
+def reserved_ids(pins=None):
+    """Accounts kept for their pinned folders. The default account is never reserved:
+    it is what every unpinned folder runs on."""
+    pins = load_pins() if pins is None else pins
+    return {p.get("account") for p in pins} - {default_id(), None}
+
+
+def pin_for(path):
+    """The pin that applies to `path`: the longest pinned folder containing it."""
+    real = canon(path)
+    best = None
+    for pin in load_pins():
+        root = pin["path"]
+        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+            if best is None or len(root) > len(best["path"]):
+                best = pin
+    return best
+
+
+def check_pin(pin):
+    """Raise ConfigError unless a stored pin can be acted on."""
+    ids = {a["id"] for a in accounts()}
+    if pin.get("account") not in ids:
+        raise ConfigError(f"{tilde(pin['path'])} is pinned to '{pin.get('account')}', which is not "
+                          f"a configured account. Run: cc pin {tilde(pin['path'])}  (or cc unpin)")
+    if pin.get("onLimit") not in ON_LIMIT:
+        raise ConfigError(f"pin on {tilde(pin['path'])} has an invalid onLimit: {pin.get('onLimit')!r}")
+    if pin["onLimit"] != "stop" and pin.get("fallback") not in ids:
+        raise ConfigError(f"pin on {tilde(pin['path'])} falls back to unknown account "
+                          f"'{pin.get('fallback')}'")
+
+
+def set_pin(path, aid, on_limit, fallback=None, vscode=True):
+    """Add or replace the pin on `path`. Enforces: no pinned account is ever another
+    pin's fallback, which is what keeps one employer's account out of another's work."""
+    account_by_id(aid)
+    if on_limit not in ON_LIMIT:
+        raise ConfigError(f"on a limit, a pin can switch, stop or ask — not {on_limit!r}")
+    if on_limit == "stop":
+        fallback = None
+    else:
+        if not fallback:
+            raise ConfigError(f"'{on_limit}' needs an account to fall back to")
+        account_by_id(fallback)
+        if fallback == aid:
+            raise ConfigError("an account cannot be its own fallback")
+    root = canon(path)
+    if not os.path.isdir(root):
+        raise ConfigError(f"not a folder: {path}")
+    dflt = default_id()
+    with state_lock():
+        pins = [p for p in load_pins() if p["path"] != root]
+        pinned = {p["account"] for p in pins} | {aid}
+        if fallback and fallback != dflt and fallback in pinned:
+            raise ConfigError(f"'{fallback}' is pinned to its own folders, so it cannot be a "
+                              f"fallback here. Fall back to '{dflt}' or stop at the limit.")
+        if aid != dflt:
+            users = sorted(tilde(p["path"]) for p in pins if p.get("fallback") == aid)
+            if users:
+                raise ConfigError(f"'{aid}' is the fallback for {', '.join(users)}, so it cannot "
+                                  f"also be pinned. Change those pins first.")
+        pins.append({"path": root, "account": aid, "onLimit": on_limit,
+                     "fallback": fallback, "vscode": bool(vscode)})
+        save_pins(pins)
+    return root
+
+
+def remove_pin(path):
+    root = canon(path)
+    with state_lock():
+        pins = load_pins()
+        kept = [p for p in pins if p["path"] != root]
+        if len(kept) == len(pins):
+            return None
+        save_pins(kept)
+    return root
+
+
+def free(state, aid, now=None):
+    return limited_until(state, aid) <= (time.time() if now is None else now)
+
+
+def start_for(path, forced=None):
+    """Which account a session started in `path` runs on, as (verb, id).
+
+    use    — run on <id>
+    switch — the pinned account is limited; its rule moves this session to <id>
+    ask    — the pinned account is limited; ask before moving to <id>
+    stop   — the pinned account <id> is limited and nothing else is allowed
+    none   — unpinned and every account is limited (the paid tiers may follow)
+    """
+    if forced:
+        account_by_id(forced)
+        return "use", forced
+    pin = pin_for(path)
+    if not pin:
+        aid = pick()
+        return ("use", aid) if aid else ("none", "")
+    check_pin(pin)
+    state = load_state()
+    if free(state, pin["account"]):
+        return "use", pin["account"]
+    return limit_rule(state, pin, ())
+
+
+def limit_rule(state, pin, used):
+    """What a pinned folder's rule allows once its account is limited."""
+    fb = pin.get("fallback")
+    if pin["onLimit"] != "stop" and fb and fb not in used and free(state, fb):
+        return pin["onLimit"], fb
+    return "stop", pin["account"]
+
+
+def fallback_for(path, aid, used=()):
+    """Where a session in `path` goes after `aid` hits its limit, as (verb, id).
+
+    In a pinned folder the pin decides, and the only move is to its fallback: once
+    there, a second limit stops. Unpinned folders keep the original rotation over the
+    accounts not reserved for pins.
+    """
+    used = set(used) | {aid}
+    state = load_state()
+    pin = pin_for(path)
+    if pin:
+        check_pin(pin)
+        if aid != pin["account"]:
+            return "stop", aid
+        return limit_rule(state, pin, used)
+    nxt = next_free(state, used)
+    return ("switch", nxt) if nxt else ("none", "")
 
 
 def soonest(state=None, exclude=()):
@@ -320,8 +524,10 @@ def soonest(state=None, exclude=()):
     """
     state = state or load_state()
     now = time.time()
+    reserved = reserved_ids()
     candidates = [a["id"] for a in accounts()
-                  if a["id"] not in exclude and limited_until(state, a["id"]) > now]
+                  if a["id"] not in exclude and a["id"] not in reserved
+                  and limited_until(state, a["id"]) > now]
     if not candidates:
         return None, 0
     aid = min(candidates, key=lambda i: limited_until(state, i))
@@ -533,6 +739,160 @@ def _refresh_quietly():
         print(f"cc-detect: could not read transcripts for limits: {exc}", file=sys.stderr)
 
 
+# ----------------------------------------------------------------- usage ----
+# Claude Code hands its status line command the rate-limit usage it already received
+# with each API response (rate_limits.five_hour / seven_day: used_percentage and
+# resets_at, for Pro and Max plans). Recording that is the only local source of a
+# usage percentage: no file on disk holds it, and asking the API ourselves would be a
+# network call this tool does not make. So the early switch is opt-in and rides on
+# the status line, and when the data is absent cc simply switches at the real limit.
+def config_get(dotted, default=None):
+    node = load_config()
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return node
+
+
+def early_percent():
+    try:
+        pct = float(config_get("earlySwitch.percent", DEFAULT_EARLY_PERCENT))
+    except (TypeError, ValueError):
+        pct = DEFAULT_EARLY_PERCENT
+    return min(max(pct, 1.0), 100.0)
+
+
+def usage_path(aid):
+    return os.path.join(USAGE_DIR, f"{aid}.json")
+
+
+def record_usage(aid, payload, now=None):
+    """Keep the rate-limit windows from one status line input. Returns True if any."""
+    now = time.time() if now is None else now
+    limits = payload.get("rate_limits") if isinstance(payload, dict) else None
+    windows = {}
+    for name, win in (limits.items() if isinstance(limits, dict) else ()):
+        if not isinstance(win, dict) or name == "spend_limit":
+            continue
+        pct, resets = win.get("used_percentage"), win.get("resets_at")
+        if isinstance(pct, (int, float)) and isinstance(resets, (int, float)) and resets > now:
+            windows[name] = {"usedPercentage": float(pct), "resetsAt": int(resets)}
+    if not windows:
+        return False
+    # one writer per status line refresh, atomic replace: sessions on the same account
+    # may overwrite each other, and each one's reading is as good as the other's
+    _write_private(usage_path(aid), {"at": int(now), "windows": windows})
+    return True
+
+
+def usage_over(aid, percent, now=None):
+    """(resetsAt, window) of the account's window at or past `percent`, else None."""
+    now = time.time() if now is None else now
+    data = _load_json(usage_path(aid), {})
+    windows = data.get("windows") if isinstance(data, dict) else None
+    hits = [(w["resetsAt"], name) for name, w in (windows or {}).items()
+            if isinstance(w, dict) and w.get("resetsAt", 0) > now
+            and w.get("usedPercentage", 0) >= percent]
+    return max(hits) if hits else None
+
+
+def marker_path(session):
+    return os.path.join(RUN_DIR, f"{session}.turn")
+
+
+def turn_ended(payload):
+    """Stop hook: remember where the transcript ended when Claude finished a turn."""
+    session = payload.get("session_id") if isinstance(payload, dict) else None
+    transcript = payload.get("transcript_path") if isinstance(payload, dict) else None
+    if not session or not transcript:
+        return
+    try:
+        size = os.path.getsize(transcript)
+    except OSError:
+        return
+    _write_private(marker_path(session), {"offset": size, "at": int(time.time())})
+
+
+def between_turns(session, transcript):
+    """True when the last turn has ended and nothing has started since.
+
+    Every new turn — a typed prompt, a queued one, a tool result — is written as a
+    "user" line, so none after the Stop marker means Claude is waiting for the user.
+    Ending the run there cuts nothing.
+    """
+    marker = _load_json(marker_path(session), None)
+    if not isinstance(marker, dict):
+        return False
+    try:
+        with open(transcript, "rb") as fh:
+            fh.seek(int(marker.get("offset", 0)))
+            tail = fh.read()
+    except OSError:
+        return False
+    for line in tail.split(b"\n"):
+        if b'"user"' not in line:
+            continue
+        try:
+            if json.loads(line).get("type") == "user":
+                return False
+        except (ValueError, AttributeError):
+            continue
+    return True
+
+
+def early_settings(aid, session, cwd, detect_path):
+    """Write the --settings file an early-switch run starts with. The user's own status
+    line, if any, still runs and prints: ours records usage and hands over to it."""
+    own = None
+    acct = account_by_id(aid)
+    sources = [os.path.join(cwd, ".claude", "settings.local.json"),
+               os.path.join(cwd, ".claude", "settings.json"),
+               os.path.join(expand(acct["dir"]), "settings.json")]
+    for src in sources:
+        data = _load_json(src, {})
+        line = data.get("statusLine") if isinstance(data, dict) else None
+        if isinstance(line, dict) and line.get("command"):
+            own = line
+            break
+    os.makedirs(RUN_DIR, exist_ok=True)
+    if own:
+        with open(os.path.join(RUN_DIR, f"{session}.next"), "w") as fh:
+            fh.write(own["command"])
+    quoted = "'" + detect_path.replace("'", "'\\''") + "'"
+    status = {"type": "command", "command": f"{quoted} statusline {aid} {session}"}
+    if own and own.get("padding") is not None:
+        status["padding"] = own["padding"]
+    settings = {
+        "statusLine": status,
+        "hooks": {"Stop": [{"hooks": [{"type": "command", "command": f"{quoted} turn-ended",
+                                       "timeout": 10}]}]},
+    }
+    path = os.path.join(RUN_DIR, f"{session}.settings.json")
+    _write_private(path, settings)
+    return path
+
+
+def run_statusline(aid, session, raw):
+    try:
+        record_usage(aid, json.loads(raw or "{}"))
+    except (ValueError, OSError):
+        pass                                 # the status line must keep printing
+    try:
+        with open(os.path.join(RUN_DIR, f"{session}.next")) as fh:
+            own = fh.read().strip()
+    except OSError:
+        own = ""
+    if own:
+        import subprocess
+        try:
+            res = subprocess.run(own, shell=True, input=raw, capture_output=True,
+                                 text=True, timeout=10)
+            sys.stdout.write(res.stdout)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
 # ------------------------------------------------------------------ main ----
 def fmt_until(epoch, now):
     """Clock time, with the weekday once the reset is more than 20 hours away."""
@@ -596,7 +956,30 @@ def cmd_status():
     else:
         aid, until = soonest(state)
         when = fmt_until(until, now) if until else "?"
-        print(f"\n  all accounts limited — {aid} frees up first at {when}")
+        if aid:
+            print(f"\n  all accounts limited — {aid} frees up first at {when}")
+        else:
+            print("\n  no unpinned account is free")
+
+    pins = load_pins()
+    if pins:
+        print("\n  Pinned folders")
+        pw = max(len(tilde(p["path"])) for p in pins)
+        for pin in pins:
+            rule = {"switch": f"then {pin.get('fallback')}",
+                    "ask": f"then ask about {pin.get('fallback')}",
+                    "stop": "then stop"}.get(pin.get("onLimit"), "?")
+            where = "terminal + VS Code" if pin.get("vscode") else "terminal"
+            print(f"    {tilde(pin['path']):<{pw}}  {pin.get('account')}, {rule}  ({where})")
+        here = pin_for(os.getcwd())
+        if here:
+            try:
+                verb, aid = start_for(os.getcwd())
+            except ConfigError as exc:
+                verb, aid = "error", str(exc)
+            shown = {"use": aid, "switch": f"{aid} (fallback)", "ask": f"asks about {aid}",
+                     "stop": f"none — {aid} is limited"}.get(verb, aid)
+            print(f"\n  this folder is pinned · next launch here -> {shown}")
 
 
 def _print_limit(ev):
@@ -653,14 +1036,10 @@ def main(argv):
         # is how `cc` knows tier 1 is exhausted.
         _refresh_quietly()
         exclude = set(filter(None, (args[0] if args else "").split(",")))
-        state, now = load_state(), time.time()
-        for acct in accounts():
-            if acct["id"] in exclude:
-                continue
-            if limited_until(state, acct["id"]) <= now:
-                print(acct["id"])
-                return 0
-        return 1
+        chosen = next_free(exclude=exclude)
+        if not chosen:
+            return 1
+        print(chosen)
 
     elif cmd == "soonest":
         _refresh_quietly()
@@ -736,6 +1115,78 @@ def main(argv):
     elif cmd == "record-run":
         account_by_id(args[0])
         record_run(args[0], args[1])
+
+    elif cmd == "get":
+        value = config_get(args[0], args[1] if len(args) > 1 else None)
+        if value is None or value is False:
+            return 1
+        print("" if value is True else value)
+
+    elif cmd == "until":
+        account_by_id(args[0])
+        print(limited_until(load_state(), args[0]))
+
+    elif cmd == "canon":
+        print(canon(args[0] if args else None))
+
+    elif cmd == "pin":
+        if len(args) < 3:
+            print("usage: cc-detect pin <path> <id> <switch|stop|ask> [fallback] [vscode]",
+                  file=sys.stderr)
+            return 2
+        fb = args[3] if len(args) > 3 and args[3] not in ("", "-") else None
+        vscode = (args[4] if len(args) > 4 else "1") != "0"
+        print(set_pin(args[0], args[1], args[2], fb, vscode))
+
+    elif cmd == "unpin":
+        root = remove_pin(args[0] if args else None)
+        if not root:
+            return 1
+        print(root)
+
+    elif cmd == "pins":
+        for pin in load_pins():
+            print("\t".join([pin["path"], pin.get("account") or "", pin.get("onLimit") or "",
+                             pin.get("fallback") or "-", "1" if pin.get("vscode") else "0"]))
+
+    elif cmd == "pin-of":
+        pin = pin_for(args[0] if args else None)
+        if not pin:
+            return 1
+        print("\t".join([pin["path"], pin.get("account") or "", pin.get("onLimit") or "",
+                         pin.get("fallback") or "-", "1" if pin.get("vscode") else "0"]))
+
+    elif cmd == "start-for":
+        _refresh_quietly()
+        verb, aid = start_for(args[0] if args and args[0] else None,
+                              args[1] if len(args) > 1 and args[1] else None)
+        print(f"{verb} {aid}".strip())
+
+    elif cmd == "fallback-for":
+        _refresh_quietly()
+        used = filter(None, (args[2] if len(args) > 2 else "").split(","))
+        verb, aid = fallback_for(args[0], args[1], used)
+        print(f"{verb} {aid}".strip())
+
+    elif cmd == "statusline":
+        run_statusline(args[0], args[1], sys.stdin.read())
+
+    elif cmd == "turn-ended":
+        try:
+            turn_ended(json.load(sys.stdin))
+        except ValueError:
+            pass
+
+    elif cmd == "early-settings":
+        print(early_settings(args[0], args[1], args[2], os.path.realpath(__file__)))
+
+    elif cmd == "early-check":
+        aid, session, transcript = args[0], args[1], args[2]
+        pct = float(args[3]) if len(args) > 3 else early_percent()
+        over = usage_over(aid, pct)
+        if not over or not between_turns(session, transcript):
+            return 1
+        print(f"{over[0]} {over[1]}")
 
     elif cmd == "fallback":
         cfg = load_config().get("fallbacks", {}).get(args[0], {})

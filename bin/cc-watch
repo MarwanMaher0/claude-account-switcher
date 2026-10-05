@@ -8,15 +8,21 @@
 # the transcript and, on seeing a limit that belongs to THIS run, terminates
 # the claude process so `cc` can hand the conversation to the other account.
 #
-#   cc-watch <config-dir> <session-id> <cwd> <offset> <cc-pid>
+#   cc-watch <config-dir> <session-id> <cwd> <offset> <cc-pid> [account-id]
 #
 # The claude process is found as a child of <cc-pid>. ~/.local/bin/claude execs
 # the native binary, so that child's command line is the binary path itself.
+#
+# With CC_EARLY_SWITCH=1 and an account id, it also ends the run BETWEEN turns once
+# the account's recorded usage passes the early-switch threshold, and leaves
+# "<resetsAt> <window>" in ~/.claude-switch/run/<session>.early for cc to act on.
 
 set -uo pipefail
 
 DETECT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cc-detect"
-CONFIG_DIR="$1"; SESSION="$2"; CWD="$3"; OFFSET="$4"; CCPID="$5"
+CONFIG_DIR="$1"; SESSION="$2"; CWD="$3"; OFFSET="$4"; CCPID="$5"; ACCOUNT="${6:-}"
+EARLY="${CC_EARLY_SWITCH:-0}"
+RUN_DIR="$HOME/.claude-switch/run"
 POLL="${CC_WATCH_POLL:-2}"        # seconds between checks
 GRACE="${CC_WATCH_GRACE:-8}"      # seconds to allow a clean shutdown
 
@@ -33,13 +39,26 @@ while :; do
     # cc gone? nothing left to watch.
     kill -0 "$CCPID" 2>/dev/null || exit 0
 
-    resets="$("$DETECT" scan "$CONFIG_DIR" "$SESSION" "$CWD" "$OFFSET" 2>/dev/null)" || continue
+    resets="$("$DETECT" scan "$CONFIG_DIR" "$SESSION" "$CWD" "$OFFSET" 2>/dev/null)" || resets=""
+    early=""
+    if [ -z "$resets" ] && [ "$EARLY" = "1" ] && [ -n "$ACCOUNT" ]; then
+        transcript="$CONFIG_DIR/projects/$("$DETECT" slug "$CWD")/$SESSION.jsonl"
+        early="$("$DETECT" early-check "$ACCOUNT" "$SESSION" "$transcript" 2>/dev/null)" || early=""
+        resets="$early"
+    fi
     [ -n "$resets" ] || continue
 
     resets="${resets%% *}"            # "<epoch> <window type>"
     when=$(date -d "@$resets" '+%H:%M' 2>/dev/null || date -r "$resets" '+%H:%M' 2>/dev/null || echo '?')
-    printf '\n%s%s[cc] rate limit hit — resets %s%s\n' "$c_bold" "$c_yel" "$when" "$c_rst" >&2
-    printf '%s[cc] ending this run to switch accounts…%s\n\n' "$c_yel" "$c_rst" >&2
+    if [ -n "$early" ]; then
+        mkdir -p "$RUN_DIR"
+        printf '%s\n' "$early" > "$RUN_DIR/$SESSION.early"
+        printf '\n%s%s[cc] %s is nearly at its limit — resets %s%s\n' "$c_bold" "$c_yel" "$ACCOUNT" "$when" "$c_rst" >&2
+        printf '%s[cc] the turn has finished; ending this run to switch accounts…%s\n\n' "$c_yel" "$c_rst" >&2
+    else
+        printf '\n%s%s[cc] rate limit hit — resets %s%s\n' "$c_bold" "$c_yel" "$when" "$c_rst" >&2
+        printf '%s[cc] ending this run to switch accounts…%s\n\n' "$c_yel" "$c_rst" >&2
+    fi
 
     pid="$(claude_pid)"
     if [ -z "$pid" ]; then

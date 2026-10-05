@@ -18,6 +18,17 @@ searched for in a newly created one).
 your own machine so the conversation can continue. It never leaves the machine. Directories are
 created `700`; config and state are written `600`.
 
+**Pinned folders.** `cc pin` keeps pins in `~/.claude-switch/pins.json`, not in the project.
+For VS Code it writes one setting, `claudeCode.environmentVariables`, into the folder's
+`.vscode/settings.json`. It backs an existing file up to `~/.claude-switch/vscode-workspace-backups/`
+first, keeps a file it created out of git through `.git/info/exclude` (never `.gitignore`), and
+asks before writing a file that git tracks. A pinned account's chats are only ever carried to that
+pin's own fallback, and only when a limit moves the session there. That copy stays on your machine.
+
+**Early switch (opt-in).** It reads the rate-limit usage that Claude Code passes to status line
+commands, and records the percentages and reset times in `~/.claude-switch/usage/`. No request is
+made to obtain it.
+
 ## The failure mode worth knowing about
 
 Launching the default account with `CLAUDE_CONFIG_DIR` set to `~/.claude` makes Claude Code run

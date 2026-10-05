@@ -5,7 +5,7 @@
 # the job here is bookkeeping, done at the one moment it is certain: this process
 # was started on THIS account, so the limit belongs to it. Record it, then — when
 # VS Code sync is on — point the panel at the next free account, with recent chats
-# carried over. What to do next is said by limit-notice.sh on the next prompt.
+# carried over. Windows on pinned folders follow their own pin instead. What to do next is said by limit-notice.sh on the next prompt.
 set -uo pipefail
 
 # The plugin ships its own copy of the tools, so a plugin installed from the directory
