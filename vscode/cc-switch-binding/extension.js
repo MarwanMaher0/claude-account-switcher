@@ -40,8 +40,9 @@ const DEBOUNCE_MS = 400;
 const DETECT_TIMEOUT_MS = 5000;
 const CARRY_TIMEOUT_MS = 30000;
 // Adopting at activation blocks the extension host, so it gets a budget (adopt stops
-// itself after ADOPT_SYNC_SECONDS and says so); the rest is finished in the background
-// before any reload is offered.
+// itself after ADOPT_SYNC_SECONDS and says so). When it runs out, the window is not
+// moved to the pin's account until the rest is done in the background: Claude Code
+// would otherwise restore its tabs and history from an account still missing chats.
 const ADOPT_SYNC_SECONDS = 4;
 const ADOPT_SYNC_TIMEOUT_MS = 10000;
 const ADOPT_TIMEOUT_MS = 120000;
@@ -304,9 +305,40 @@ class Binder {
     }
   }
 
-  async adoptAsync(folder) {
-    const res = await this.runTool(['adopt', '--folder', folder, '--json'], ADOPT_TIMEOUT_MS);
+  async adoptAsync(folder, from) {
+    const extra = [];
+    for (const id of from || []) extra.push('--from', id);
+    const res = await this.runTool(['adopt', '--folder', folder, '--json', ...extra], ADOPT_TIMEOUT_MS);
     return this.adoptResult(res.ok, res.code, res.stdout, res.out);
+  }
+
+  // A window first bound while its pin is limited runs on the fallback: the folder's
+  // chats (of any age) are linked on from the pin's account, so restored tabs and the
+  // history list find them there. Synchronous, before the env is set, like adoptSync.
+  carryToFallbackSync(r) {
+    try {
+      const tool = this.binding().vscode;
+      if (!tool) throw new Error('vscode-binding.json names no cc-vscode');
+      const [cmd, args] = this.command(tool,
+        ['carry', '--folder', r.pin, '--from', r.pinAccount, '--to', r.account, '--any-age']);
+      const out = cp.execFileSync(cmd, args, {
+        env: this.detectEnv(), timeout: ADOPT_SYNC_TIMEOUT_MS, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      this.log(`carried chats of ${r.pin} from ${r.pinAccount} to ${r.account} (the fallback): ${String(out).trim() || 0} linked`);
+      return true;
+    } catch (err) {
+      this.log(`could not carry chats of ${r.pin} from ${r.pinAccount} to ${r.account}: ` +
+        `${String((err && (err.stderr || err.message)) || err).trim()}`);
+      return false;
+    }
+  }
+
+  // Chats of this folder that adopt left where they are (a former pin's account, or one
+  // cc cannot rule out), and chats the pin's account holds a different copy of.
+  leftOf(adoption) {
+    const rep = (adoption && adoption.rep) || {};
+    const left = Object.entries(rep.left || {}).filter(([, n]) => n > 0);
+    return { left, why: rep.leftWhy || {}, conflicts: Number(rep.chatConflicts || 0) };
   }
 
   logAdopt(folder, a, account) {
@@ -318,8 +350,11 @@ class Binder {
       : `${a.incomplete ? 'not finished' : 'failed'}: ${a.error}`));
     for (const c of rep.conflicts || []) this.log(`  conflict: ${c}`);
     for (const [k, v] of Object.entries(rep.left || {})) {
-      this.log(`  left ${v} chat(s) in ${k}: this folder is or was pinned to ${k} (cc adopt --from ${k} brings them)`);
+      this.log(`  left ${v} chat(s) in ${k}: ` + ((rep.leftWhy || {})[k] === 'unknown'
+        ? `cc cannot tell whether this folder was pinned to ${k} before`
+        : `this folder is or was pinned to ${k}`) + ` (cc adopt ${folder} --from ${k} brings them)`);
     }
+    for (const m of rep.memoryLeft || []) this.log(`  memory notes left: ${m}`);
   }
 
   // --------------------------------------------------------------- re-bind ----
@@ -433,15 +468,27 @@ class Binder {
       }
     }
 
+    // The first bind's adopt ran out of its budget: the window stays where it started
+    // until the rest is linked, so Claude Code never restores tabs or the history list
+    // from a pin account that is still missing chats. (New chats follow the pin all the
+    // same: the process wrapper decides their account.)
+    let deferred = false;
+    if (!prev && adoption && adoption.incomplete) {
+      deferred = true;
+      this.status.text = 'Claude: linking chats…';
+      this.log(`not moving to ${r.account} until this folder's chats are linked into ${r.pinAccount || r.account}`);
+      adoption = await this.adoptAsync(r.pin);
+      this.logAdopt(r.pin, adoption, r.pinAccount);
+      if (this.disposed) return;
+    }
+    // First bound while the pin is limited: on its fallback. The chats come along there.
+    if (!prev && r.pin && r.pinAccount && r.account !== r.pinAccount && this.onFallback(r)) {
+      this.carryToFallbackSync(r);
+    }
+
     this.setEnv(r);
     const after = process.env.CLAUDE_CONFIG_DIR;
     this.last = r;
-
-    // The first bind's adopt ran on a budget; finish it before saying anything.
-    if (!prev && adoption && adoption.incomplete) {
-      adoption = await this.adoptAsync(r.pin);
-      this.logAdopt(r.pin, adoption, r.pinAccount);
-    }
 
     this.log(`${trigger}: ${r.account} (${r.verb}${r.choice ? ', ' + r.choice + ' chosen' : ''}) — ${r.reason}` +
       `; CLAUDE_CONFIG_DIR ${after === undefined ? 'unset' : '= ' + after}`);
@@ -449,14 +496,27 @@ class Binder {
     this.writeWindowFile({});
     this.armExpiry(r);
 
-    if (!prev && this.claudeWasActive && after !== BASE_ENV && !this.reloadNoticeShown) {
+    const claude = deferred ? vscode.extensions.getExtension(CLAUDE_EXTENSION) : null;
+    const claudeActive = this.claudeWasActive || !!(claude && claude.isActive);
+    const pinChanged = !!prev && !samePin;
+    const { left, conflicts } = this.leftOf(adoption);
+    if (!prev && claudeActive && after !== BASE_ENV && !this.reloadNoticeShown) {
       this.reloadNoticeShown = true;
       this.reloadNotice(r, adoption);
     } else if (prev && adoption && !adoption.ok) {
       this.adoptFailed(r, adoption, false);
+    } else if (adoption && adoption.ok && (left.length || conflicts) && (!prev || pinChanged)) {
+      // Chats of this folder that are not in the pin's account: tabs restored from them,
+      // now or at the next reload, come back empty. Say so, and offer to bring them.
+      this.leftNotice(r, adoption, false, pinChanged ? prev : null);
+      if (moved) return this.afterMove(r);
     }
 
     if (moved) this.announceMove(prev, r, samePin && limitMove);
+    return this.afterMove(r);
+  }
+
+  afterMove(r) {
     if (r.verb === 'ask' && !r.choice) this.askFallback(r);
     if (r.mixed) {
       const key = (r.folders || []).map((f) => `${f.folder}=${f.account}`).join(',');
@@ -469,6 +529,42 @@ class Binder {
           'folders in separate windows to keep them apart.', [], null);
       }
     }
+  }
+
+  // Some of this folder's chats are not in the pin's account. Never a reload button:
+  // a reload would reopen those tabs empty. Each account they stay in gets a button
+  // that brings them (`cc adopt --from`, remembered for this pin).
+  leftNotice(r, adoption, beforeReload, prev) {
+    const acct = r.pinAccount || r.account;
+    const { left, why, conflicts } = this.leftOf(adoption);
+    const s = (n) => (n === 1 ? '' : 's');
+    const parts = left.map(([k, n]) => `${n} chat${s(n)} of this folder stay in ${k} (` +
+      (why[k] === 'unknown' ? `cc cannot tell whether this folder was pinned to ${k} before` :
+        `this folder is or was pinned to ${k}, so they are ${k}'s`) + ')');
+    if (conflicts) {
+      parts.push(`${conflicts} chat${s(conflicts)} already in ${acct} differ from the copy in another account ` +
+        'and were left as they are');
+    }
+    const head = prev
+      ? `New chats in this window now start on ${r.account} (${r.reason}). `
+      : `This window is bound to ${acct}. `;
+    const tail = beforeReload
+      ? `Do not reload this window yet: a reload restarts the open Claude chats on ${acct}, where those are missing.`
+      : `They are not in the history list on ${acct}, and an open tab of one comes back empty after a reload.`;
+    const items = left.map(([k, n]) => `Bring ${n} from ${k}`);
+    items.push('Show log');
+    this.notify('warning', `${head}${parts.join('; ')}. ${tail}`, items, async (pick) => {
+      if (pick === 'Show log') { this.out.show(true); return; }
+      const hit = left.find(([k, n]) => pick === `Bring ${n} from ${k}`);
+      if (!hit) return;
+      const again = await this.adoptAsync(r.pin, [hit[0]]);
+      this.logAdopt(r.pin, again, acct);
+      if (!again.ok) { this.adoptFailed(r, again, beforeReload); return; }
+      const rest = this.leftOf(again);
+      if (rest.left.length || rest.conflicts) { this.leftNotice(r, again, beforeReload, prev); return; }
+      if (beforeReload) { this.reloadNotice(r, again); return; }
+      this.notify('info', `The chats from ${hit[0]} are now in ${acct} too.`, [], null);
+    });
   }
 
   // Claude Code was running before this window was bound, so its history list and open
@@ -489,6 +585,11 @@ class Binder {
     }
     const rep = adoption.rep || {};
     const acct = r.pinAccount || r.account;
+    const { left, conflicts: chatConflicts } = this.leftOf(adoption);
+    if (left.length || chatConflicts) {
+      this.leftNotice(r, adoption, true, null);
+      return;
+    }
     const brought = rep.chats ? `${rep.chats} chat${rep.chats === 1 ? '' : 's'} of this folder from other ` +
       `accounts ${rep.chats === 1 ? 'is' : 'are'} now in ${acct} too. ` : '';
     const conflicts = (rep.conflicts || []).length
@@ -628,6 +729,14 @@ class Binder {
         `the running chat stays on ${prev.account}.`;
     } else {
       msg = `New chats in this window now start on ${r.account} (${r.reason}).`;
+      // The pin changed or went away: the chats made under it stay in its account.
+      if (prev.pinAccount && prev.pinAccount !== r.account && prev.pinAccount !== r.pinAccount) {
+        msg += ` This folder's chats on ${prev.pinAccount} stay there and are not in the history list ` +
+          `on ${r.account}; reloading this window restarts the open Claude chats on ${r.account}, ` +
+          'where they are missing.';
+        this.notify('warning', msg, [], null);
+        return;
+      }
     }
     this.notify('info', msg, [], null);
   }

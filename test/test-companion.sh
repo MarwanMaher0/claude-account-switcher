@@ -50,7 +50,8 @@ EOF
 for s in activation default_account failure no_binding rebind_on_limit timer_at_expiry ask mixed \
          claude_first remote pin_change repin_same_folder unpinned_carry_guard terminal_mode \
          terminal_mode_failure adopt_first_bind adopt_failure adopt_on_pin_change \
-         adopt_incomplete; do
+         adopt_incomplete adopt_incomplete_at_start start_on_fallback adopt_left_no_reload \
+         adopt_conflict_no_reload unpin_open; do
     scenario "$s"
 done
 
