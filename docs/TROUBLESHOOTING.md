@@ -70,14 +70,22 @@ Check these in order:
    its tab and then reopen it from the history list, to continue on the new one. Picking a chat
    whose tab is still open only brings that tab back, on the old account.
 5. **The history list shows another account's chats.** That happens when the Claude extension
-   started before the companion bound the window (the companion says so once). Run
-   **Developer: Reload Window**. New chats are on the right account either way. After a limit
-   move the panel's own account label and login status can also lag until a reload.
-6. **Claude runs in a terminal** (`claudeCode.useTerminal`). Run `type claude` in a terminal of
+   started before the companion bound the window. The companion says so once, after it has
+   brought the folder's chats into the pin's account; its **Reload Window** button restarts the
+   open chats, which then reopen from the history list on that account. New chats are on the
+   right account either way. After a limit move the panel's own account label and login status
+   can also lag until a reload.
+6. **Older chats of a pinned folder are missing from the history list** (or a reloaded tab is
+   empty). They are in the account they ran on. Run `cc adopt --dry-run` in the folder to see
+   what would come over, then `cc adopt`. It reports what it leaves on purpose: chats an account
+   holds because this folder was pinned to it before (`cc adopt --from <id>` brings these), and
+   conflicts, where the pin's account already has a file of that name with other content. If the
+   companion said it could not bring the chats over, do not reload until `cc adopt` succeeds.
+7. **Claude runs in a terminal** (`claudeCode.useTerminal`). Run `type claude` in a terminal of
    that window: it should name `~/.claude-switch/terminal-bin/claude`. If another `claude` comes
    first, a shell startup file put it ahead on `PATH`; move that line, or turn off
    `claudeCode.useTerminal`. If the shim is missing, run `cc vscode on` and reload the window.
-7. **Several editors.** `cc vscode on` sets the wrapper in one settings file and installs the
+8. **Several editors.** `cc vscode on` sets the wrapper in one settings file and installs the
    companion only in the editor that reads it. For another editor (Insiders, VSCodium) run
    `cc vscode on --settings <its User/settings.json>`.
 

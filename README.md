@@ -297,6 +297,20 @@ writes nothing into the folder: VS Code only reads the Claude extension's accoun
 your **user** settings (they are machine-scoped), which is why older versions' per-folder
 `.vscode/settings.json` entries never worked.
 
+**A folder's chats follow its pin.** Claude Code keeps each chat in the account it ran on, so a
+folder you pin after using it has its earlier chats elsewhere: in your default account, or in
+another company's. `cc pin` links them into the pin's account (hard links: nothing is moved,
+deleted or overwritten), and so do `cc vscode on`, each VS Code window before it is bound, and a
+resume. Your history list and open tabs keep working. A chat of another pinned folder never
+travels, and neither do chats an account holds because this folder was pinned to it before:
+re-pinning a folder from `acme` to `globex` leaves acme's chats with acme.
+
+```bash
+cc adopt --dry-run          # what would be brought into this folder's account
+cc adopt ~/work/acme        # do it by hand (it normally runs by itself)
+cc adopt --from acme        # also bring the chats a former pin's account holds
+```
+
 - **If cc cannot decide** the account for a pinned folder (a broken pin, a missing `cc-detect`),
   Claude does not start in that window, rather than run on the wrong account. The error says to
   run `cc status`; the status bar shows `Claude: ? (cc-switch error)`. In an unpinned folder
@@ -353,6 +367,7 @@ Claude Code reports usage. It is off by default. See
 | Clean up after upgrading from 2.2 | `cc vscode migrate` (then `--apply`) |
 | Keep a folder on one account | `cc pin` (inside the folder) |
 | List or remove pinned folders | `cc pins`, `cc unpin` |
+| Bring a pinned folder's older chats into its account | `cc adopt` (runs by itself on `cc pin`) |
 | After a switch, wait for me instead of carrying on | `cc --no-auto-continue` |
 | See all commands | `cc help` |
 

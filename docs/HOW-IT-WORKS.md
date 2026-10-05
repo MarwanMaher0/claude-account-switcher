@@ -205,8 +205,72 @@ Window**.
 
 **If Claude started first.** When the Claude extension activated before the companion (a panel
 restored at startup can do that), chats are still right, because the wrapper decides them, but
-the history list may show the previous account until **Developer: Reload Window**. The companion
-says so once.
+the history list and open tabs still belong to the account Claude Code started with. A reload
+re-reads them from the bound account and restarts every open chat. So the companion offers
+**Reload Window** only once the folder's chats are in the pin's account (see *A folder's chats
+follow its pin*), and says that reloading restarts the open chats and that they will be in the
+history list on that account. If they could not be brought over it says so and offers no reload.
+It never reloads by itself. An unpinned window gets a plain notice without the button.
+
+### A folder's chats follow its pin
+
+Claude Code stores a chat under `<account>/projects/<slug>/<session>.jsonl`, in the account it
+ran on. A folder used before it was pinned therefore has chats in other accounts. Once its
+window is bound to the pin's account, the history list and every resume read only that account,
+and a reload reopens the open tabs empty. `cc-vscode adopt` (`cc adopt`) closes that gap. For a
+pinned folder it links into the pin's account every chat whose recorded `cwd` is inside the folder
+(a git worktree beside it counts), of any age, together with:
+
+- the session folder `<slug>/<session>/` (subagents, tool results, workflows),
+- `file-history/<session>/` (rewind checkpoints) and `todos/<session>-*.json`,
+- the project's `memory/` notes that the account does not have yet.
+
+It hard-links each file (one inode: a resumed chat stays one conversation in both accounts), or,
+across filesystems, makes a copy it verifies. It creates files only with no-clobber operations:
+it never moves, deletes or overwrites anything, and a destination file with other content (a
+`MEMORY.md` of its own, a transcript copied earlier and grown since) is kept and reported as a
+conflict. A second run does nothing.
+
+**Which accounts it takes chats from.** Every account, including one reserved for another
+folder's pin: a chat's `cwd` proves where it belongs, and the other pin owns its own folder's
+chats, not these. Pinning `~/proj` must bring its chats out of `work` even though `work` is
+reserved for `~/clients/atlas`. It never takes:
+
+- a chat whose `cwd` lies in another pinned folder, a pin nested inside this one included;
+- a chat with no `cwd` whose project name could also belong to a folder beside this one;
+- chats held by an account that this folder, or a pinned folder containing it, is or was pinned
+  to. Those were made under that pin, so they are that account's work. This is the re-pin rule:
+  `cc pin ~/work/x --account globex` after `--account acme` brings globex the chats `~/work/x`
+  has in the default account and elsewhere, but never acme's. `cc pin` and `cc unpin` record
+  former pins in `~/.claude-switch/pin-history.json` for this. `cc adopt --from acme` brings
+  acme's chats when the user decides to. Pins changed before this file existed are not known.
+
+**When it runs.** Always before anything switches to the pin's account:
+
+| Where | When |
+|---|---|
+| `cc pin` | after the pin is saved (new pin, or its account changed) |
+| `cc vscode on` | for every pin, before VS Code settings change |
+| companion | before a window's first bind (synchronously, with a 4-second budget; any rest is finished before a reload is offered), and before a re-bind whose pin or pin account changed |
+| `cc-claude-wrapper` | when the extension resumes a chat (`--resume`, `--continue`) in a pinned folder |
+| `cc` | before a launch in a pinned folder |
+
+`cc pin` saves the pin before it adopts, so an invalid pin never links anything; an open window
+sees the new pin and adopts on its own before it moves, so the order holds there too.
+
+The wrapper sits on every Claude spawn, so it adopts only for a resume, and through
+`adopt --quick`: a two-second budget enforced inside adopt plus an alarm, output discarded, exit
+status ignored. A scan lists each account's `projects/` once, keeps only project names that can
+be inside the folder, and reads a transcript's head only for chats not yet linked, so a repeat
+costs little more than a few `stat` calls. Stopping early is safe because nothing it does is
+destructive; the next run finishes. By the time the user can resume anything the window has
+adopted already, so the wrapper's run is the safety net for terminals and for pins made while
+VS Code was closed. It adopts into the pin's account; while a window runs on the pin's fallback,
+the limit-move carry (last week's chats) still decides what that account has.
+
+`cc vscode migrate` stays correct alongside it: chats `adopt` linked count as "already there"
+(migrate then removes the extra link in the other account, and `--undo` restores it), and
+migrate applies the same former-pin rule.
 
 ### What the wrapper changes in the Claude extension
 

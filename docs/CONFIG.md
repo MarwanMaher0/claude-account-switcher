@@ -119,7 +119,9 @@ Rules, checked whenever a pin is saved and whenever one is used:
 - The pin with the **longest** matching path wins, so a pin inside a pinned folder overrides it.
 - A pinned account is **reserved**: outside its pins it is never picked, never a fallback for
   unpinned folders or windows, and its chats are never carried to another account except by its
-  own pin's fallback. The default account is never reserved.
+  own pin's fallback. The one exception is a chat it holds of a *different* pinned folder (made
+  there before that folder was pinned): `cc adopt` links it into that folder's own account,
+  because its recorded `cwd` shows whose it is. The default account is never reserved.
 - A pin's `fallback` can never be an account that is pinned elsewhere, and an account that is some
   pin's `fallback` cannot itself be pinned. This is what keeps one company's account out of
   another's work.
@@ -127,6 +129,11 @@ Rules, checked whenever a pin is saved and whenever one is used:
 - A pin that names an account that no longer exists stops `cc` with an error. It never quietly
   runs on another account.
 - Inside a pinned folder the paid [fallbacks](#fallbacks) are not used.
+
+`~/.claude-switch/pin-history.json` (mode `600`, written by `cc pin` and `cc unpin`) records,
+per folder, the accounts it was pinned to before: `{"version": 1, "folders": {"/home/you/work/x":
+["acme"]}}`. `cc adopt` and `cc vscode migrate` never bring a folder's chats out of those accounts
+on their own (`cc adopt --from <id>` does, when asked). Deleting the file forgets that history.
 
 `cc pin` writes nothing into the folder. Versions up to 2.2 wrote VS Code settings into it and
 recorded that in `~/.claude-switch/vscode-workspaces.json`; `cc vscode migrate` undoes it.

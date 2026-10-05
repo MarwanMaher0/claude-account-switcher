@@ -32,6 +32,7 @@ If the `cc` command is not installed, tell the user to run `/cc-setup`. After th
 | `cc vscode on` / `off` | run each VS Code window on its folder's account |
 | `cc pin` | keep a folder (and subfolders) on one account, with its own fallback rule |
 | `cc pins` / `cc unpin` | list or remove pinned folders |
+| `cc adopt [folder]` | bring a pinned folder's older chats from other accounts into its own (runs by itself on `cc pin`; `--dry-run` shows what) |
 | `cc vscode fallback` | answer a pin that asks: new chats in VS Code use its fallback |
 | `cc vscode migrate` | after upgrading from 2.2: show (then `--apply`) the clean-up of old folder settings |
 

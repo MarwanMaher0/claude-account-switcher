@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Fixed — a folder pinned after it was used lost its chats in VS Code
+- A folder's chats stay in the account they ran on. A folder pinned after it had been used had
+  its earlier chats in other accounts (the default one, or one reserved for another folder's
+  pin). Once `cc vscode on` bound its window to the pin's account, the history list no longer
+  showed them, and clicking **Reload Window** in the companion's notice reopened the open Claude
+  tabs empty: VS Code resumed their sessions in an account that did not have them.
+
+### Added — a pinned folder's chats follow the pin
+- `cc adopt [folder] [--dry-run] [--from <id>] [--all]` (`cc-vscode adopt`): links every chat
+  whose recorded `cwd` is in a pinned folder, of any age, from the other accounts into the pin's
+  account, with its session folder (subagents, tool results), rewind checkpoints, todos, and the
+  project's memory notes the account lacks. Hard links, or a verified copy across filesystems.
+  It never moves, deletes or replaces anything: a destination file with other content (a
+  different `MEMORY.md`, say) is kept and reported. A second run does nothing.
+- It runs by itself, before anything switches: in `cc pin` (a new pin, or a pin's account
+  changed), in `cc vscode on` for every pin, in the companion before a window is first bound and
+  whenever its pin or the pin's account changes, in the process wrapper when a chat is resumed
+  in a pinned folder (`--resume`, `--continue`; bounded to about two seconds), and in `cc` itself
+  before a launch in a pinned folder.
+- Which chats travel: one made in the folder follows it from any account, including an account
+  reserved for another folder (its `cwd` proves where it belongs). Never a chat of another pinned
+  folder, nested ones included; never one whose folder is unclear; and never one held by an
+  account this folder, or a pinned folder around it, is or was pinned to. That last rule keeps
+  the 2.3.0 re-pin guarantee: re-pinning a folder from acme to globex does not hand acme's chats
+  to globex. `cc pin` and `cc unpin` record former pins in `~/.claude-switch/pin-history.json`;
+  `cc adopt <folder> --from acme` brings those chats when you ask. `cc vscode migrate` follows the
+  same rule.
+- The companion's notice when Claude Code started before the window was bound now appears only
+  after the folder's chats are in the pin's account, and says that reloading restarts the open
+  chats and that they will be in the history list on that account. If they could not be brought
+  over it says so, with the reason, and offers no reload. It never reloads by itself.
+- `cc vscode migrate` counts chats `adopt` already linked as "already there".
+
 ### Fixed — VS Code windows ignored pins
 - VS Code windows on pinned folders never ran on their pinned account. `cc pin` wrote
   `CLAUDE_CONFIG_DIR` into the folder's `.vscode/settings.json`, but the Claude extension declares
