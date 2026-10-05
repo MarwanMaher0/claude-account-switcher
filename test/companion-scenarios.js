@@ -114,6 +114,7 @@ const scenarios = {
     const ext = load();
     const ctx = context();
     const { binder } = ext.activate(ctx);
+    check('C-3 CC_WINDOW_FOLDER is set even so, for the wrapper', process.env.CC_WINDOW_FOLDER === ACME);
     check('C-3 on a failure the env is left as it was (no default fallback)', process.env.CLAUDE_CONFIG_DIR === D3,
       process.env.CLAUDE_CONFIG_DIR);
     check('C-3 ...and nothing is written to terminals', ctx.ops.length === 0, ctx.ops);

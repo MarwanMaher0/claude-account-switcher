@@ -109,9 +109,16 @@ class Binder {
       return;
     }
 
+    // Whatever the decision, the wrapper must resolve helper processes the extension
+    // starts in a temp dir by this window's folder, so that a pinned window fails closed
+    // instead of looking unpinned.
+    this.setWindowFolder();
     if (vscode.workspace.onDidChangeWorkspaceFolders) {
       this.context.subscriptions.push(
-        vscode.workspace.onDidChangeWorkspaceFolders(() => this.schedule('workspace folders changed', 0)));
+        vscode.workspace.onDidChangeWorkspaceFolders(() => {
+          this.setWindowFolder();
+          this.schedule('workspace folders changed', 0);
+        }));
     }
     this.watch();
     // The first decision is synchronous: the env is in place before Claude spawns
@@ -368,6 +375,10 @@ class Binder {
       delete process.env.CLAUDE_CONFIG_DIR;
       if (coll) coll.delete('CLAUDE_CONFIG_DIR');
     }
+    this.setWindowFolder();
+  }
+
+  setWindowFolder() {
     const first = this.folders()[0];
     if (first) process.env.CC_WINDOW_FOLDER = first;
     else delete process.env.CC_WINDOW_FOLDER;
