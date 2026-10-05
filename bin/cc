@@ -109,8 +109,15 @@ sync_vscode() {
     return 0
 }
 
+# Pins are stored with symlinks resolved, so match the resolved home too: on macOS /var
+# is a link to /private/var.
+REAL_HOME="$(cd "$HOME" 2>/dev/null && pwd -P)" || REAL_HOME="$HOME"
 tilde() {
-    case "$1" in "$HOME"|"$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac
+    case "$1" in
+        "$HOME"|"$HOME"/*)           printf '~%s' "${1#"$HOME"}" ;;
+        "$REAL_HOME"|"$REAL_HOME"/*) printf '~%s' "${1#"$REAL_HOME"}" ;;
+        *) printf '%s' "$1" ;;
+    esac
 }
 
 default_id() { "$DETECT" accounts | awk -F'\t' '$3 == 1 { print $1; exit }'; }
@@ -466,9 +473,7 @@ except Exception:
     pass
 PY
 
-    local shown="$dir"
-    case "$dir" in "$HOME"/*) shown="~${dir#"$HOME"}" ;; esac
-    note "adding '$id' ($shown)"
+    note "adding '$id' ($(tilde "$dir"))"
     if [ "$need_login" = "1" ]; then
         login_account "$id" "$dir" "$want_email"
     else
