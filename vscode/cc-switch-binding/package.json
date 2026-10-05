@@ -1,0 +1,39 @@
+{
+  "name": "cc-switch-binding",
+  "displayName": "cc-switch window binding",
+  "description": "Runs Claude Code in each VS Code window on the account its folder is pinned to with cc-switch, and moves new chats to the pin's fallback on a usage limit.",
+  "version": "2.3.0",
+  "publisher": "cc-switch",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "*"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "ccSwitch.rebind",
+        "title": "cc-switch: re-check this window"
+      },
+      {
+        "command": "ccSwitch.show",
+        "title": "cc-switch: show this window's account decisions"
+      }
+    ]
+  }
+}

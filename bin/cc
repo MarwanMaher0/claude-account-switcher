@@ -12,15 +12,21 @@
 #   cc                     start on a healthy account (the preferred one while it is free)
 #   cc use <id>            prefer an account for new sessions — terminal and VS Code panel
 #   cc status              which accounts are limited, by which window, until when
+#   cc refresh             ask Anthropic for each account's real usage and fix stale limits
 #   cc add <id>            create, sign in and register another account
 #   cc add <id> --email X  pre-fill the login with X and refuse any other account
 #   cc remove <id>         deregister an account  (--purge also deletes its dir)
 #   cc clear <id>          forget a limit recorded for an account
-#   cc vscode on|off       keep the VS Code panel on an account with quota left
+#   cc vscode on|off       run each VS Code window on its folder's account (wrapper + companion)
+#   cc vscode migrate      clean up what older versions wrote (a dry run unless --apply)
 #   cc pin [folder]        keep a folder (and its subfolders) on one account — asks which
-#   cc pin <folder> --account <id> --fallback <id>|none|ask [--no-vscode] [--yes]
-#   cc unpin [folder]      remove a pin, and the VS Code setting it wrote
+#   cc pin <folder> --account <id> --fallback <id>|none|ask [--no-vscode]
+#   cc unpin [folder]      remove a pin
 #   cc pins                list pinned folders
+#   cc adopt [folder]      bring a pinned folder's chats from other accounts into its own
+#   cc adopt [folder] --dry-run | --from <id> | --all
+#   cc cloud "<task>"      start a cloud session on the account holding the cloud credit
+#   cc cloud set <id>      choose that account  (cc cloud --acct <id> overrides once)
 #   cc --acct <id>         force a specific account for this run
 #   cc --manual            never end a run automatically on a limit
 #   cc --no-auto-continue  after a switch, wait for you instead of carrying on by itself
@@ -41,6 +47,10 @@ VSCODE="$HERE/cc-vscode"
 AUTOKILL=1
 AUTO_CONTINUE=1
 RUN_DIR="$HOME/.claude-switch/run"
+# cc chooses the account of every Claude it starts. In a VS Code terminal whose PATH
+# leads `claude` through cc-claude-wrapper (claudeCode.useTerminal), this tells cc's
+# terminal shim to run Claude directly.
+export CC_SWITCH_DIRECT=1
 
 c_dim=$'\033[2m'; c_yel=$'\033[33m'; c_grn=$'\033[32m'; c_bold=$'\033[1m'; c_rst=$'\033[0m'
 note() { printf '%s[cc]%s %s\n' "$c_dim" "$c_rst" "$*" >&2; }
@@ -102,8 +112,7 @@ fmt_time() {
     date -d "@$1" "$fmt" 2>/dev/null || date -r "$1" "$fmt" 2>/dev/null || echo '?'
 }
 
-# Keep the VS Code panel on the account a launch would pick. Silent, and a no-op
-# unless `cc vscode on` was run.
+# Nudge open VS Code windows to re-check their account. Silent; writes no settings.
 sync_vscode() {
     [ -x "$VSCODE" ] && "$VSCODE" sync --quiet >/dev/null 2>&1
     return 0
@@ -257,7 +266,7 @@ pin_menu() {
 }
 
 cmd_pin() {
-    local path="" acct="" fb="" vscode=1 yes=0 interactive=0
+    local path="" acct="" fb="" vscode=1
     while [ $# -gt 0 ]; do
         case "$1" in
             --account|--fallback)
@@ -265,7 +274,7 @@ cmd_pin() {
                 if [ "$1" = "--account" ]; then acct="$2"; else fb="$2"; fi
                 shift 2 ;;
             --no-vscode) vscode=0; shift ;;
-            --yes|-y) yes=1; shift ;;
+            --yes|-y) shift ;;                 # accepted for older scripts; nothing to confirm
             -*) die "cc pin: unknown option $1" ;;
             *) [ -z "$path" ] || die "cc pin: one folder at a time"; path="$1"; shift ;;
         esac
@@ -278,7 +287,6 @@ cmd_pin() {
     dflt="$(default_id)"
 
     if [ -z "$acct" ]; then
-        interactive=1
         PIN_ACCT=""; PIN_FB=""; PIN_VSCODE=1
         pin_menu "$folder" "$dflt" || die "nothing saved"
         acct="$PIN_ACCT"; fb="$PIN_FB"; vscode="$PIN_VSCODE"
@@ -292,28 +300,10 @@ cmd_pin() {
         *)         on_limit=switch; fb_id="$fb" ;;
     esac
     "$DETECT" pin "$folder" "$acct" "$on_limit" "$fb_id" "$vscode" >/dev/null || exit $?
-
-    if [ "$vscode" = "1" ]; then
-        local rc=0
-        if [ "$yes" = "1" ]; then
-            "$VSCODE" workspace-apply "$folder" --yes || rc=$?
-        else
-            "$VSCODE" workspace-apply "$folder" || rc=$?
-        fi
-        if [ "$rc" -eq 4 ]; then
-            if [ "$interactive" = "1" ] && confirm "Write this folder's account into it anyway?" n; then
-                "$VSCODE" workspace-apply "$folder" --yes || rc=$?
-            else
-                rc=1
-            fi
-            if [ "$rc" -ne 0 ]; then
-                "$DETECT" pin "$folder" "$acct" "$on_limit" "$fb_id" 0 >/dev/null
-                warn "VS Code settings left alone; the pin applies in the terminal only (cc pin --yes writes them)"
-            fi
-        elif [ "$rc" -ne 0 ]; then
-            warn "VS Code settings were not changed; the pin applies in the terminal"
-        fi
-    fi
+    # The folder's chats follow the pin: link the ones other accounts hold into $acct,
+    # so its history and resume keep showing them. (Open VS Code windows do the same
+    # before they move; this covers the terminal and windows opened later.)
+    adopt_pinned "$folder"
 
     local rule
     case "$on_limit" in
@@ -322,12 +312,55 @@ cmd_pin() {
         stop)   rule="then stop and wait" ;;
     esac
     good "$(tilde "$folder") -> $acct, $rule"
-    [ "$vscode" = "1" ] && note "open VS Code windows on this folder pick it up after Developer: Reload Window"
+    if [ "$vscode" = "1" ]; then
+        note "VS Code windows on $(tilde "$folder") now use $acct for new chats (open windows re-check automatically)"
+        "$VSCODE" enabled 2>/dev/null || note "VS Code follows pins once you run: cc vscode on"
+    fi
+    sync_vscode
     return 0
 }
 
+# Link a pinned folder's chats into its account; report what happened, never fail.
+adopt_pinned() {
+    local out line
+    [ -x "$VSCODE" ] || return 0
+    if out="$("$VSCODE" adopt --folder "$1" </dev/null 2>&1)"; then
+        case "$out" in *": nothing to bring over") return 0 ;; esac
+        while IFS= read -r line; do note "$line"; done <<EOF
+$out
+EOF
+    else
+        while IFS= read -r line; do warn "$line"; done <<EOF
+$out
+EOF
+        warn "not every chat of $(tilde "$1") could be brought over; run: cc adopt $(tilde "$1")"
+    fi
+    return 0
+}
+
+cmd_adopt() {
+    [ -x "$VSCODE" ] || die "missing $VSCODE"
+    "$DETECT" accounts >/dev/null || exit 3
+    local args=() folder=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from)
+                { [ $# -ge 2 ] && [ -n "$2" ]; } || die "cc adopt: --from needs an account"
+                args+=("$1" "$2"); shift 2 ;;
+            --dry-run|-n|--all|--json) args+=("$1"); shift ;;
+            -*) die "cc adopt: unknown option $1" ;;
+            *) [ -z "$folder" ] || die "cc adopt: one folder at a time"; folder="$1"; shift ;;
+        esac
+    done
+    case " ${args[*]:-} " in
+        *" --all "*) [ -z "$folder" ] || die "cc adopt: a folder or --all, not both" ;;
+        *) args+=(--folder "${folder:-$PWD}") ;;
+    esac
+    "$VSCODE" adopt "${args[@]}"
+}
+
 cmd_unpin() {
-    local path="${1:-$PWD}" folder pin
+    local path="${1:-$PWD}" folder pin old_acct now_acct
     "$DETECT" accounts >/dev/null || exit 3
     folder="$("$DETECT" canon "$path")"
     if ! "$DETECT" pins | cut -f1 | grep -qxF "$folder"; then
@@ -336,9 +369,18 @@ cmd_unpin() {
         fi
         die "$(tilde "$folder") is not pinned"
     fi
-    "$VSCODE" workspace-clear "$folder" || warn "the VS Code setting could not be removed — see above"
+    old_acct="$("$DETECT" pins | awk -F'\t' -v f="$folder" '$1 == f { print $2; exit }')"
     "$DETECT" unpin "$folder" >/dev/null
+    sync_vscode
     good "unpinned $(tilde "$folder")"
+    # Its chats stay in the account it was pinned to; nothing moves them on an unpin.
+    if [ -n "$old_acct" ]; then
+        now_acct="$("$VSCODE" current "$folder" 2>/dev/null)"
+        if [ -n "$now_acct" ] && [ "$now_acct" != "$old_acct" ]; then
+            note "its chats stay in $old_acct. New chats here start on $now_acct, whose history does not list them:"
+            note "an open VS Code window on it restarts its open chats empty if reloaded. Run \`cc --acct $old_acct\` here to resume one."
+        fi
+    fi
 }
 
 cmd_pins() {
@@ -367,6 +409,16 @@ cmd_status() {
     "$DETECT" status || return $?
     [ -x "$VSCODE" ] && "$VSCODE" status
     echo
+}
+
+# ---- cc refresh -------------------------------------------------------------
+# A recorded limit is only what a transcript once said. This asks the server, so an
+# account whose window has rolled over is back in rotation at once.
+cmd_refresh() {
+    echo
+    "$DETECT" live "$@" || warn "no account's usage could be read — recorded limits left as they were"
+    sync_vscode
+    cmd_status
 }
 
 # ---- cc add -----------------------------------------------------------------
@@ -664,11 +716,54 @@ cmd_clear() {
     sync_vscode
 }
 
+# ---- cc cloud ---------------------------------------------------------------
+# Cloud sessions run on Anthropic's servers against a GitHub repo and draw on the
+# account's cloud session credit first, so they go to one fixed account — the one
+# holding the credit — even while its local 5-hour or weekly window is exhausted.
+cloud_account() {
+    python3 - <<'PY' 2>/dev/null
+import json, os
+cfg = json.load(open(os.path.expanduser("~/.claude-switch/config.json")))
+print((cfg.get("cloud") or {}).get("account") or "")
+PY
+}
+
+cmd_cloud() {
+    local id=""
+    if [ "${1:-}" = "set" ]; then
+        id="${2:-}"
+        [ -n "$id" ] || die "usage: cc cloud set <id>"
+        acct_dir "$id" >/dev/null || die "no account '$id' — see \`cc status\`"
+        python3 - "$id" <<'PY' || exit 1
+import json, os, sys
+CONFIG = os.path.expanduser("~/.claude-switch/config.json")
+cfg = json.load(open(CONFIG))
+cfg.setdefault("cloud", {})["account"] = sys.argv[1]
+tmp = CONFIG + ".tmp"
+json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, CONFIG)
+PY
+        good "cloud sessions now start on $(acct_label "$id")"
+        return 0
+    fi
+    if [ "${1:-}" = "--acct" ]; then
+        { [ $# -ge 2 ] && [ -n "$2" ]; } || die "cc cloud: --acct needs a value"
+        id="$2"; shift 2
+    fi
+    [ -n "$id" ] || id="$(cloud_account)"
+    [ -n "$id" ] || die "no cloud account set — run: cc cloud set <id>   (the account holding the cloud credit)"
+    acct_dir "$id" >/dev/null || die "no account '$id' — see \`cc status\`"
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || warn "$PWD is not a git repo — a cloud session needs a GitHub repo to work on"
+    note "cloud session on $(acct_label "$id")"
+    run_acct "$id" --cloud "$@"
+}
+
 usage() { sed -n 's/^#   \(cc .*\)/  \1/p' "${BASH_SOURCE[0]}"; }
 
 # ---- argument parsing -------------------------------------------------------
 case "${1:-}" in
     status) cmd_status; exit $? ;;
+    refresh) shift; cmd_refresh "$@"; exit $? ;;
     add)    shift; cmd_add "$@"; exit $? ;;
     remove) shift; cmd_remove "$@"; exit $? ;;
     use)    shift; cmd_use "$@"; exit $? ;;
@@ -676,6 +771,8 @@ case "${1:-}" in
     pin)    shift; cmd_pin "$@"; exit $? ;;
     unpin)  shift; cmd_unpin "$@"; exit $? ;;
     pins)   shift; cmd_pins; exit $? ;;
+    adopt)  shift; cmd_adopt "$@"; exit $? ;;
+    cloud)  shift; cmd_cloud "$@"; exit $? ;;
     vscode)
         shift
         [ -x "$VSCODE" ] || die "missing $VSCODE"
@@ -712,6 +809,9 @@ CONTINUE_MSG=""
 PIN_ACCT=""
 if pin="$("$DETECT" pin-of "$CWD" 2>/dev/null)"; then
     PIN_ACCT="$(printf '%s' "$pin" | cut -f2)"
+    # Chats of this folder made before it was pinned, so /resume finds them. Bounded
+    # and silent: it only adds links, so a slow disk never holds the launch up.
+    [ -x "$VSCODE" ] && "$VSCODE" adopt --folder "${pin%%$'\t'*}" --quick --quiet </dev/null >/dev/null 2>&1
 fi
 # Accounts already used in this run, space-delimited. A plain string rather than
 # an associative array because macOS ships bash 3.2, which has no `declare -A`.

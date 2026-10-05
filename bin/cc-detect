@@ -25,9 +25,11 @@ Subcommands
   pick                              account to start on: the preferred one if free, else the first free
   next-free [used,ids]              first free account in config order, skipping those listed
   soonest [exclude]                 "<id> <epoch>" for the limited account freeing up first
-  status                            human-readable state
+  status                            human-readable state, with live usage per account
   use <id>                          prefer this account for new sessions
   refresh                           learn limits hit outside cc (the VS Code panel, a bare claude)
+  live [ids]                        ask Anthropic for each account's real usage and correct the
+                                    recorded limits (all accounts when no ids are given)
   scan <dir> <session> [cwd] [offset]   "<resetsAt> [type]" if this run hit a limit
   size <dir> <session> [cwd]        transcript size, used as the scan offset
   session-limit <transcript> <id> <session> [own|recent]
@@ -46,8 +48,15 @@ Pinned folders (~/.claude-switch/pins.json)
                                     pin a folder and its subfolders to an account
   unpin <path>                      remove the pin on exactly that folder
   pins                              "<path>\\t<id>\\t<onLimit>\\t<fallback>\\t<vscode>" per pin
+  pin-history                       "<path>\\t<id,id>": accounts each folder was pinned to before
+  pin-allow <path> <id> <from>...   let <path>'s chats in <from> follow its pin into <id>
   pin-of [dir]                      the pin that applies to a directory (longest match)
   start-for [dir] [forced-id]       "use <id>", "switch <id>", "ask <id>", "stop <id>" or "none"
+  bind <folder|-> [folder...] [--json|--shell]
+                                    the account a VS Code window on these folders runs on.
+                                    Fast and silent: no refresh, no live check. Exit 3 on a
+                                    config error, 4 when cc is not set up, 5 on a timeout
+  choose <dir> <account|stay|clear> answer an `ask` pin for VS Code until its limit passes
   fallback-for <dir> <id> [used,ids]
                                     after <id> hits its limit: "switch <id>", "ask <id>",
                                     "stop <id>" (pinned folder) or "none" (nothing left)
@@ -65,6 +74,16 @@ Usage percentage (opt-in early switch, read from Claude Code's own status line i
 pick, next-free, soonest and status refresh first, so a limit hit in the VS Code panel
 is known before the next launch. An account pinned to a folder is reserved for its
 pins: pick and next-free never choose it outside them (the default account excepted).
+
+Then they re-check, live, every account still recorded
+as limited: a recorded window can be stale (the window rolled over early, the limit was
+lifted), and a stale one keeps a usable account out of rotation — the way `cc` once
+refused to start although an account had 99 % of its quota left.
+
+The live check runs `claude -p /usage` as the account and reads the figures Claude Code
+prints. No prompt reaches a model, so it spends no quota, and this tool itself still never
+opens a credentials file or the network — Claude Code does the asking, and renews its own
+login if it has to. Turn it off with CC_LIVE_CHECK=0 or "liveCheck": false in config.json.
 """
 import fcntl
 import glob
@@ -73,9 +92,16 @@ import os
 import re
 import stat
 import sys
+import subprocess
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:                     # Python < 3.9
+    ZoneInfo = None
 
 HOME = os.path.expanduser("~")
 SWITCH_DIR = os.path.join(HOME, ".claude-switch")
@@ -83,6 +109,7 @@ CONFIG = os.path.join(SWITCH_DIR, "config.json")
 STATE = os.path.join(SWITCH_DIR, "state.json")
 CACHE = os.path.join(SWITCH_DIR, "scan-cache.json")
 PINS = os.path.join(SWITCH_DIR, "pins.json")
+PIN_HISTORY = os.path.join(SWITCH_DIR, "pin-history.json")
 USAGE_DIR = os.path.join(SWITCH_DIR, "usage")
 RUN_DIR = os.path.join(SWITCH_DIR, "run")
 LOCK = os.path.join(SWITCH_DIR, ".lock")
@@ -97,6 +124,14 @@ HORIZON = 8 * 86400
 # How much of a transcript's end is read the first time it is seen. Nothing useful
 # can follow a limit on the same account, so a live one sits near the end.
 TAIL = 1024 * 1024
+
+# Windows that stop every model. A model-scoped weekly window only blocks when it is the
+# one a transcript already recorded as hit.
+BLOCKING = ("five_hour", "seven_day")
+# Automatic re-checks are skipped when the account was checked this recently, so hooks
+# calling next-free and soonest back to back do not ask twice.
+LIVE_TTL = 300
+LIVE_TIMEOUT = 30
 
 LIMIT_NAMES = {"five_hour": "5-hour", "seven_day": "weekly",
                "seven_day_opus": "weekly Opus", "seven_day_sonnet": "weekly Sonnet"}
@@ -123,6 +158,11 @@ def tilde(path):
 def slugify(path):
     """Claude Code's project-dir naming: non-alphanumerics become dashes."""
     return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(path))
+
+
+class BindTimeout(BaseException):
+    """`bind` ran out of time. Not an OSError (TimeoutError is one): every `except
+    OSError` on the way would swallow it and carry on with an empty state or no pins."""
 
 
 def _load_json(path, default):
@@ -374,7 +414,12 @@ def canon(path):
     return os.path.realpath(expand(path or os.getcwd()))
 
 
+_BIND_PINS = None          # pins.json as `bind` read it once, validated
+
+
 def load_pins():
+    if _BIND_PINS is not None:
+        return list(_BIND_PINS)
     data = _load_json(PINS, {})
     pins = data.get("pins") if isinstance(data, dict) else None
     return [p for p in pins if isinstance(p, dict) and p.get("path")] if isinstance(pins, list) else []
@@ -382,6 +427,57 @@ def load_pins():
 
 def save_pins(pins):
     _write_private(PINS, {"version": 1, "pins": sorted(pins, key=lambda p: p["path"])})
+
+
+def note_former(history, root, aid):
+    """Record that `root` was pinned to `aid`. A folder's chats made under a pin are that
+    account's work: `cc adopt` never brings them into the folder's next account on its
+    own (see cc-vscode adopt)."""
+    if not aid:
+        return
+    folders = history.setdefault("folders", {})
+    rows = [a for a in (folders.get(root) or []) if isinstance(a, str) and a != aid]
+    folders[root] = rows + [aid]
+
+
+def load_pin_history():
+    """pin-history.json: the accounts each folder was pinned to before ("folders"), the
+    former accounts the user said a folder's chats may come from anyway ("allowed",
+    per pin account), and whether every pin change ever made is in it ("complete").
+
+    It is complete only when it was started before any pin existed (pins.json absent):
+    a fresh install. An install that had pins before this file existed may have
+    re-pinned or unpinned folders unrecorded, so, like a file that cannot be read,
+    its history is unknown, and `cc adopt` then brings chats on its own only from the
+    default account (see cc-vscode adopt)."""
+    if not os.path.lexists(PIN_HISTORY):
+        return {"version": 1, "complete": not os.path.lexists(PINS), "since": int(time.time()),
+                "folders": {}, "allowed": {}}
+    data = _load_json(PIN_HISTORY, None)
+    if not isinstance(data, dict) or not isinstance(data.get("folders"), dict):
+        data = {"version": 1, "complete": False, "since": int(time.time()), "folders": {}}
+    data["complete"] = data.get("complete") is True
+    if not isinstance(data.get("allowed"), dict):
+        data["allowed"] = {}
+    return data
+
+
+def allow_adopt(path, to_id, from_ids):
+    """Record that `path`'s chats held by `from_ids` may follow its pin into `to_id`
+    (the user ran `cc adopt --from`). Cleared whenever the pin changes."""
+    root = canon(path)
+    with state_lock():
+        pin = next((p for p in load_pins() if p["path"] == root), None)
+        if pin is None or pin.get("account") != to_id:
+            raise ConfigError(f"{tilde(root)} is not pinned to '{to_id}'")
+        history = load_pin_history()
+        rows = history["allowed"].setdefault(root, {})
+        if not isinstance(rows, dict):
+            rows = history["allowed"][root] = {}
+        have = [a for a in (rows.get(to_id) or []) if isinstance(a, str)]
+        rows[to_id] = have + [a for a in from_ids if a not in have and a != to_id]
+        _write_private(PIN_HISTORY, history)
+    return root
 
 
 def default_id():
@@ -439,6 +535,7 @@ def set_pin(path, aid, on_limit, fallback=None, vscode=True):
         raise ConfigError(f"not a folder: {path}")
     dflt = default_id()
     with state_lock():
+        before = next((p for p in load_pins() if p["path"] == root), None)
         pins = [p for p in load_pins() if p["path"] != root]
         pinned = {p["account"] for p in pins} | {aid}
         if fallback and fallback != dflt and fallback in pinned:
@@ -451,6 +548,16 @@ def set_pin(path, aid, on_limit, fallback=None, vscode=True):
                                   f"also be pinned. Change those pins first.")
         pins.append({"path": root, "account": aid, "onLimit": on_limit,
                      "fallback": fallback, "vscode": bool(vscode)})
+        # Before save_pins: a history started while no pins.json exists is complete.
+        history = load_pin_history()
+        rows = (history["folders"].get(root) or [])
+        if aid in rows:
+            history["folders"][root] = [a for a in rows if a != aid]   # current, not former
+        if before is None or before.get("account") != aid:
+            history["allowed"].pop(root, None)          # consent was for the old pin
+        if before is not None and before.get("account") != aid:
+            note_former(history, root, before.get("account"))
+        _write_private(PIN_HISTORY, history)
         save_pins(pins)
     return root
 
@@ -462,6 +569,12 @@ def remove_pin(path):
         kept = [p for p in pins if p["path"] != root]
         if len(kept) == len(pins):
             return None
+        history = load_pin_history()
+        for p in pins:
+            if p["path"] == root:
+                note_former(history, root, p.get("account"))
+        history["allowed"].pop(root, None)
+        _write_private(PIN_HISTORY, history)
         save_pins(kept)
     return root
 
@@ -518,6 +631,139 @@ def fallback_for(path, aid, used=()):
         return limit_rule(state, pin, used)
     nxt = next_free(state, used)
     return ("switch", nxt) if nxt else ("none", "")
+
+
+# ------------------------------------------------------------------ bind ----
+# `bind` is the decision for a VS Code window, made by the process wrapper on every
+# Claude spawn and by the companion extension when a window opens or cc's state
+# changes. It has to be fast and silent: no refresh, no live check, no lock, nothing
+# read from stdin. It reads config.json, pins.json and state.json, which the hooks and
+# the launcher keep current.
+class NotSetUp(Exception):
+    """cc has never been configured on this machine."""
+
+
+def fallback_choice(state, pin, now):
+    """The choice stored for an `ask` pin while its account is limited: the account to
+    use, or None. A choice lasts until the limit it was made for has passed."""
+    chosen = (state.get("fallbackChosen") or {}).get(pin["path"])
+    if not isinstance(chosen, dict):
+        return None
+    until = int(chosen.get("until") or 0)
+    # Made for an earlier limit (the account was free in between, then ran out again):
+    # that answer does not carry over, so ask again.
+    if until <= now or until < limited_until(state, pin["account"]):
+        return None
+    return chosen.get("account") or None
+
+
+def bind_one(folder, state, now):
+    """The account a VS Code window on `folder` runs on, as a dict (see `bind`)."""
+    ids = {a["id"]: a for a in accounts()}
+    pin = pin_for(folder) if folder else None
+    if pin is not None and pin.get("vscode") is False:
+        pin = None                           # a terminal-only pin: the window is unpinned
+    res = {"folder": canon(folder) if folder else None, "pinned": pin is not None,
+           "pin": pin["path"] if pin else None, "pinAccount": pin.get("account") if pin else None,
+           "fallback": None, "limitedUntil": 0,
+           "choice": None}
+    if pin is not None:
+        check_pin(pin)
+        pa = pin["account"]
+        res["fallback"] = pin.get("fallback")
+        res["limitedUntil"] = limited_until(state, pa) if not free(state, pa, now) else 0
+        if free(state, pa, now):
+            verb, aid, reason = "use", pa, f"pinned to {pa}"
+        else:
+            rule, aid = limit_rule(state, pin, ())
+            until = fmt_until(limited_until(state, pa), now)
+            if rule == "switch":
+                verb, reason = "switch", f"{pa} is limited until {until}; the pin falls back to {aid}"
+            elif rule == "ask":
+                verb = "ask"
+                chosen = fallback_choice(state, pin, now)
+                if chosen == aid:
+                    res["choice"] = "fallback"
+                    reason = f"{pa} is limited until {until}; {aid} was chosen for this pin"
+                elif chosen == pa:
+                    res["choice"] = "stay"
+                    aid, reason = pa, f"{pa} is limited until {until}; staying was chosen"
+                else:
+                    aid, reason = pa, f"{pa} is limited until {until}; the pin asks before using {aid}"
+            else:
+                verb, reason = "stop", f"{pa} is limited until {until} and the pin allows nothing else"
+    else:
+        aid = pick(state)
+        if aid:
+            verb, reason = "use", "not pinned"
+        else:
+            # Nothing unpinned is free. Run on the preferred unpinned account anyway, so
+            # Claude itself shows the limit, rather than failing the window.
+            reserved = reserved_ids()
+            usable = [a["id"] for a in accounts() if a["id"] not in reserved]
+            if not usable:
+                raise ConfigError("every account is pinned to a folder, so an unpinned "
+                                  "folder has no account to run on")
+            preferred = state.get("preferred")
+            aid = preferred if preferred in usable else usable[0]
+            verb, reason = "none", "not pinned, and every unpinned account is limited"
+    acct = ids[aid]
+    adir = expand(acct["dir"])
+    unset = bool(acct.get("isDefault")) or os.path.realpath(adir) == os.path.realpath(DEFAULT_DIR)
+    res.update({"verb": verb, "account": aid, "dir": "" if unset else adir, "unset": unset,
+                "isDefault": bool(acct.get("isDefault")), "reason": reason})
+    # When this decision can next change on its own: the earliest limit, among the
+    # accounts it depends on, that is still running.
+    watch = [a for a in (pin["account"], pin.get("fallback")) if a] if pin else list(ids)
+    ends = [limited_until(state, a) for a in watch if limited_until(state, a) > now]
+    res["recheckAt"] = min(ends) if ends else 0
+    return res
+
+
+def _read_pins_strictly():
+    """pins.json for `bind`: any read failure, and any shape other than
+    {"pins": [{"path": "...", ...}, ...]}, is a ConfigError. A pins file that cannot be
+    read, or is read as "no pins", would run a pinned folder on another account."""
+    try:
+        with open(PINS) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"cannot read {PINS}: {exc}")
+    pins = data.get("pins", []) if isinstance(data, dict) else None
+    if not isinstance(pins, list) or not all(
+            isinstance(p, dict) and isinstance(p.get("path"), str) and p.get("path") for p in pins):
+        raise ConfigError(f"{PINS} is not a cc pins file (expected {{\"pins\": [{{\"path\": ...}}]}})")
+    return pins
+
+
+def bind(folders):
+    """The decision for a window with these workspace folders. The first folder decides,
+    as it does for the Claude extension; `mixed` is set when the folders fall under
+    different pinned accounts. pins.json is read once, strictly, before anything else."""
+    global _BIND_PINS
+    pins = _read_pins_strictly() if os.path.lexists(PINS) else []
+    if not os.path.exists(CONFIG):
+        if pins:
+            raise ConfigError(f"{PINS} exists but {CONFIG} does not")
+        raise NotSetUp("cc is not set up on this machine")
+    _BIND_PINS = pins
+    try:
+        state = load_state()
+        now = time.time()
+        rows = [bind_one(None if f in ("-", "") else f, state, now) for f in (folders or ["-"])]
+        out = dict(rows[0])
+        owners = {r["pin"] and pin_account(r["pin"]) for r in rows}
+    finally:
+        _BIND_PINS = None
+    out["mixed"] = len(owners) > 1
+    out["folders"] = rows
+    out["recheckAt"] = min([r["recheckAt"] for r in rows if r["recheckAt"]] or [0])
+    out["configured"] = True
+    return out
+
+
+def pin_account(path):
+    return next((p.get("account") for p in load_pins() if p["path"] == path), None)
 
 
 def soonest(state=None, exclude=()):
@@ -729,10 +975,189 @@ def refresh():
             if owner is None and ev["uuid"]:
                 held = holders.get((session, ev["uuid"]), set())
                 owner = next(iter(held)) if len(held) == 1 else None
-            if owner in ids:
+            if owner in ids and not _superseded(state, owner, ev):
                 changed = raise_limit(state, owner, ev["resetsAt"], ev["type"]) or changed
         if changed:
             save_state(state)
+
+
+# ------------------------------------------------------------ live usage ----
+class LiveError(Exception):
+    """Why an account's usage could not be read. Shown, never fatal."""
+
+
+def _superseded(state, aid, ev):
+    """True when a live check made after this limit event found the account usable.
+
+    Without this, the transcript that recorded the old 429 would put the stale window
+    straight back on the next refresh — the event stays "unexpired" until its resetsAt.
+    """
+    checked = state.get("accounts", {}).get(aid, {}).get("liveCheckedAt", 0)
+    if not checked:
+        return False
+    return ev["ts"] is None or ev["ts"] <= checked
+
+
+def live_enabled():
+    # CC_LIVE_PROBE marks the probe's own claude process: its SessionStart hook calls
+    # next-free, which must not probe again.
+    if os.environ.get("CC_LIVE_PROBE"):
+        return False
+    if os.environ.get("CC_LIVE_CHECK", "1") in ("0", "false", "no", "off"):
+        return False
+    try:
+        return load_config().get("liveCheck", True) is not False
+    except ConfigError:
+        return False
+
+
+# "Current session: 12% used · resets Sep 24, 1:50pm (Africa/Cairo)"
+# "Current week (all models): 17% used · resets Sep 29, 4pm (Africa/Cairo)"
+USAGE_LINE = re.compile(r"^\s*Current (session|week)(?: \(([^)]+)\))?:\s*(\d+(?:\.\d+)?)% used"
+                        r"(?:\s*·\s*resets\s+(.+?))?\s*$")
+
+
+def _window_name(kind, scope):
+    if kind == "session":
+        return "five_hour"
+    if not scope or scope.lower() == "all models":
+        return "seven_day"
+    return "seven_day_" + re.sub(r"[^a-z0-9]+", "_", scope.lower()).strip("_")
+
+
+def parse_reset(text, now=None):
+    """Epoch for "Sep 24, 1:50pm (Africa/Cairo)", "Sep 28, 7am" or "1:50pm"; 0 if unreadable."""
+    now = time.time() if now is None else now
+    m = re.match(r"^(.*?)\s*(?:\(([^)]+)\))?$", text.strip())
+    body, zone = m.group(1).strip(), m.group(2)
+    tz = None
+    if zone and ZoneInfo:
+        try:
+            tz = ZoneInfo(zone)
+        except Exception:
+            tz = None
+    ref = datetime.fromtimestamp(now, tz)
+    for fmt in ("%b %d, %I:%M%p", "%b %d, %I%p", "%I:%M%p", "%I%p"):
+        try:
+            parsed = datetime.strptime(body, fmt)     # %b and %p match case-insensitively
+        except ValueError:
+            continue
+        if "%b" in fmt:
+            dt = parsed.replace(year=ref.year, tzinfo=tz)
+            if dt.timestamp() < now - 86400:        # "Jan 2" read in late December
+                dt = dt.replace(year=ref.year + 1)
+        else:
+            dt = ref.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
+            if dt.timestamp() < now - 60:
+                dt = datetime.fromtimestamp(dt.timestamp() + 86400, tz)
+        return int(dt.timestamp())
+    return 0
+
+
+def parse_usage(text, now=None):
+    usage = {}
+    for line in text.splitlines():
+        m = USAGE_LINE.match(line)
+        if m:
+            kind, scope, pct, resets = m.groups()
+            usage[_window_name(kind, scope)] = {
+                "pct": float(pct), "resetsAt": parse_reset(resets, now) if resets else 0}
+    return usage
+
+
+def fetch_usage(acct):
+    """The account's usage windows as {window: {"pct": n, "resetsAt": epoch}}.
+
+    Launched exactly as `cc` launches the account: the default one with CLAUDE_CONFIG_DIR
+    removed, never set to its own path (see run_acct in cc).
+    """
+    env = dict(os.environ, CC_LIVE_PROBE="1", CC_SWITCH_DIRECT="1")
+    if acct.get("isDefault"):
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = expand(acct["dir"])
+    os.makedirs(SWITCH_DIR, exist_ok=True)
+    try:
+        res = subprocess.run(["claude", "-p", "/usage", "--no-session-persistence", "--strict-mcp-config"],
+                             env=env, cwd=SWITCH_DIR, stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=LIVE_TIMEOUT)
+    except FileNotFoundError:
+        raise LiveError("claude is not on PATH") from None
+    except subprocess.TimeoutExpired:
+        raise LiveError(f"claude /usage did not answer in {LIVE_TIMEOUT} s") from None
+    usage = parse_usage(res.stdout)
+    if not usage:
+        said = next((ln.strip() for ln in (res.stdout + res.stderr).splitlines() if ln.strip()), "")
+        raise LiveError(f"no usage figures from claude /usage{': ' + said[:80] if said else ''}")
+    return usage
+
+
+def live_limit(usage, recorded_type=None, now=None):
+    """(resetsAt, type) for the latest-ending exhausted window, or (0, None)."""
+    now = time.time() if now is None else now
+    names = list(BLOCKING)
+    if recorded_type and recorded_type not in names:
+        names.append(recorded_type)
+    # An exhausted window whose reset time could not be read still counts: assume half an
+    # hour and let the next check correct it, rather than launch into a certain 429.
+    hits = [(w["resetsAt"] if w["resetsAt"] > now else int(now) + 1800, n) for n in names
+            for w in [usage.get(n)] if w and w["pct"] >= 100]
+    return max(hits) if hits else (0, None)
+
+
+def live_check(ids=None, force=False):
+    """Ask Anthropic for the real usage of some accounts and correct the state.
+
+    Unlike `raise`, this may SHORTEN or CLEAR a recorded window: the server's answer is
+    authoritative, a transcript is only a past observation. Returns {id: usage or
+    LiveError}. Accounts checked in the last LIVE_TTL seconds are skipped unless forced.
+    """
+    state, now = load_state(), time.time()
+    targets = [a for a in accounts() if ids is None or a["id"] in ids]
+    if not force:
+        targets = [a for a in targets
+                   if now - state.get("accounts", {}).get(a["id"], {}).get("liveCheckedAt", 0) > LIVE_TTL]
+    results = {}
+
+    def one(acct):
+        try:
+            results[acct["id"]] = fetch_usage(acct)
+        except LiveError as exc:
+            results[acct["id"]] = exc
+
+    threads = [threading.Thread(target=one, args=(a,), daemon=True) for a in targets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(LIVE_TIMEOUT + 2)
+
+    fresh = {aid: u for aid, u in results.items() if isinstance(u, dict)}
+    if fresh:
+        with state_lock():
+            state, now = load_state(), time.time()
+            for aid, usage in fresh.items():
+                entry = state.setdefault("accounts", {}).setdefault(aid, {})
+                resets, ltype = live_limit(usage, entry.get("limitType"), now)
+                entry["usage"] = usage
+                entry["liveCheckedAt"] = int(now)
+                if resets:
+                    entry["limitedUntil"] = resets
+                    entry["limitType"] = ltype
+                else:
+                    entry["limitedUntil"] = 0
+                    entry.pop("limitType", None)
+            save_state(state)
+    return results
+
+
+def _verify_limited():
+    """Re-check, live, the accounts the state says are limited. Quiet on failure."""
+    if not live_enabled():
+        return
+    state, now = load_state(), time.time()
+    limited = {a["id"] for a in accounts() if limited_until(state, a["id"]) > now}
+    if limited:
+        live_check(limited)
 
 
 def _refresh_quietly():
@@ -742,6 +1167,12 @@ def _refresh_quietly():
         raise
     except Exception as exc:  # bookkeeping must never stop a launch
         print(f"cc-detect: could not read transcripts for limits: {exc}", file=sys.stderr)
+    try:
+        _verify_limited()
+    except ConfigError:
+        raise
+    except Exception as exc:
+        print(f"cc-detect: live usage check failed: {exc}", file=sys.stderr)
 
 
 # ----------------------------------------------------------------- usage ----
@@ -916,6 +1347,22 @@ def fmt_left(seconds):
     return f"{days} d {hours} h"
 
 
+SHORT = {"five_hour": "5h", "seven_day": "wk", "seven_day_opus": "wk-opus",
+         "seven_day_sonnet": "wk-sonnet"}
+
+
+def fmt_usage(entry, now):
+    """"5h 12% · wk 3%  (2 min ago)" from the last live check, or "" if there was none."""
+    usage, checked = entry.get("usage") or {}, entry.get("liveCheckedAt", 0)
+    names = sorted(usage, key=lambda n: (n not in SHORT, list(SHORT).index(n) if n in SHORT else 0, n))
+    parts = [f"{SHORT.get(n, 'wk-' + n[len('seven_day_'):])} {usage[n]['pct']:.0f}%" for n in names]
+    if not parts:
+        return ""
+    age = now - checked
+    when = "just now" if age < 60 else f"{fmt_left(age)} ago"
+    return f"{' · '.join(parts)}  ({when})"
+
+
 def cmd_status():
     state = load_state()
     now = time.time()
@@ -939,6 +1386,9 @@ def cmd_status():
         print(f"  {'▶' if aid == nxt else ' '} {aid:<{width}}  {label:<44} "
               f"{emails[aid] or 'not logged in':<30} {tilde(expand(acct['dir']))}"
               f"{'  (' + ', '.join(tags) + ')' if tags else ''}")
+        used = fmt_usage(state.get("accounts", {}).get(aid, {}), now)
+        if used:
+            print(f"    {'':<{width}}  usage: {used}")
 
     # Group logins that draw on one limit: the same account and organization, not merely
     # the same email address.
@@ -985,6 +1435,79 @@ def cmd_status():
             shown = {"use": aid, "switch": f"{aid} (fallback)", "ask": f"asks about {aid}",
                      "stop": f"none — {aid} is limited"}.get(verb, aid)
             print(f"\n  this folder is pinned · next launch here -> {shown}")
+
+
+def choose(path, answer):
+    """Record the answer to an `ask` pin for VS Code windows: use its fallback, or stay
+    on the limited account. It lasts until the current limit has passed. Returns the
+    account new chats now start on."""
+    pin = pin_for(path)
+    if not pin:
+        raise ConfigError(f"{tilde(canon(path))} is not pinned")
+    check_pin(pin)
+    pa, fb = pin["account"], pin.get("fallback")
+    if answer not in ("clear", "stay", pa) and (pin["onLimit"] == "stop" or answer != fb):
+        raise ConfigError(f"the pin on {tilde(pin['path'])} can only use '{pa}'"
+                          + (f" or '{fb}'" if fb and pin["onLimit"] != "stop" else ""))
+    with state_lock():
+        state = load_state()
+        chosen = state.setdefault("fallbackChosen", {})
+        until = limited_until(state, pa)
+        if answer == "clear" or until <= time.time():
+            chosen.pop(pin["path"], None)
+        else:
+            chosen[pin["path"]] = {"account": pa if answer == "stay" else answer,
+                                   "until": until}
+        save_state(state)
+    res = bind([pin["path"]])
+    return res["account"]
+
+
+def cmd_bind(args):
+    fmt = "json"
+    folders = []
+    for a in args:
+        if a in ("--json", "--shell"):
+            fmt = a[2:]
+        else:
+            folders.append(a)
+    # A hung filesystem must not hang a VS Code spawn: give up instead.
+    try:
+        import signal
+        def _timeout(*_):
+            raise BindTimeout()
+        signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(int(os.environ.get("CC_BIND_TIMEOUT", "5") or 5))
+    except (ImportError, ValueError, AttributeError):
+        pass
+    try:
+        res = bind(folders)
+        code = 0
+    except NotSetUp as exc:
+        res, code = {"configured": False, "error": str(exc)}, 4
+    except ConfigError as exc:
+        res, code = {"configured": True, "error": str(exc)}, 3
+    except BindTimeout:
+        res, code = {"configured": True, "error": "timed out reading cc's state"}, 5
+    try:
+        signal.alarm(0)
+    except (NameError, AttributeError, ValueError):
+        pass
+    if fmt == "json":
+        print(json.dumps(res))
+    else:
+        # key=value lines for the wrapper's `read` loop. Not for eval.
+        keys = ("error", "account", "dir", "unset", "verb", "pinned", "pin", "pinAccount", "fallback",
+                "limitedUntil", "mixed", "reason", "recheckAt", "configured")
+        for k in keys:
+            if k not in res:
+                continue
+            v = res[k]
+            v = ("1" if v else "0") if isinstance(v, bool) else ("" if v is None else str(v))
+            print(f"{k}={v.replace(chr(10), ' ')}")
+    if code:
+        print(f"cc-detect: {res['error']}", file=sys.stderr)
+    return code
 
 
 def _print_limit(ev):
@@ -1056,6 +1579,8 @@ def main(argv):
 
     elif cmd == "status":
         _refresh_quietly()
+        if live_enabled():
+            live_check()                        # every account, for the usage figures
         cmd_status()
 
     elif cmd == "use":
@@ -1068,6 +1593,28 @@ def main(argv):
 
     elif cmd == "refresh":
         refresh()
+
+    elif cmd == "live":
+        # Forced, and shown: the user asked for it. Exit 1 if no account could be read.
+        ids = set(args) or None
+        for aid in ids or ():
+            account_by_id(aid)
+        results = live_check(ids, force=True)
+        now = time.time()
+        for acct in accounts():
+            res = results.get(acct["id"])
+            if res is None:
+                continue
+            if isinstance(res, LiveError):
+                print(f"  {acct['id']}: could not check — {res}")
+                continue
+            resets, ltype = live_limit(res, None, now)
+            verdict = (f"LIMITED ({LIMIT_NAMES.get(ltype, ltype)}) until {fmt_until(resets, now)}"
+                       if resets else "has quota left")
+            print(f"  {acct['id']}: {verdict} — "
+                  f"{fmt_usage({'usage': res, 'liveCheckedAt': now}, now).split('  (')[0]}")
+        if not any(isinstance(r, dict) for r in results.values()):
+            return 1
 
     elif cmd == "size":
         print(size_of(args[0], args[1], args[2] if len(args) > 2 else None))
@@ -1154,6 +1701,17 @@ def main(argv):
             print("\t".join([pin["path"], pin.get("account") or "", pin.get("onLimit") or "",
                              pin.get("fallback") or "-", "1" if pin.get("vscode") else "0"]))
 
+    elif cmd == "pin-history":
+        for root, ids in sorted(load_pin_history()["folders"].items()):
+            if ids:
+                print(f"{root}\t{','.join(ids)}")
+
+    elif cmd == "pin-allow":
+        if len(args) < 3:
+            print("usage: cc-detect pin-allow <path> <pin-account> <from-account>...", file=sys.stderr)
+            return 2
+        print(allow_adopt(args[0], args[1], args[2:]))
+
     elif cmd == "pin-of":
         pin = pin_for(args[0] if args else None)
         if not pin:
@@ -1166,6 +1724,16 @@ def main(argv):
         verb, aid = start_for(args[0] if args and args[0] else None,
                               args[1] if len(args) > 1 and args[1] else None)
         print(f"{verb} {aid}".strip())
+
+    elif cmd == "bind":
+        return cmd_bind(args)
+
+    elif cmd == "choose":
+        # choose <dir> <account|stay|clear>: the answer to an `ask` pin, for VS Code.
+        if len(args) < 2:
+            print("usage: cc-detect choose <dir> <account|stay|clear>", file=sys.stderr)
+            return 2
+        print(choose(args[0], args[1]))
 
     elif cmd == "fallback-for":
         _refresh_quietly()

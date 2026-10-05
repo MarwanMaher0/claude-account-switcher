@@ -3,9 +3,10 @@
 #
 # Claude Code keeps the session open on a limit and ignores this hook's output, so
 # the job here is bookkeeping, done at the one moment it is certain: this process
-# was started on THIS account, so the limit belongs to it. Record it, then — when
-# VS Code sync is on — point the panel at the next free account, with recent chats
-# carried over. Windows on pinned folders follow their own pin instead. What to do next is said by limit-notice.sh on the next prompt.
+# was started on THIS account, so the limit belongs to it. Record it in state.json:
+# that is also what moves VS Code windows, whose cc-switch companion watches the file
+# and starts new chats on the pin's fallback (the running chat stays). Nothing here
+# writes VS Code settings. What to do next is said by limit-notice.sh on the next prompt.
 set -uo pipefail
 
 # The plugin ships its own copy of the tools, so a plugin installed from the directory
@@ -43,6 +44,7 @@ done
 read -r resets ltype <<<"$limit"
 "$DETECT" raise "$id" "$resets" ${ltype:+"$ltype"} >/dev/null 2>&1
 
+# Nudge open VS Code windows to re-check now (writes no settings).
 VSCODE="$(dirname "$DETECT")/cc-vscode"
 [ -x "$VSCODE" ] && "$VSCODE" sync --quiet >/dev/null 2>&1
 exit 0

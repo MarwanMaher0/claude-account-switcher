@@ -50,6 +50,8 @@ hit="'$id' hit its ${kind}limit (resets $(when_is "$resets"))."
 VSCODE="$(dirname "$DETECT")/cc-vscode"
 in_vscode=0
 [ "${CLAUDE_CODE_ENTRYPOINT:-}" = "claude-vscode" ] && in_vscode=1
+vscode_on=0
+[ -x "$VSCODE" ] && "$VSCODE" enabled >/dev/null 2>&1 && vscode_on=1
 
 # A pinned folder follows its own rule: its fallback, a question, or a stop. It never
 # moves to whichever account happens to be free.
@@ -62,17 +64,19 @@ if pin="$("$DETECT" pin-of "$cwd" 2>/dev/null)"; then
         switch)
             if [ "${CC_MANAGED:-}" = "1" ]; then
                 msg="$hit Exit this session and cc continues it on '$next', with the conversation carried over."
-            elif [ "$in_vscode" = "1" ] && [ "$pin_vscode" = "1" ] && [ -x "$VSCODE" ]; then
-                "$VSCODE" sync --quiet >/dev/null 2>&1
-                msg="$hit This folder falls back to '$next': its VS Code window is now set to '$next' and this chat was carried over. Run \"Developer: Reload Window\" (Ctrl+Shift+P) and it continues there."
+            elif [ "$in_vscode" = "1" ] && [ "$pin_vscode" = "1" ] && [ "$vscode_on" = "1" ]; then
+                [ -x "$VSCODE" ] && "$VSCODE" sync --quiet >/dev/null 2>&1
+                msg="$hit This folder falls back to '$next': new chats in this VS Code window start on '$next', and this chat stays on '$id' until the reset. Start a new chat, or close this chat's tab and then reopen it from the history list, to continue on '$next' (picking it while its tab is open only shows that tab, still on '$id')."
+            elif [ "$in_vscode" = "1" ]; then
+                msg="$hit This folder falls back to '$next'. Run \`cc vscode on\` in a terminal so new chats in VS Code move there by themselves."
             else
                 msg="$hit This folder falls back to '$next'. Exit and run \`cc\` in this folder to continue there."
             fi ;;
         ask)
             if [ "${CC_MANAGED:-}" = "1" ]; then
                 msg="$hit Exit this session and cc asks whether to continue on '$next'."
-            elif [ "$in_vscode" = "1" ] && [ "$pin_vscode" = "1" ]; then
-                msg="$hit This folder asks before leaving '$id'. To continue on '$next' now, run \`cc vscode fallback\` in a terminal in this folder, then \"Developer: Reload Window\". Or wait for the reset."
+            elif [ "$in_vscode" = "1" ] && [ "$pin_vscode" = "1" ] && [ "$vscode_on" = "1" ]; then
+                msg="$hit This folder asks before leaving '$id'. Choose in the cc-switch notification in this window (or run \`cc vscode fallback\` in a terminal in this folder): new chats then start on '$next', and this chat stays on '$id'. Or wait for the reset."
             else
                 msg="$hit This folder asks before leaving '$id'. Exit and run \`cc\` in this folder to choose, or wait for the reset."
             fi ;;
@@ -89,11 +93,11 @@ if [ -z "$next" ]; then
     msg="$hit Every other account is limited too."
 elif [ "${CC_MANAGED:-}" = "1" ]; then
     msg="$hit Exit this session and cc continues it on '$next', with the conversation carried over."
-elif [ "${CLAUDE_CODE_ENTRYPOINT:-}" = "claude-vscode" ] && [ -x "$VSCODE" ] && "$VSCODE" enabled; then
-    "$VSCODE" sync --quiet >/dev/null 2>&1
-    msg="$hit The VS Code panel is now on '$next' and your recent chats were carried over. Run \"Developer: Reload Window\" (Ctrl+Shift+P) and this chat continues there."
-elif [ "${CLAUDE_CODE_ENTRYPOINT:-}" = "claude-vscode" ]; then
-    msg="$hit Run \`cc vscode on\` in a terminal so the panel moves to '$next', then reload the window."
+elif [ "$in_vscode" = "1" ] && [ "$vscode_on" = "1" ]; then
+    [ -x "$VSCODE" ] && "$VSCODE" sync --quiet >/dev/null 2>&1
+    msg="$hit New chats in this VS Code window start on '$next'; this chat stays on '$id' until the reset. Start a new chat, or close this chat's tab and then reopen it from the history list, to continue on '$next' (picking it while its tab is open only shows that tab, still on '$id')."
+elif [ "$in_vscode" = "1" ]; then
+    msg="$hit Run \`cc vscode on\` in a terminal so new chats in VS Code move to '$next' by themselves."
 else
     msg="$hit Exit and run \`cc\` to continue on '$next'."
 fi

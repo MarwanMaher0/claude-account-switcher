@@ -112,14 +112,16 @@ hand-editing, because they enforce the rules below.
 | `account` | The account sessions in this folder use. |
 | `onLimit` | `switch` (move to `fallback`), `stop` (wait for the reset), or `ask` (ask about `fallback`). |
 | `fallback` | The one account this folder may move to. `null` with `stop`. |
-| `vscode` | Whether `cc pin` manages the folder's `.vscode/settings.json`. |
+| `vscode` | Whether the pin applies in VS Code windows too (`false`: terminal only, `--no-vscode`). |
 
 Rules, checked whenever a pin is saved and whenever one is used:
 
 - The pin with the **longest** matching path wins, so a pin inside a pinned folder overrides it.
 - A pinned account is **reserved**: outside its pins it is never picked, never a fallback for
-  unpinned folders, and its chats are never carried to another account by `cc vscode on`. The
-  default account is never reserved.
+  unpinned folders or windows, and its chats are never carried to another account except by its
+  own pin's fallback. The one exception is a chat it holds of a *different* pinned folder (made
+  there before that folder was pinned): `cc adopt` links it into that folder's own account,
+  because its recorded `cwd` shows whose it is. The default account is never reserved.
 - A pin's `fallback` can never be an account that is pinned elsewhere, and an account that is some
   pin's `fallback` cannot itself be pinned. This is what keeps one company's account out of
   another's work.
@@ -128,8 +130,38 @@ Rules, checked whenever a pin is saved and whenever one is used:
   runs on another account.
 - Inside a pinned folder the paid [fallbacks](#fallbacks) are not used.
 
-`cc pin` also records what it did to each folder's VS Code settings in
-`~/.claude-switch/vscode-workspaces.json`, so `cc unpin` can undo exactly that.
+`~/.claude-switch/pin-history.json` (mode `600`, written by `cc pin`, `cc unpin` and
+`cc adopt --from`) records, per folder, the accounts it was pinned to before, and the accounts
+the user let its chats come from:
+
+```json
+{"version": 1, "complete": true, "since": 1790000000,
+ "folders": {"/home/you/work/x": ["acme"]},
+ "allowed": {"/home/you/work/x": {"globex": ["work"]}}}
+```
+
+`cc adopt` and `cc vscode migrate` never bring a folder's chats out of a former pin's account on
+their own; `cc adopt --from <id>` does, and adds `<id>` to `allowed` for the current pin (cleared
+when the pin changes or is removed). `complete` is true only when the file was started before
+any pin existed. Without it (an install that had pins before this file, a missing or unreadable
+file), the history is unknown, and chats in accounts other than the default one also wait for
+`--from`. Deleting the file never widens what is brought over.
+
+`cc pin` writes nothing into the folder. Versions up to 2.2 wrote VS Code settings into it and
+recorded that in `~/.claude-switch/vscode-workspaces.json`; `cc vscode migrate` undoes it.
+
+### VS Code files
+
+| File | What it is |
+|---|---|
+| `vscode-binding.json` | Written by `cc vscode on`: where the companion finds `cc-detect` and `cc-vscode` |
+| `windows/<pid>.json` | One per open VS Code window, written by the companion: its folders and account |
+| `bind-epoch` | Touched by `cc vscode sync` (and hooks) to make open windows re-check |
+| `vscode-settings.backup*.json` | Your VS Code user settings before `cc vscode on` changed them |
+| `vscode-migration.json`, `vscode-migration-backups/` | What `cc vscode migrate --apply` did, for `--undo` |
+
+`fallbackChosen` in `state.json` holds the answer to a pin that asks, per pin, until the limit it
+was given for has passed.
 
 ## Auto-continue
 
@@ -164,7 +196,8 @@ status line of your own, it still runs and shows as before.
 - **No network call.** The data is what Claude Code already received.
 - **Pro and Max only.** Claude Code reports usage only for those plans. On other plans, such as
   some company seats, nothing is recorded and `cc` switches at the real limit as usual.
-- **The terminal only.** The VS Code panel is not started by `cc`.
+- **The terminal only.** The VS Code panel is not started by `cc`; its windows move when a limit
+  is recorded.
 
 ## Environment variables
 

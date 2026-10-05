@@ -62,6 +62,13 @@ new_home() {
     local tmp="${TMPDIR:-/tmp}"
     SANDBOX="$(mktemp -d "${tmp%/}/cc-test-XXXXXX")"
     export HOME="$SANDBOX"
+    # Live usage checks run `claude -p /usage`; off unless a suite turns them on, so
+    # the stub's call log stays exactly what each test launched.
+    export CC_LIVE_CHECK=0
+    # Never let a test reach a real VS Code: cc-vscode looks only at this (missing) CLI
+    # unless a suite installs a stub there.
+    export CC_VSCODE_CLI="$SANDBOX/stub/code"
+    unset CC_WINDOW_FOLDER CC_SWITCH_DETECT CC_INSTALL_DIR CC_SHARE_DIR
     mkdir -p "$HOME/.claude" "$HOME/.claude-2"
     printf '{"oauthAccount":{"emailAddress":"first@example.com","subscriptionType":"max"}}\n' \
         > "$HOME/.claude.json"
@@ -94,6 +101,8 @@ cleanup_home() {
 #   login     — create an oauthAccount in the config dir (simulates a login);
 #               STUB_EMAIL, STUB_ACCOUNT and STUB_ORG choose who signs in
 #   nologin   — exit without logging in
+# `claude -p /usage` prints <config dir>/usage.txt when it exists, else fails as a
+# signed-out account does.
 # Every invocation's arguments are appended to $STUB_LOG. `claude auth login` behaves
 # per $STUB_MODE; any other `auth` subcommand does nothing. STUB_NO_AUTH=1 makes `auth`
 # an unknown command, as in a build that predates it.
@@ -105,6 +114,11 @@ stub_claude() {
     cat > "$STUBDIR/claude" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${STUB_LOG:-/dev/null}"
+if [ "${1:-}" = "-p" ] && [ "${2:-}" = "/usage" ]; then
+  f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/usage.txt"
+  [ -f "$f" ] && { cat "$f"; exit 0; }
+  echo "Not logged in · Please run /login"; exit 1
+fi
 if [ "${1:-}" = "auth" ]; then
   [ -n "${STUB_NO_AUTH:-}" ] && { echo "error: unknown command 'auth'" >&2; exit 1; }
   [ "${2:-}" = "login" ] || exit 0
@@ -156,4 +170,39 @@ summary() {
     fi
     printf '%s%d passed, %d FAILED%s\n' "$_red" "$PASS" "$FAIL" "$_rst"
     return 1
+}
+
+# A stub VS Code CLI at $CC_VSCODE_CLI: logs its arguments to code.log beside it;
+# --install-extension keeps the .vsix and --list-extensions reports it.
+# CODE_STUB_FAIL=1 makes installs fail.
+code_stub() {
+    mkdir -p "$SANDBOX/stub"
+    cat > "$SANDBOX/stub/code" <<'STUB'
+#!/usr/bin/env bash
+d="$(dirname "$0")"
+printf '%s\n' "$*" >> "$d/code.log"
+case "${1:-}" in
+  --install-extension)
+    [ -n "${CODE_STUB_FAIL:-}" ] && { echo "install failed" >&2; exit 1; }
+    cp "$2" "$d/installed.vsix" && echo "cc-switch.cc-switch-binding" > "$d/installed" ;;
+  --list-extensions) cat "$d/installed" 2>/dev/null; echo "someone.else" ;;
+  --uninstall-extension) rm -f "$d/installed" ;;
+esac
+exit 0
+STUB
+    chmod 755 "$SANDBOX/stub/code"
+}
+
+# A top-level value from a VS Code settings file (JSON with comments), as JSON, or the
+# bare string for a string value.
+json_setting() {
+    python3 -c '
+import json, re, sys
+text = open(sys.argv[1]).read()
+text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+text = re.sub(r"(?m)^\s*//.*$", "", text)
+text = re.sub(r"(?m)\s//[^\"\n]*$", "", text)
+text = re.sub(r",(\s*[}\]])", r"\1", text)
+v = json.loads(text).get(sys.argv[2])
+print(v if isinstance(v, str) else json.dumps(v))' "$1" "$2"
 }

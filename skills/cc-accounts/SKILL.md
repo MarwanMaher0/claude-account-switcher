@@ -16,7 +16,8 @@ If the `cc` command is not installed, tell the user to run `/cc-setup`. After th
 1. `cc add <name>` in a terminal adds another account. It asks for the email and opens a
    browser login. The user must do this: never run `cc add` yourself.
 2. `cc` starts sessions instead of `claude`.
-3. VS Code users run `cc vscode on`, and install this plugin in every account.
+3. VS Code users run `cc vscode on` (it sets a process wrapper in VS Code user settings and
+   installs a small companion extension), and install this plugin in every account.
 
 ## Commands
 
@@ -28,16 +29,20 @@ If the `cc` command is not installed, tell the user to run `/cc-setup`. After th
 | `cc add <name>` | add an account (browser login) |
 | `cc remove <name>` | stop using an account |
 | `cc clear <name>` | forget a limit recorded by mistake |
-| `cc vscode on` / `off` | keep the VS Code panel on a free account |
+| `cc vscode on` / `off` | run each VS Code window on its folder's account |
 | `cc pin` | keep a folder (and subfolders) on one account, with its own fallback rule |
 | `cc pins` / `cc unpin` | list or remove pinned folders |
-| `cc vscode fallback` | move a pinned folder's VS Code window to its fallback now |
+| `cc adopt [folder]` | bring a pinned folder's older chats from other accounts into its own (runs by itself on `cc pin`; `--dry-run` shows what) |
+| `cc vscode fallback` | answer a pin that asks: new chats in VS Code use its fallback |
+| `cc vscode migrate` | after upgrading from 2.2: show (then `--apply`) the clean-up of old folder settings |
 
 ## Pinned folders
 
 A pinned folder always uses its own account, in the terminal and in its VS Code window. At a
 limit it may only move to the fallback its pin names (normally the default account), or stop, or
 ask. A pinned account is never used outside its folders, and never covers another company's folder.
+Folder-level `.vscode/settings.json` cannot choose the account (VS Code reads the Claude
+extension's account settings from user settings only); never suggest writing one.
 Do not suggest switching a pinned folder to an account its pin does not allow; if the user wants
 that, they change the pin with `cc pin` or use `cc --acct <name>` for one session.
 
@@ -49,7 +54,9 @@ When the user hits a limit:
 
 - started with `cc`: exiting is enough, and `cc` continues on the next allowed account and
   sends "Continue where you left off." by itself;
-- in the VS Code panel with `cc vscode on`: run **Developer: Reload Window**;
+- in the VS Code panel with `cc vscode on`: the window moves by itself, so new chats start on the
+  next allowed account; the running chat stays, so start a new chat or reopen it from the
+  history list;
 - started with plain `claude`: exit and run `cc`.
 
 ## Never set CLAUDE_CONFIG_DIR to ~/.claude

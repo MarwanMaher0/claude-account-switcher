@@ -62,7 +62,8 @@ cd claude-account-switcher
 ./install.sh
 ```
 
-This copies four commands (`cc`, `cc-detect`, `cc-watch`, `cc-vscode`) into `~/.local/bin`.
+This copies five commands (`cc`, `cc-detect`, `cc-watch`, `cc-vscode`, `cc-claude-wrapper`) into
+`~/.local/bin`, and the VS Code companion extension's two files into `~/.local/share/cc-switch`.
 Nothing else on your machine changes.
 
 If it prints `NOTE: ... is not on your PATH`, run the `export` line it shows, add that line to
@@ -139,10 +140,10 @@ When that account hits its limit, `cc` ends the session, moves to the next accou
 ### Step 6: VS Code users only
 
 The Claude panel in VS Code starts Claude by itself, so `cc` cannot restart it for you. Two
-things make the panel follow your accounts.
+things make each VS Code window follow your accounts.
 
 **6a. Install the plugin in every account.** The plugin notices a limit the moment it happens and
-moves the panel. Plugins are installed per account, so do this once for each account.
+records it, which is what moves your windows. Plugins are installed per account, so do this once for each account.
 
 For the account you already had:
 
@@ -163,7 +164,7 @@ CLAUDE_CONFIG_DIR=~/.claude-work claude plugin install cc-switch
 > Claude Code then treats it as a brand-new install, and signing in can overwrite that
 > account's login. For the first account, always use the plain `claude` commands.
 
-**6b. Turn on panel sync:**
+**6b. Bind your VS Code windows:**
 
 ```bash
 cc vscode on
@@ -172,9 +173,23 @@ cc vscode on
 You should see:
 
 ```
-VS Code sync on · ~/.config/Code/User/settings.json
-VS Code panel -> personal
+VS Code: each window now runs Claude on its folder's account · ~/.config/Code/User/settings.json
+  wrapper    ~/.local/bin/cc-claude-wrapper
+  companion  cc-switch.cc-switch-binding installed with code
+  Open windows re-check within a few seconds. A chat already running stays where it is.
 ```
+
+This does two things, and changes VS Code settings only after the first one worked:
+
+1. It builds a small companion extension, **cc-switch window binding**, and installs it with
+   VS Code's `code` command (also `code-insiders`, `codium`, the snap and the macOS app). In each
+   window it points the Claude panel's history at the account that window runs on, re-checks
+   when a limit is recorded, and shows the account in the status bar: `Claude: acme`.
+2. It sets one **user** setting, `claudeCode.claudeProcessWrapper`, to `cc-claude-wrapper`. The
+   Claude extension then starts every Claude process through it, and the wrapper picks the
+   account for that window's folder, the same way `cc` does in a terminal. It also removes the
+   `CLAUDE_CONFIG_DIR` entry an older `cc` put into `claudeCode.environmentVariables`, after a
+   backup to `~/.claude-switch/vscode-settings.backup.json`.
 
 It finds the settings for VS Code, VS Code Insiders, VSCodium and Cursor on Linux and macOS. If it
 says no settings file was found, give the path yourself:
@@ -183,10 +198,24 @@ says no settings file was found, give the path yourself:
 cc vscode on --settings "/path/to/User/settings.json"
 ```
 
+If no `code` command is found, nothing is changed and it prints the path of the `.vsix` to
+install by hand (**Extensions: Install from VSIX…**); run `cc vscode on` again afterwards.
+`cc vscode on --wrapper-only` skips the companion: chats still follow your pins, but the history
+list may show another account's chats.
+
 **When the panel hits a limit:** your next message is not sent. Claude replies with which limit
-ran out, when it resets, and asks you to reload. Open the command palette (`Ctrl+Shift+P`, or
-`Cmd+Shift+P` on macOS) and run **Developer: Reload Window**. Your open chats come back on the next
-account.
+ran out and when it resets. Within a second the window moves: **new chats** start on the next
+allowed account, and a notification says so. The chat that hit the limit stays on its account;
+start a new chat, or close its tab and then reopen it from the history list (its transcript was
+carried over), to go on. Picking a chat whose tab is still open only brings that tab back, on the
+old account. When the limit resets, the window moves back by itself. New chats, the history list
+and resume follow the move at once; the panel's own account label and login status can show the
+old account until **Developer: Reload Window**.
+
+**Upgrading from 2.2 or earlier?** Run `cc vscode migrate`. It shows (and changes nothing) what
+older versions left behind: `CLAUDE_CONFIG_DIR` entries in pinned folders' `.vscode/settings.json`,
+which VS Code never read, and pinned folders' chats that landed in the wrong account because of
+it. `cc vscode migrate --apply` cleans them up; `cc vscode migrate --undo` reverts that.
 
 ## Separate projects: one account per folder
 
@@ -239,7 +268,7 @@ matter which account is "next" anywhere else.
 |---|---|
 | Switch to personal | The session moves to `personal` and the conversation comes with it |
 | Stop and wait for reset | `cc` stops and shows when the account resets |
-| Ask me each time | The terminal asks you. In VS Code, the message tells you the command to run |
+| Ask me each time | The terminal asks you. In VS Code, a notification offers **Use personal** or **Stay** |
 
 > [!NOTE]
 > Falling back to `personal` copies that chat into your personal account's folder **on this
@@ -259,23 +288,47 @@ cc unpin ~/work/acme                                       # remove one
 
 ### VS Code with pinned folders
 
-With **Terminal and VS Code**, `cc pin` writes the account into that folder's own VS Code
-settings, `<folder>/.vscode/settings.json`, not into your global settings. Each VS Code window
-then runs on its own folder's account, so several windows can run at once, each on a different
-account. Run **Developer: Reload Window** in windows that were already open.
+With **Terminal and VS Code** and `cc vscode on`, every VS Code window on a pinned folder runs
+Claude on that folder's account, so several windows can run at once, each on a different
+account. Windows that are already open re-check by themselves: new chats, the history list and
+resume follow without a reload (only the panel's own account label and login status may lag until
+**Developer: Reload Window**). `cc pin`
+writes nothing into the folder: VS Code only reads the Claude extension's account settings from
+your **user** settings (they are machine-scoped), which is why older versions' per-folder
+`.vscode/settings.json` entries never worked.
 
-That file usually lives inside the company's repository, so `cc pin`:
+**A folder's chats follow its pin.** Claude Code keeps each chat in the account it ran on, so a
+folder you pin after using it has its earlier chats elsewhere: in your default account, or in
+another company's. `cc pin` links them into the pin's account (hard links: nothing is moved,
+deleted or overwritten), and so do `cc vscode on`, each VS Code window before it is bound, and a
+resume. Your history list and open tabs keep working. A chat of another pinned folder never
+travels, and neither do chats an account holds because this folder was pinned to it before:
+re-pinning a folder from `acme` to `globex` leaves acme's chats with acme. On an install
+upgraded from 2.2, whose earlier re-pins cc never recorded, only the default account's chats
+come by themselves; for the rest the VS Code window offers **Bring N from &lt;account&gt;** (or run
+`cc adopt --from <account>`), which is then remembered for that pin.
 
-- adds one setting and leaves the rest of the file alone, and backs it up first, to
-  `~/.claude-switch/vscode-workspace-backups/`;
-- creates the file if it is missing, and hides it from git through `.git/info/exclude`. It never
-  edits the repository's `.gitignore`;
-- warns you and asks before writing if the file is tracked by git, because the change would show
-  up as a modification. `--yes` writes it anyway;
-- never writes `CLAUDE_CONFIG_DIR=~/.claude` for a folder pinned to your default account. It
-  writes an empty list instead, which overrides any global setting.
+```bash
+cc adopt --dry-run          # what would be brought into this folder's account
+cc adopt ~/work/acme        # do it by hand (it normally runs by itself)
+cc adopt --from acme        # also bring the chats a former (or possible former) pin's account holds
+```
 
-`cc unpin` removes what it wrote, deletes a file it created, and removes its exclude line.
+- **If cc cannot decide** the account for a pinned folder (a broken pin, a missing `cc-detect`),
+  Claude does not start in that window, rather than run on the wrong account. The error says to
+  run `cc status`; the status bar shows `Claude: ? (cc-switch error)`. In an unpinned folder
+  Claude then runs on the default account.
+- **Claude in a terminal** (`claudeCode.useTerminal`) does not use the process wrapper. In that
+  mode the companion puts cc's `claude` shim first on the window's terminal `PATH`, so terminal
+  Claude goes through the wrapper too and fails closed the same way. A shell startup file that
+  puts another `claude` ahead of it on `PATH` (or an alias) bypasses this; check with
+  `type claude` in that terminal.
+- **A workspace with several folders** runs on its first folder's account, as the Claude
+  extension does. If the folders are pinned to different accounts, the window warns you and the
+  status bar shows `Claude: mixed pins (using acme)`. Open them in separate windows instead.
+- **Remote windows** (SSH, WSL, containers) are not bound.
+
+`cc status` lists the open VS Code windows and the account each one is on.
 
 ### Never pause: the terminal versus the VS Code panel
 
@@ -285,7 +338,7 @@ That file usually lives inside the company's repository, so `cc pin`:
   tabs on one account each switch on their own. Change the message, or turn it off, in the
   [config](docs/CONFIG.md#auto-continue), or with `cc --no-auto-continue`.
 - **In the VS Code panel**, VS Code starts Claude itself, so `cc` cannot restart it or type into
-  it. After a switch you still run **Developer: Reload Window**, and each tab waits for you.
+  it. After a switch, new chats start on the next account, but each open chat waits for you.
 
 So when you need work to continue without you, run your sessions with `cc` in **VS Code's
 integrated terminal** rather than in the Claude panel.
@@ -313,9 +366,11 @@ Claude Code reports usage. It is off by default. See
 | Keep a session open at a limit instead of switching | `cc --manual` |
 | Forget a limit that `cc` recorded by mistake | `cc clear work` |
 | Pass options straight to Claude Code | `cc -- <claude options>` |
-| Stop managing the VS Code panel | `cc vscode off` |
+| Stop binding VS Code windows | `cc vscode off` |
+| Clean up after upgrading from 2.2 | `cc vscode migrate` (then `--apply`) |
 | Keep a folder on one account | `cc pin` (inside the folder) |
 | List or remove pinned folders | `cc pins`, `cc unpin` |
+| Bring a pinned folder's older chats into its account | `cc adopt` (runs by itself on `cc pin`) |
 | After a switch, wait for me instead of carrying on | `cc --no-auto-continue` |
 | See all commands | `cc help` |
 
@@ -349,9 +404,8 @@ Your first account cannot be removed.
 From the folder you cloned:
 
 ```bash
-cc vscode off        # only if you turned it on
 cc unpin <folder>    # for each pinned folder (cc pins lists them)
-./uninstall.sh
+./uninstall.sh       # also runs cc vscode off: removes the wrapper setting and the companion
 ```
 
 If you installed the plugin, remove it from each account the same way you added it:
@@ -369,7 +423,7 @@ Your accounts and their logins stay. To remove everything, also delete `~/.claud
 ## Good to know
 
 - **A running session cannot change accounts.** Claude Code reads the account once, when it starts.
-  That is why `cc` restarts the session in the terminal, and why VS Code needs a window reload.
+  That is why `cc` restarts the session in the terminal, and why in VS Code only new chats move.
 - **`cc` only switches sessions it started.** A plain `claude` does not switch, but its limits are
   still noticed, so the next `cc` skips that account.
 - **claude.ai in your browser is separate.** This tool cannot move web chats or their limits.
@@ -385,10 +439,12 @@ Your accounts and their logins stay. To remove everything, also delete `~/.claud
 - `cc add` copies only `settings.json` and `CLAUDE.md` into a new account.
 - To carry a conversation across, chats are copied or hard-linked between your account folders,
   **on your own machine only**.
-- `cc vscode on` changes one VS Code setting, `claudeCode.environmentVariables`, and first backs
-  the file up to `~/.claude-switch/vscode-settings.backup.json`.
-- `cc pin` writes that same setting into the pinned folder's `.vscode/settings.json`, backs the
-  file up first, and keeps a file it created out of git through `.git/info/exclude`.
+- `cc vscode on` sets one VS Code user setting, `claudeCode.claudeProcessWrapper`, removes its own
+  `CLAUDE_CONFIG_DIR` entry from `claudeCode.environmentVariables`, and first backs the file up
+  to `~/.claude-switch/vscode-settings.backup.json`. The companion extension it installs is built
+  on your machine from two files in this repository, has no dependencies and makes no network
+  call.
+- `cc pin` writes nothing into your folders.
 - Falling back from a company account to `personal` copies that chat into the personal account's
   folder, on this machine only.
 - The optional early switch reads the usage Claude Code already passes to status line commands.
