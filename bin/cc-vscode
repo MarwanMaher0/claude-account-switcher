@@ -1,38 +1,48 @@
 #!/usr/bin/env python3
-"""Keep the VS Code Claude panel on an account that still has quota.
+"""Run Claude in each VS Code window on the account its folder is pinned to.
 
-The panel starts Claude itself, so the `cc` launcher never wraps it. What the
-extension does honour is `claudeCode.environmentVariables` in VS Code's user
-settings, and it follows a CLAUDE_CONFIG_DIR change there: new chats start on the
-new account, and reloading the window moves the open ones. The panel only resumes
-a chat it can find in the active account's projects folder, so a switch also
-carries the last week's chats across — as hard links, so every account sees the
-same conversation instead of copies that drift apart.
+VS Code reads claudeCode.environmentVariables and claudeCode.claudeProcessWrapper
+from USER settings only: the Claude extension declares both machine-scoped, and VS
+Code ignores machine-scoped values in a folder's .vscode/settings.json. A per-folder
+CLAUDE_CONFIG_DIR therefore never worked. cc binds windows in two parts instead:
+
+  cc-claude-wrapper   set once as claudeCode.claudeProcessWrapper. The extension starts
+                      every Claude process through it; it asks `cc-detect bind` which
+                      account the session's folder runs on and execs Claude there. It
+                      fails closed in a pinned folder when that cannot be decided.
+  companion extension cc-switch.cc-switch-binding, built and installed by `on`. In each
+                      window it sets the extension host's CLAUDE_CONFIG_DIR to the same
+                      account, so the panel's history and resume match it, and re-binds
+                      when a limit moves the window to its pin's fallback (or back).
+
+The default account is never written as CLAUDE_CONFIG_DIR: pointing the variable at
+~/.claude makes Claude Code run onboarding and replace that account's login.
 
 Subcommands
-  on [--settings <path>]   manage the panel, and sync now
-  off                      stop managing it; the panel goes back to the default account
-  sync [--quiet]           point the panel at the account `cc-detect pick` chooses
-  carry <id>               link the last week's chats from every other account into <id>
-  current                  the account the panel is set to use
-  enabled                  exit 0 when sync is on
-  status                   one line for `cc status`
-
-Pinned folders (see `cc pin`) get their own window-level setting instead, written to
-<folder>/.vscode/settings.json, so each VS Code window runs on its folder's account:
-  workspace-apply <folder> [--yes]   point that folder's window at its pinned account
-                                     (exit 4: the file is tracked by git; --yes writes anyway)
-  workspace-clear <folder>           undo what workspace-apply wrote
-  fallback [folder]                  for a pin that asks: move its window to the fallback now
-
-`sync` also refreshes every pinned folder's window. Accounts reserved for pinned folders
-are never chosen for the global setting, and their chats are never carried out of them.
-
-The default account is never written as CLAUDE_CONFIG_DIR. Pointing the variable at
-~/.claude makes Claude Code run onboarding and replace that account's login, so
-choosing the default account removes the variable instead.
+  on [--settings <path>] [--wrapper-only]
+                           build and install the companion, then set the wrapper in user
+                           settings and drop cc's CLAUDE_CONFIG_DIR entry there. Settings
+                           change only once the install is verified; --wrapper-only sets
+                           the wrapper anyway (chats follow pins, history may not)
+  off [--restore]          remove the wrapper setting and the companion; --restore also
+                           puts back claudeCode.environmentVariables from the backup
+  sync [--quiet]           nudge open windows to re-check (touches bind-epoch)
+  status                   the setup and the open windows, for `cc status`
+  current [folder]         the account a window on that folder starts new chats on
+  enabled                  exit 0 when the wrapper is set up
+  fallback [folder] [account|stay]
+                           answer a pin that asks: new chats use the fallback (default) or
+                           stay on the limited account, until the limit has passed
+  carry <id>               link the last week's unpinned chats from other accounts into <id>
+  carry --folder <f> --from <a> --to <b>
+                           link the last week's chats of one folder from <a> into <b>
+  migrate [--apply|--undo] [--verbose]
+                           clean up what older versions wrote into folders' .vscode
+                           settings, and move each pinned folder's chats into its pinned
+                           account. A dry run unless --apply; --undo reverts the last run
 """
 import glob
+import hashlib
 import json
 import os
 import re
@@ -41,6 +51,7 @@ import stat
 import subprocess
 import sys
 import time
+import zipfile
 
 HOME = os.path.expanduser("~")
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -48,10 +59,19 @@ DETECT = os.path.join(HERE, "cc-detect")
 SWITCH_DIR = os.path.join(HOME, ".claude-switch")
 CONFIG = os.path.join(SWITCH_DIR, "config.json")
 BACKUP = os.path.join(SWITCH_DIR, "vscode-settings.backup.json")
+BINDING = os.path.join(SWITCH_DIR, "vscode-binding.json")
+EPOCH = os.path.join(SWITCH_DIR, "bind-epoch")
+WINDOWS = os.path.join(SWITCH_DIR, "windows")
+VSIX = os.path.join(SWITCH_DIR, "cc-switch-binding.vsix")
 WS_STATE = os.path.join(SWITCH_DIR, "vscode-workspaces.json")
-WS_BACKUPS = os.path.join(SWITCH_DIR, "vscode-workspace-backups")
+WS_MIGRATED = os.path.join(SWITCH_DIR, "vscode-workspaces.migrated.json")
+MANIFEST = os.path.join(SWITCH_DIR, "vscode-migration.json")
+MIG_BACKUPS = os.path.join(SWITCH_DIR, "vscode-migration-backups")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
 KEY = "claudeCode.environmentVariables"
+WRAPPER_KEY = "claudeCode.claudeProcessWrapper"
+EXT_ID = "cc-switch.cc-switch-binding"
+WRAPPER_NAME = "cc-claude-wrapper"
 CARRY_DAYS = 7
 
 CANDIDATES = [
@@ -65,19 +85,32 @@ CANDIDATES = [
     "~/Library/Application Support/Cursor/User/settings.json",
 ]
 
+CLI_CANDIDATES = [
+    "code", "code-insiders", "codium", "/snap/bin/code",
+    "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+    "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders",
+    "/Applications/VSCodium.app/Contents/Resources/app/bin/codium",
+    "~/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+]
+
 
 def tilde(path):
     # Also match the resolved home: workspace paths are resolved, and on macOS /var is a
     # link to /private/var.
     for home in (HOME, os.path.realpath(HOME)):
-        if path.startswith(home + os.sep):
+        if path == home or path.startswith(home + os.sep):
             return "~" + path[len(home):]
     return path
 
 
+def say(msg, quiet=False):
+    if not quiet:
+        print(msg)
+
+
 def detect(*args):
     """Run cc-detect: its stdout on success, None on a non-zero exit."""
-    res = subprocess.run([DETECT, *args], capture_output=True, text=True)
+    res = subprocess.run([DETECT, *args], capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if res.returncode == 3:              # config error: surface it, never guess
         sys.stderr.write(res.stderr)
         sys.exit(3)
@@ -114,6 +147,22 @@ def settings_path(cfg):
         if os.path.isfile(os.path.expanduser(cand)):
             return os.path.expanduser(cand)
     return None
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def touch_epoch():
+    os.makedirs(SWITCH_DIR, exist_ok=True)
+    tmp = f"{EPOCH}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        fh.write(f"{time.time():.3f}\n")
+    os.replace(tmp, EPOCH)
 
 
 # ---------------------------------------------------- VS Code settings (JSONC) ----
@@ -244,31 +293,9 @@ def _replace_text(path, text):
     os.replace(tmp, path)
 
 
-def panel_config_dir(path):
-    """The CLAUDE_CONFIG_DIR the panel is set to launch with, or None."""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = loads_jsonc(fh.read())
-    except (OSError, ValueError):
-        return None
-    entries = data.get(KEY) if isinstance(data, dict) else None
-    for entry in entries if isinstance(entries, list) else []:
-        if isinstance(entry, dict) and entry.get("name") == "CLAUDE_CONFIG_DIR":
-            return entry.get("value")
-    return None
 
-
-def set_config_dir(path, config_dir, keep_key=False, backup=BACKUP):
-    """Set CLAUDE_CONFIG_DIR in the panel's environment, or remove it when
-    config_dir is None. Returns True when the file changed.
-
-    keep_key writes the setting even when it ends up empty. A workspace needs that: VS
-    Code replaces a user-level array with the workspace one rather than merging them,
-    so an empty workspace list is what keeps a user-level CLAUDE_CONFIG_DIR out of a
-    window pinned to the default account."""
-    if config_dir and os.path.realpath(config_dir) == os.path.realpath(DEFAULT_DIR):
-        raise ValueError("refusing to set CLAUDE_CONFIG_DIR to ~/.claude")
-    path = os.path.realpath(path)           # keep a symlinked settings file linked
+def read_settings(path):
+    """(text, data) of a settings file; ({}, "{}\\n") when it does not exist."""
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
@@ -280,46 +307,34 @@ def set_config_dir(path, config_dir, keep_key=False, backup=BACKUP):
         raise ValueError(f"{tilde(path)} does not parse ({exc})")
     if not isinstance(data, dict):
         raise ValueError(f"{tilde(path)} is not a settings object")
+    return text, data
 
-    current = data.get(KEY)
-    kept = [e for e in current
-            if not (isinstance(e, dict) and e.get("name") == "CLAUDE_CONFIG_DIR")] \
-        if isinstance(current, list) else []
-    wanted = kept + ([{"name": "CLAUDE_CONFIG_DIR", "value": config_dir}] if config_dir else [])
-    if current == wanted or (current is None and not wanted and not keep_key):
-        return False
 
-    value = json.dumps(wanted, indent=2).replace("\n", "\n  ")
-    span = find_key(text, KEY)
+def set_key_text(text, key, value):
+    """The settings text with a top-level key set to value; every other byte kept."""
+    data = loads_jsonc(text)
+    rendered = json.dumps(value, indent=2).replace("\n", "\n  ")
+    span = find_key(text, key)
     if span:
-        updated = text[:span[1]] + value + text[span[2]:]
+        updated = text[:span[1]] + rendered + text[span[2]:]
     else:
         brace = _skip_ws(text, 0)
         rest = _skip_ws(text, brace + 1)
         sep = "" if rest < len(text) and text[rest] == "}" else ","
-        updated = f'{text[:brace + 1]}\n  "{KEY}": {value}{sep}{text[brace + 1:]}'
-
+        updated = f'{text[:brace + 1]}\n  {json.dumps(key)}: {rendered}{sep}{text[brace + 1:]}'
     expected = dict(data)
-    expected[KEY] = wanted
+    expected[key] = value
     if loads_jsonc(updated) != expected:
         raise ValueError("the edit did not round-trip, so nothing was written")
-
-    if backup and os.path.exists(path) and not os.path.exists(backup):
-        os.makedirs(os.path.dirname(backup), exist_ok=True)
-        shutil.copy2(path, backup)
-        os.chmod(backup, 0o600)
-    _replace_text(path, updated)
-    return True
+    return updated
 
 
-def remove_key(path):
-    """Delete the top-level KEY from a settings file in place. True if it changed."""
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
+def remove_key_text(text, key):
+    """The settings text without a top-level key; every other byte kept."""
     data = loads_jsonc(text)
-    span = find_key(text, KEY)
+    span = find_key(text, key)
     if not span:
-        return False
+        return text
     start, end = span[0], span[2]
     after = _skip_ws(text, end)
     if after < len(text) and text[after] == ",":
@@ -338,11 +353,161 @@ def remove_key(path):
         end += 1
     updated = text[:start] + text[end:]
     expected = dict(data)
-    expected.pop(KEY, None)
+    expected.pop(key, None)
     if loads_jsonc(updated) != expected:
         raise ValueError("the edit did not round-trip, so nothing was written")
-    _replace_text(path, updated)
-    return True
+    return updated
+
+
+def is_config_dir(entry):
+    return isinstance(entry, dict) and entry.get("name") == "CLAUDE_CONFIG_DIR"
+
+
+def account_dirs():
+    return {os.path.realpath(os.path.expanduser(a["dir"])): a["id"] for a in accounts()}
+
+
+def written_by_cc(entry, dirs=None):
+    """True for a CLAUDE_CONFIG_DIR entry whose value is one of cc's account dirs."""
+    if not is_config_dir(entry) or not isinstance(entry.get("value"), str) or not entry["value"]:
+        return False
+    dirs = account_dirs() if dirs is None else dirs
+    return os.path.realpath(os.path.expanduser(entry["value"])) in dirs
+
+
+def backup_settings(path):
+    """Copy the user's settings before cc changes them. The first copy ever made is kept
+    as vscode-settings.backup.json; later ones get a timestamp."""
+    if not os.path.exists(path):
+        return None
+    os.makedirs(SWITCH_DIR, exist_ok=True)
+    dest = BACKUP if not os.path.exists(BACKUP) else os.path.join(
+        SWITCH_DIR, time.strftime("vscode-settings.backup.%Y%m%d-%H%M%S.json"))
+    shutil.copy2(path, dest)
+    os.chmod(dest, 0o600)
+    return dest
+
+
+# ------------------------------------------------------------- companion ----
+def extension_source():
+    for cand in (os.path.join(os.path.dirname(HERE), "vscode", "cc-switch-binding"),
+                 os.path.join(os.environ.get("CC_SHARE_DIR") or os.path.join(HOME, ".local", "share", "cc-switch"),
+                              "vscode", "cc-switch-binding")):
+        if os.path.isfile(os.path.join(cand, "package.json")) and os.path.isfile(os.path.join(cand, "extension.js")):
+            return cand
+    return None
+
+
+def build_vsix(dest=VSIX):
+    """Package the companion extension. A .vsix is a zip with a manifest; building it
+    here needs no Node tooling."""
+    src = extension_source()
+    if not src:
+        raise RuntimeError("the companion extension's files were not found next to cc "
+                           "(vscode/cc-switch-binding); reinstall cc")
+    with open(os.path.join(src, "package.json"), encoding="utf-8") as fh:
+        pkg = json.load(fh)
+    esc = lambda v: (str(v).replace("&", "&amp;").replace("<", "&lt;")   # noqa: E731
+                     .replace(">", "&gt;").replace('"', "&quot;"))
+    manifest = f"""<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+  <Metadata>
+    <Identity Language="en-US" Id="{esc(pkg['name'])}" Version="{esc(pkg['version'])}" Publisher="{esc(pkg['publisher'])}" />
+    <DisplayName>{esc(pkg.get('displayName', pkg['name']))}</DisplayName>
+    <Description xml:space="preserve">{esc(pkg.get('description', ''))}</Description>
+    <Categories>Other</Categories>
+    <Properties>
+      <Property Id="Microsoft.VisualStudio.Code.Engine" Value="{esc(pkg['engines']['vscode'])}" />
+      <Property Id="Microsoft.VisualStudio.Code.ExtensionKind" Value="workspace" />
+    </Properties>
+  </Metadata>
+  <Installation>
+    <InstallationTarget Id="Microsoft.VisualStudio.Code"/>
+  </Installation>
+  <Dependencies/>
+  <Assets>
+    <Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true" />
+  </Assets>
+</PackageManifest>
+"""
+    types = ('<?xml version="1.0" encoding="utf-8"?>\n'
+             '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+             '<Default Extension=".json" ContentType="application/json"/>'
+             '<Default Extension=".js" ContentType="application/javascript"/>'
+             '<Default Extension=".vsixmanifest" ContentType="text/xml"/>'
+             '</Types>\n')
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = f"{dest}.{os.getpid()}.tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", types)
+        zf.writestr("extension.vsixmanifest", manifest)
+        for name in ("package.json", "extension.js"):
+            zf.write(os.path.join(src, name), f"extension/{name}")
+    os.replace(tmp, dest)
+    return dest
+
+
+def vscode_clis():
+    """VS Code command-line tools on this machine. CC_VSCODE_CLI (colon-separated)
+    replaces the search, which is how the tests keep away from a real VS Code."""
+    if "CC_VSCODE_CLI" in os.environ:
+        cands = [c for c in os.environ["CC_VSCODE_CLI"].split(":") if c]
+    else:
+        cands = CLI_CANDIDATES
+    found, seen = [], set()
+    for cand in cands:
+        path = shutil.which(os.path.expanduser(cand)) if os.sep not in cand else os.path.expanduser(cand)
+        if not path or not os.path.isfile(path) or not os.access(path, os.X_OK):
+            continue
+        key = os.path.realpath(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(path)
+    return found
+
+
+def run_cli(cli, *args):
+    try:
+        res = subprocess.run([cli, *args], capture_output=True, text=True, timeout=120,
+                             stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, str(exc)
+    return res.returncode, (res.stdout or "") + (res.stderr or "")
+
+
+def companion_installed(cli):
+    rc, out = run_cli(cli, "--list-extensions")
+    return rc == 0 and EXT_ID in {line.strip().lower() for line in out.splitlines()}
+
+
+def tool_path(name):
+    """Where a cc tool lives for VS Code: the installed copy in ~/.local/bin when it is the
+    same file as this one, so a branch switch in a checkout cannot break every window;
+    otherwise the copy beside this script."""
+    here = os.path.join(HERE, name)
+    installed = os.path.join(os.environ.get("CC_INSTALL_DIR") or os.path.join(HOME, ".local", "bin"), name)
+    if os.path.realpath(installed) != os.path.realpath(here) and os.path.isfile(installed) \
+            and os.path.isfile(here) and sha256(installed) == sha256(here):
+        return installed
+    return here
+
+
+def write_binding():
+    data = {"version": 1, "detect": tool_path("cc-detect"), "vscode": tool_path("cc-vscode"),
+            "wrapper": tool_path(WRAPPER_NAME), "python": sys.executable}
+    os.makedirs(SWITCH_DIR, exist_ok=True)
+    tmp = f"{BINDING}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, BINDING)
+    return data
+
+
+def ours(value):
+    """True when a claudeProcessWrapper value is cc's wrapper."""
+    return isinstance(value, str) and os.path.basename(value) == WRAPPER_NAME
 
 
 # ------------------------------------------------------------------- carry ----
@@ -360,10 +525,33 @@ def slugify(path):
     return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(path))
 
 
+def aliases(path):
+    """The spellings of a folder Claude Code may have slugged a transcript under. Pins
+    are stored with symlinks resolved, but Claude names a project after the path it was
+    started in, which can go through a link: a home behind a symlink, or on macOS /var
+    and /tmp, which are links into /private."""
+    path = os.path.abspath(path)
+    out = [path]
+    pairs = [(os.path.realpath(HOME), HOME), ("/private/var/", "/var/"), ("/private/tmp/", "/tmp/")]
+    for real, link in pairs:
+        if real == link:
+            continue
+        for a, b in ((real, link), (link, real)):
+            a_dir = a.rstrip("/")
+            if path == a_dir or path.startswith(a_dir + "/"):
+                cand = b.rstrip("/") + path[len(a_dir):]
+                if cand not in out and os.path.realpath(cand) == os.path.realpath(path):
+                    out.append(cand)
+    return out
+
+
 def under(slug, folder):
     """True when a project slug is the folder's own or one of its subfolders'."""
-    root = slugify(folder)
-    return slug == root or slug.startswith(root + "-")
+    for spelling in aliases(folder):
+        root = slugify(spelling)
+        if slug == root or slug.startswith(root + "-"):
+            return True
+    return False
 
 
 def carry(to_id, from_ids=None, folder=None):
@@ -427,16 +615,57 @@ def carry(to_id, from_ids=None, folder=None):
     return moved
 
 
-# --------------------------------------------------------------- workspaces ----
-# A pinned folder's window gets its own setting in <folder>/.vscode/settings.json. That
-# file often sits inside a company repository, so: merge into it, never replace it; back
-# it up before the first change; keep a file we created out of git through
-# .git/info/exclude (never the repo's .gitignore); and never write to a tracked file
-# without the user saying so.
-class Tracked(Exception):
-    pass
 
 
+# ----------------------------------------------------------------- windows ----
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError, OverflowError):
+        return False
+    return True
+
+
+def open_windows():
+    """The windows the companion reports, newest first. Files of windows that have gone
+    away (a crash, a closed window) are removed."""
+    rows = []
+    for path in glob.glob(os.path.join(glob.escape(WINDOWS), "*.json")):
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+            pid = int(data.get("pid") or os.path.basename(path)[:-5])
+        except (OSError, ValueError, TypeError):
+            continue
+        if not pid_alive(pid):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        data["pid"] = pid
+        rows.append(data)
+    rows.sort(key=lambda d: -int(d.get("ts") or 0))
+    return rows
+
+
+def bind_for(folder):
+    out = detect("bind", folder or "-", "--json")
+    try:
+        return json.loads(out) if out else None
+    except ValueError:
+        return None
+
+
+# ------------------------------------------------------------------ migrate ----
+# Older versions wrote CLAUDE_CONFIG_DIR into pinned folders' .vscode/settings.json,
+# which VS Code ignores, while every window really ran on the user-level account. So a
+# pinned folder's VS Code chats sit in whichever account the global setting named at
+# the time. `migrate` undoes the folder files and moves those chats home.
 def load_ws():
     try:
         with open(WS_STATE) as fh:
@@ -446,220 +675,581 @@ def load_ws():
     return data if isinstance(data, dict) else {}
 
 
-def save_ws(data):
-    os.makedirs(SWITCH_DIR, exist_ok=True)
-    tmp = f"{WS_STATE}.{os.getpid()}.tmp"
-    with open(tmp, "w") as fh:
-        json.dump(data, fh, indent=2)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, WS_STATE)
-
-
-def git(folder, *args):
-    """(exit code, stdout) of a git command in folder; (None, "") without git."""
-    if not shutil.which("git"):
-        return None, ""
-    try:
-        res = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True)
-    except OSError:
-        return None, ""
-    return res.returncode, res.stdout.strip()
-
-
 def ws_file(folder):
     return os.path.join(folder, ".vscode", "settings.json")
 
 
-def git_tracked(folder):
-    rc, _ = git(folder, "ls-files", "--error-unmatch", "--", ".vscode/settings.json")
-    return rc == 0
+def slug_under(slug, folder, depth=8):
+    """True when a project slug names `folder` (under any of its spellings) or a path
+    inside it. A slug is lossy (every non-alphanumeric becomes '-'), so a name such as
+    <slug>-extra is checked against the folder's real subfolders; <slug>--x (a dot
+    folder such as .claude/worktrees) is taken as inside."""
+    return any(_slug_under(slug, spelling, depth) for spelling in aliases(folder))
 
 
-def add_exclude(folder):
-    """Keep a settings file we created out of git status. Returns what to undo, or None."""
-    rc, top = git(folder, "rev-parse", "--show-toplevel")
-    if rc != 0 or not top:
-        return None
-    rc, _ = git(folder, "check-ignore", "-q", "--", ".vscode/settings.json")
-    if rc == 0:
-        return None                          # already ignored: nothing to add
-    rc, exclude = git(folder, "rev-parse", "--git-path", "info/exclude")
-    if rc != 0 or not exclude:
-        return None
-    exclude = os.path.join(folder, exclude) if not os.path.isabs(exclude) else exclude
-    rel = os.path.relpath(ws_file(folder), os.path.realpath(top)).replace(os.sep, "/")
-    line = "/" + rel
+def _slug_under(slug, folder, depth):
+    root = slugify(folder)
+    if slug == root or slug.startswith(root + "--"):
+        return True
+    if not slug.startswith(root + "-") or depth <= 0:
+        return False
     try:
-        with open(exclude, encoding="utf-8") as fh:
-            text = fh.read()
-    except FileNotFoundError:
-        text = ""
-    if line in text.splitlines():
-        return None
-    os.makedirs(os.path.dirname(exclude), exist_ok=True)
-    with open(exclude, "a", encoding="utf-8") as fh:
-        if text and not text.endswith("\n"):
-            fh.write("\n")
-        fh.write(line + "\n")
-    return {"file": exclude, "line": line}
-
-
-def drop_exclude(entry):
-    try:
-        with open(entry["file"], encoding="utf-8") as fh:
-            lines = fh.read().splitlines(True)
+        names = os.listdir(folder)
     except OSError:
-        return
-    kept = [ln for ln in lines if ln.rstrip("\n") != entry["line"]]
-    if kept != lines:
-        _replace_text(entry["file"], "".join(kept))
-
-
-def has_key(path):
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = loads_jsonc(fh.read())
-    except (OSError, ValueError):
         return False
-    return isinstance(data, dict) and KEY in data
-
-
-def wanted_account(pin, entry):
-    """The account a pinned folder's window should be on right now. A fallback chosen
-    by hand for a pin that asks lasts until the pinned account is free again."""
-    verb, _, aid = (detect("start-for", pin["path"]) or "stop").partition(" ")
-    if verb == "use":
-        entry.pop("fallbackChosen", None)
-        return aid
-    if verb == "switch" or (verb == "ask" and entry.get("fallbackChosen")):
-        return aid
-    return pin["account"]
-
-
-def workspace_apply(folder, yes=False, quiet=False):
-    """Point a pinned folder's VS Code window at the account its pin allows now."""
-    folder = os.path.realpath(folder)
-    pin = next((p for p in pins() if p["path"] == folder), None)
-    if not pin:
-        raise SystemExit(f"cc-vscode: {tilde(folder)} is not pinned")
-    path = ws_file(folder)
-    state = load_ws()
-    entry = state.get(folder)
-    if entry is None:
-        if git_tracked(folder) and not yes:
-            raise Tracked(path)
-        existed = os.path.exists(path)
-        entry = {"created": not existed, "keyAdded": not has_key(path), "exclude": None}
-        if existed:
-            os.makedirs(WS_BACKUPS, mode=0o700, exist_ok=True)
-            backup = os.path.join(WS_BACKUPS, slugify(folder).strip("-") + ".settings.json")
-            if not os.path.exists(backup):
-                shutil.copy2(path, backup)
-                os.chmod(backup, 0o600)
-            entry["backup"] = backup
-        else:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write("{}\n")
-            if not git_tracked(folder):
-                entry["exclude"] = add_exclude(folder)
-
-    target = wanted_account(pin, entry)
-    acct = next(a for a in accounts() if a["id"] == target)
-    previous = entry.get("account")
-    changed = set_config_dir(path, None if acct["default"] else acct["dir"], keep_key=True, backup=None)
-    moved = 0
-    if previous and previous != target:
-        moved = carry(target, from_ids=[previous], folder=folder)
-    entry["account"] = target
-    state[folder] = entry
-    save_ws(state)
-    if changed and not quiet:
-        print(f"VS Code window for {tilde(folder)} -> {target}"
-              + (f" · {moved} chats carried over" if moved else ""))
-    return target
-
-
-def workspace_clear(folder):
-    folder = os.path.realpath(folder)
-    state = load_ws()
-    entry = state.pop(folder, None)
-    if entry is None:
-        return False
-    path = ws_file(folder)
-    if os.path.exists(path):
-        set_config_dir(path, None, keep_key=True, backup=None)
-        with open(path, encoding="utf-8") as fh:
-            data = loads_jsonc(fh.read())
-        if entry.get("keyAdded") and data.get(KEY) == []:
-            remove_key(path)
-            with open(path, encoding="utf-8") as fh:
-                data = loads_jsonc(fh.read())
-        if entry.get("created") and data == {}:
-            os.remove(path)
-            try:
-                os.rmdir(os.path.dirname(path))
-            except OSError:
-                pass                         # .vscode holds other files: leave it
-    if entry.get("exclude") and not os.path.exists(path):
-        drop_exclude(entry["exclude"])
-    save_ws(state)
-    return True
-
-
-def sync_workspaces(quiet=True):
-    """Refresh every pinned folder's window. Only folders already set up by `cc pin`:
-    a folder whose tracked settings file the user declined is never written here."""
-    state = load_ws()
-    for pin in pins():
-        if not pin["vscode"] or pin["path"] not in state or not os.path.isdir(pin["path"]):
+    for name in names:
+        sub = os.path.join(folder, name)
+        if not os.path.isdir(sub):
             continue
-        try:
-            workspace_apply(pin["path"], quiet=quiet)
-        except (ValueError, OSError, Tracked) as exc:
-            print(f"cc-vscode: {tilde(pin['path'])}: VS Code settings left untouched: {exc}",
-                  file=sys.stderr)
+        s = slugify(sub)
+        if slug == s or slug.startswith(s + "-"):
+            if _slug_under(slug, sub, depth - 1):
+                return True
+    return False
 
 
-# -------------------------------------------------------------------- sync ----
-def current(cfg):
-    path = settings_path(cfg)
-    value = panel_config_dir(path) if path else None
-    if not value:
-        default = next((a for a in accounts() if a["default"]), None)
-        return default["id"] if default else "(default)"
-    found = detect("account-of", value)
-    return found.split("\t")[0] if found else value
+def slug_owner(slug, pin_rows):
+    best = None
+    for p in pin_rows:
+        if slug_under(slug, p["path"]) and (best is None or len(p["path"]) > len(best["path"])):
+            best = p
+    return best
 
 
-def sync(quiet=False, force_carry=False):
-    def say(msg):
-        if not quiet:
-            print(msg)
-
-    sync_workspaces(quiet)
-    cfg = load_config()
-    if not (cfg.get("vscode") or {}).get("enabled"):
-        return 0
-    path = settings_path(cfg)
-    if not path:
-        say("VS Code sync is on but no settings file was found: cc vscode on --settings <path>")
-        return 1
-    target = detect("pick")
-    if not target:
-        say("every account is limited — the VS Code panel stays where it is")
-        return 1
-    acct = next(a for a in accounts() if a["id"] == target)
+def same_file(a, b):
     try:
-        changed = set_config_dir(path, None if acct["default"] else acct["dir"])
+        sa, sb = os.stat(a), os.stat(b)
+    except OSError:
+        return False
+    if (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino):
+        return True
+    return sa.st_size == sb.st_size and sha256(a) == sha256(b)
+
+
+def plan_settings(dirs):
+    """Actions that undo what workspace-apply wrote, plus notes for what is left."""
+    actions, notes = [], []
+    ws = load_ws()
+    for folder, entry in sorted(ws.items()):
+        if not isinstance(entry, dict):
+            continue
+        path = ws_file(folder)
+        if not os.path.exists(path):
+            notes.append(f"{tilde(path)}: already gone")
+        else:
+            try:
+                text, data = read_settings(path)
+            except ValueError as exc:
+                notes.append(f"{tilde(path)}: left alone, {exc}")
+                continue
+            current = data.get(KEY)
+            new_text = text
+            if isinstance(current, list):
+                mine = [e for e in current if written_by_cc(e, dirs)]
+                theirs = [e for e in current if is_config_dir(e) and e not in mine]
+                remaining = [e for e in current if e not in mine]
+                for e in theirs:
+                    notes.append(f"{tilde(path)}: left CLAUDE_CONFIG_DIR={e.get('value')!r}, "
+                                 "which is not one of cc's accounts (changed since cc wrote it?)")
+                value = remaining
+                if not entry.get("keyAdded", True) and entry.get("backup"):
+                    try:
+                        _, orig = read_settings(entry["backup"])
+                    except (ValueError, OSError):
+                        orig = {}
+                    restore = [e for e in (orig.get(KEY) or []) if is_config_dir(e)] \
+                        if isinstance(orig.get(KEY), list) else []
+                    value = remaining + [e for e in restore if e not in remaining]
+                    if KEY not in orig and not value:
+                        value = None
+                elif not value:
+                    value = None
+                if value != current:
+                    new_text = remove_key_text(text, KEY) if value is None else set_key_text(text, KEY, value)
+            elif current is not None:
+                notes.append(f"{tilde(path)}: {KEY} is not a list; left alone")
+            delete = entry.get("created") and loads_jsonc(new_text) == {}
+            if delete:
+                actions.append({"kind": "delete", "path": path,
+                                "why": "cc created it and nothing else is in it"})
+                vdir = os.path.dirname(path)
+                if [n for n in os.listdir(vdir) if n != "settings.json"] == []:
+                    actions.append({"kind": "rmdir", "path": vdir, "why": "empty"})
+            elif new_text != text:
+                actions.append({"kind": "write", "path": path, "text": new_text,
+                                "why": "remove the CLAUDE_CONFIG_DIR entry cc wrote"
+                                + ("" if entry.get("keyAdded", True) else ", restore the original")})
+            else:
+                notes.append(f"{tilde(path)}: nothing of cc's left in it")
+        exc = entry.get("exclude")
+        if isinstance(exc, dict) and exc.get("file") and exc.get("line"):
+            gone = not os.path.exists(path) or any(a["kind"] == "delete" and a["path"] == path for a in actions)
+            try:
+                with open(exc["file"], encoding="utf-8") as fh:
+                    present = exc["line"] in fh.read().splitlines()
+            except OSError:
+                present = False
+            if gone and present:
+                actions.append({"kind": "exclude", "file": exc["file"], "line": exc["line"],
+                                "why": "the line cc added for that file"})
+    if ws:
+        actions.append({"kind": "rename", "src": WS_STATE, "dst": WS_MIGRATED,
+                        "why": "cc no longer manages folder settings"})
+    return actions, notes
+
+
+def plan_chats(dirs):
+    """Moves that put each pinned folder's chats into its pinned account."""
+    actions, notes = [], []
+    pin_rows = pins()
+    accts = accounts()
+    by_id = {a["id"]: a for a in accts}
+    for acct in accts:
+        proj = os.path.join(acct["dir"], "projects")
+        try:
+            slugs = sorted(os.listdir(proj))
+        except OSError:
+            continue
+        for slug in slugs:
+            if not os.path.isdir(os.path.join(proj, slug)):
+                continue
+            owner = slug_owner(slug, pin_rows)
+            if owner is None or owner["account"] == acct["id"] or owner["account"] not in by_id:
+                continue
+            dest_root = by_id[owner["account"]]["dir"]
+            sessions = set()
+            for dirpath, _dirs, files in os.walk(os.path.join(proj, slug)):
+                for name in sorted(files):
+                    src = os.path.join(dirpath, name)
+                    rel = os.path.relpath(src, acct["dir"])
+                    if dirpath == os.path.join(proj, slug) and name.endswith(".jsonl"):
+                        sessions.add(name[:-6])
+                    actions.extend(move_action(src, os.path.join(dest_root, rel), acct["id"],
+                                               owner, notes))
+            # Rewind checkpoints and todo lists of those sessions, best effort.
+            for sid in sorted(sessions):
+                extra = glob.glob(os.path.join(glob.escape(acct["dir"]), "file-history", glob.escape(sid), "**"),
+                                  recursive=True)
+                extra += glob.glob(os.path.join(glob.escape(acct["dir"]), "todos", glob.escape(sid) + "-*.json"))
+                for src in sorted(extra):
+                    if os.path.isfile(src) and not os.path.islink(src):
+                        rel = os.path.relpath(src, acct["dir"])
+                        actions.extend(move_action(src, os.path.join(dest_root, rel), acct["id"],
+                                                   owner, notes, extra=True))
+    return actions, notes
+
+
+def move_action(src, dst, from_id, owner, notes, extra=False):
+    if os.path.islink(src) or not os.path.isfile(src):
+        return []
+    base = {"src": src, "dst": dst, "from": from_id, "to": owner["account"],
+            "pin": owner["path"], "extra": extra}
+    if os.path.lexists(dst):
+        if same_file(src, dst):
+            return [dict(base, kind="dedupe")]
+        notes.append(f"conflict: {tilde(dst)} already exists in {owner['account']} with different "
+                     f"content; {tilde(src)} stays in {from_id}")
+        return []
+    return [dict(base, kind="move")]
+
+
+def link_or_copy(src, dst):
+    """Make dst the same file as src: a hard link, or a verified copy across devices."""
+    os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
+    tmp = f"{dst}.cc-migrate.{os.getpid()}"
+    try:
+        os.link(src, tmp)
+        how = "link"
+    except OSError:
+        shutil.copy2(src, tmp)
+        how = "copy"
+    if not same_file(src, tmp):
+        os.remove(tmp)
+        raise OSError(f"could not verify the copy of {src}")
+    if os.path.lexists(dst):
+        os.remove(tmp)
+        raise FileExistsError(dst)
+    os.replace(tmp, dst)
+    return how
+
+
+def describe(actions, notes, verbose):
+    lines = []
+    settings = [a for a in actions if a["kind"] in ("write", "delete", "rmdir", "exclude", "rename")]
+    if settings:
+        lines.append("Folder settings older versions of cc wrote (VS Code never read them)")
+        for a in settings:
+            target = a.get("path") or a.get("file") or a.get("src")
+            verb = {"write": "edit", "delete": "delete", "rmdir": "remove folder",
+                    "exclude": f"remove the line {a.get('line')} from", "rename": "retire"}[a["kind"]]
+            lines.append(f"  {verb} {tilde(target)}  ({a['why']})")
+    moves = [a for a in actions if a["kind"] in ("move", "dedupe")]
+    if moves:
+        lines.append("Chats of pinned folders, moved into the pinned account")
+        groups = {}
+        for a in moves:
+            key = (a["pin"], a["to"], a["from"])
+            g = groups.setdefault(key, {"chats": 0, "files": 0, "extra": 0, "dupes": 0})
+            if a["kind"] == "dedupe":
+                g["dupes"] += 1
+            elif a["extra"]:
+                g["extra"] += 1
+            elif a["src"].endswith(".jsonl") and os.path.dirname(os.path.dirname(a["src"])).endswith("projects"):
+                g["chats"] += 1
+            else:
+                g["files"] += 1
+        def n(count, what):
+            return f"{count} {what}" + ("" if count == 1 else "s")
+        for (pin, to, frm), g in sorted(groups.items()):
+            bits = [n(g["chats"], "chat")]
+            if g["files"]:
+                bits.append(n(g["files"], "subagent/tool file"))
+            if g["extra"]:
+                bits.append(n(g["extra"], "checkpoint/todo file"))
+            if g["dupes"]:
+                bits.append(f"{g['dupes']} already there (the copy in {frm} is removed)")
+            lines.append(f"  {tilde(pin)}: {', '.join(bits)} from {frm} -> {to}")
+        if verbose:
+            for a in moves:
+                lines.append(f"    {a['kind']}: {tilde(a['src'])} -> {tilde(a['dst'])}")
+    if notes:
+        lines.append("Left as they are")
+        lines += [f"  {n}" for n in notes]
+    if not actions:
+        lines.append("Nothing to migrate.")
+    return "\n".join(lines)
+
+
+def load_manifest():
+    try:
+        with open(MANIFEST) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict) or not isinstance(data.get("runs"), list):
+        data = {"version": 1, "runs": []}
+    return data
+
+
+def save_manifest(data):
+    os.makedirs(SWITCH_DIR, exist_ok=True)
+    tmp = f"{MANIFEST}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, MANIFEST)
+
+
+def keep_copy(path, run_dir, n):
+    os.makedirs(run_dir, mode=0o700, exist_ok=True)
+    dest = os.path.join(run_dir, f"{n:04d}-{os.path.basename(path)}")
+    shutil.copy2(path, dest)
+    return dest
+
+
+def apply_migration(actions):
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    run_dir = os.path.join(MIG_BACKUPS, stamp)
+    done, problems = [], []
+    manifest = load_manifest()
+    run = {"ts": int(time.time()), "backups": run_dir, "actions": done}
+    manifest["runs"].append(run)
+    for n, a in enumerate(actions):
+        rec = {k: v for k, v in a.items() if k != "text"}
+        try:
+            if a["kind"] == "write":
+                rec["before"] = keep_copy(a["path"], run_dir, n)
+                _replace_text(a["path"], a["text"])
+                rec["after"] = sha256(a["path"])
+            elif a["kind"] == "delete":
+                rec["before"] = keep_copy(a["path"], run_dir, n)
+                os.remove(a["path"])
+            elif a["kind"] == "rmdir":
+                os.rmdir(a["path"])
+            elif a["kind"] == "exclude":
+                rec["before"] = keep_copy(a["file"], run_dir, n)
+                with open(a["file"], encoding="utf-8") as fh:
+                    lines = fh.read().splitlines(True)
+                kept = [ln for ln in lines if ln.rstrip("\r\n") != a["line"]]
+                _replace_text(a["file"], "".join(kept))
+            elif a["kind"] == "rename":
+                os.replace(a["src"], a["dst"])
+            elif a["kind"] == "move":
+                rec["how"] = link_or_copy(a["src"], a["dst"])
+                if not same_file(a["src"], a["dst"]):
+                    raise OSError(f"{a['dst']} does not match {a['src']}")
+                os.remove(a["src"])
+            elif a["kind"] == "dedupe":
+                if not same_file(a["src"], a["dst"]):
+                    raise OSError(f"{a['dst']} no longer matches {a['src']}")
+                os.remove(a["src"])
+        except OSError as exc:
+            problems.append(f"{a['kind']} {tilde(a.get('path') or a.get('src') or a.get('file'))}: {exc}")
+            continue
+        done.append(rec)
+        save_manifest(manifest)          # after every step: an interrupted run can still be undone
+    save_manifest(manifest)
+    return done, problems
+
+
+def undo_migration():
+    manifest = load_manifest()
+    if not manifest["runs"]:
+        return None, ["no migration to undo"]
+    run = manifest["runs"][-1]
+    undone, problems = 0, []
+    for a in reversed(run["actions"]):
+        kind = a["kind"]
+        try:
+            if kind == "write":
+                if os.path.exists(a["path"]) and sha256(a["path"]) != a.get("after"):
+                    problems.append(f"{tilde(a['path'])} changed since the migration; left as it is "
+                                    f"(the earlier version is {tilde(a['before'])})")
+                    continue
+                shutil.copy2(a["before"], a["path"])
+            elif kind == "delete":
+                if os.path.exists(a["path"]):
+                    problems.append(f"{tilde(a['path'])} exists again; left as it is")
+                    continue
+                os.makedirs(os.path.dirname(a["path"]), exist_ok=True)
+                shutil.copy2(a["before"], a["path"])
+            elif kind == "rmdir":
+                os.makedirs(a["path"], exist_ok=True)
+            elif kind == "exclude":
+                with open(a["file"], encoding="utf-8") as fh:
+                    text = fh.read()
+                if a["line"] not in text.splitlines():
+                    with open(a["file"], "a", encoding="utf-8") as fh:
+                        if text and not text.endswith("\n"):
+                            fh.write("\n")
+                        fh.write(a["line"] + "\n")
+            elif kind == "rename":
+                if os.path.exists(a["dst"]) and not os.path.exists(a["src"]):
+                    os.replace(a["dst"], a["src"])
+            elif kind in ("move", "dedupe"):
+                if os.path.lexists(a["src"]):
+                    problems.append(f"{tilde(a['src'])} exists again; left as it is")
+                    continue
+                if not os.path.exists(a["dst"]):
+                    problems.append(f"{tilde(a['dst'])} is gone; nothing to move back")
+                    continue
+                link_or_copy(a["dst"], a["src"])
+                if kind == "move":
+                    os.remove(a["dst"])
+            undone += 1
+        except OSError as exc:
+            problems.append(f"{kind} {tilde(a.get('path') or a.get('src') or a.get('file'))}: {exc}")
+    manifest["runs"].pop()
+    save_manifest(manifest)
+    return undone, problems
+
+
+def cmd_migrate(args):
+    apply = "--apply" in args
+    verbose = "--verbose" in args or "-v" in args
+    if "--undo" in args:
+        undone, problems = undo_migration()
+        if undone is None:
+            print(problems[0])
+            return 1
+        print(f"Undid {undone} step(s) of the last migration.")
+        for p in problems:
+            print(f"  ! {p}")
+        touch_epoch()
+        return 0 if not problems else 1
+    dirs = account_dirs()
+    s_actions, s_notes = plan_settings(dirs)
+    c_actions, c_notes = plan_chats(dirs)
+    actions, notes = s_actions + c_actions, s_notes + c_notes
+    if not apply:
+        print("cc vscode migrate: dry run, nothing is changed. `cc vscode migrate --apply` does this:\n")
+        print(describe(actions, notes, verbose))
+        return 0
+    print(describe(actions, notes, verbose))
+    done, problems = apply_migration(actions)
+    print(f"\nDone: {len(done)} of {len(actions)} step(s). `cc vscode migrate --undo` reverts them.")
+    if any(a["kind"] in ("write", "delete", "exclude") for a in done):
+        print(f"Copies of every file changed are in {tilde(MIG_BACKUPS)}.")
+    for p in problems:
+        print(f"  ! {p}")
+    touch_epoch()
+    return 0 if not problems else 1
+
+
+# --------------------------------------------------------------------- on/off ----
+def cmd_on(args):
+    cfg = load_config()
+    wrapper_only = "--wrapper-only" in args
+    if "--settings" in args:
+        idx = args.index("--settings")
+        if idx + 1 >= len(args):
+            print("usage: cc vscode on [--settings <path>] [--wrapper-only]", file=sys.stderr)
+            return 2
+        path = os.path.abspath(os.path.expanduser(args[idx + 1]))
+    else:
+        path = settings_path(cfg)
+    if not path:
+        print("cc-vscode: no VS Code settings file found — pass --settings <path>", file=sys.stderr)
+        return 1
+    wrapper = tool_path(WRAPPER_NAME)
+    if not os.access(wrapper, os.X_OK):
+        print(f"cc-vscode: {tilde(wrapper)} is missing; reinstall cc", file=sys.stderr)
+        return 1
+    try:
+        read_settings(path)              # refuse early: a broken file is never rewritten
     except ValueError as exc:
         print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
         return 1
-    moved = carry(target) if (changed or force_carry) else 0
-    if changed:
-        say(f"VS Code panel -> {target}"
-            + (f" · {moved} recent chats carried over" if moved else "")
-            + ". New chats start there; Developer: Reload Window moves the open ones.")
+
+    # 1. The companion first: settings change only once it is in place, so no window is
+    #    left on an account its history does not match.
+    try:
+        vsix = build_vsix()
+    except (RuntimeError, OSError) as exc:
+        print(f"cc-vscode: {exc}", file=sys.stderr)
+        return 1
+    write_binding()
+    installed = []
+    clis = vscode_clis()
+    for cli in clis:
+        rc, out = run_cli(cli, "--install-extension", vsix, "--force")
+        if rc == 0 and companion_installed(cli):
+            installed.append(cli)
+        else:
+            print(f"cc-vscode: {cli} could not install the companion: {out.strip()[-300:]}", file=sys.stderr)
+    if not installed and not wrapper_only:
+        print(("No VS Code command-line tool (code, code-insiders, codium) was found. " if not clis else
+               "The companion extension could not be installed and verified. ")
+              + "VS Code settings were not changed.\n"
+              f"  Install {tilde(vsix)} by hand (Extensions view → … → Install from VSIX), then run\n"
+              "  `cc vscode on` again. Or run `cc vscode on --wrapper-only`: new chats then follow\n"
+              "  your pins, but the panel's history may list another account's chats.",
+              file=sys.stderr)
+        return 1
+
+    # 2. User settings: the wrapper in, cc's own CLAUDE_CONFIG_DIR entry out.
+    try:
+        text, data = read_settings(path)
+        new = text
+        if data.get(WRAPPER_KEY) and not ours(data.get(WRAPPER_KEY)):
+            print(f"cc-vscode: {WRAPPER_KEY} is already set to {data[WRAPPER_KEY]!r}; "
+                  "it is replaced by cc's wrapper (the old value is in the backup)", file=sys.stderr)
+        if data.get(WRAPPER_KEY) != wrapper:
+            new = set_key_text(new, WRAPPER_KEY, wrapper)
+        entries = data.get(KEY)
+        dirs = account_dirs()
+        if isinstance(entries, list):
+            kept = [e for e in entries if not written_by_cc(e, dirs)]
+            for e in kept:
+                if is_config_dir(e):
+                    print(f"cc-vscode: left {KEY} CLAUDE_CONFIG_DIR={e.get('value')!r}: it is not "
+                          "one of cc's accounts. The wrapper overrides it for every chat.", file=sys.stderr)
+            if kept != entries:
+                new = set_key_text(new, KEY, kept)
+        backup = None
+        if new != text:
+            backup = backup_settings(path)
+            _replace_text(os.path.realpath(path) if os.path.exists(path) else path, new)
+    except ValueError as exc:
+        print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
+        return 1
+
+    cfg["vscode"] = {"enabled": True, "mode": "wrapper", "settingsPath": path,
+                     "wrapper": wrapper, "companion": bool(installed)}
+    save_config(cfg)
+    touch_epoch()
+    print(f"VS Code: each window now runs Claude on its folder's account · {tilde(path)}")
+    print(f"  wrapper    {tilde(wrapper)}")
+    if installed:
+        print(f"  companion  {EXT_ID} installed with {', '.join(os.path.basename(c) for c in installed)}")
+    else:
+        print("  companion  NOT installed (--wrapper-only): the history list may show another account")
+    if backup:
+        print(f"  backup     {tilde(backup)}")
+    print("  Open windows re-check within a few seconds. A chat already running stays where it is.")
+    if load_ws() or any(a["kind"] == "move" for a in plan_chats(account_dirs())[0]):
+        print("  Older versions wrote folder settings or left chats in the wrong account:\n"
+              "  run `cc vscode migrate` to see what it would clean up.")
+    return 0
+
+
+def cmd_off(args):
+    cfg = load_config()
+    path = settings_path(cfg)
+    rc = 0
+    if path and os.path.exists(path):
+        try:
+            text, data = read_settings(path)
+            new = text
+            if ours(data.get(WRAPPER_KEY)):
+                new = remove_key_text(new, WRAPPER_KEY)
+            elif data.get(WRAPPER_KEY):
+                print(f"cc-vscode: {WRAPPER_KEY} is {data[WRAPPER_KEY]!r}, not cc's; left alone",
+                      file=sys.stderr)
+            if "--restore" in args and os.path.exists(BACKUP):
+                _, orig = read_settings(BACKUP)
+                new = set_key_text(new, KEY, orig[KEY]) if KEY in orig else remove_key_text(new, KEY)
+            if new != text:
+                backup_settings(path)
+                _replace_text(os.path.realpath(path), new)
+        except ValueError as exc:
+            print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
+            rc = 1
+    for cli in vscode_clis():
+        if companion_installed(cli):
+            code, out = run_cli(cli, "--uninstall-extension", EXT_ID)
+            if code != 0:
+                print(f"cc-vscode: {cli} could not remove the companion: {out.strip()[-300:]}",
+                      file=sys.stderr)
+                rc = 1
+    for f in (BINDING,):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    cfg["vscode"] = dict(cfg.get("vscode") or {}, enabled=False)
+    save_config(cfg)
+    if "--quiet" not in args:
+        print("VS Code: cc no longer binds windows · the panel runs on the default account")
+        print("  Reload open windows to drop the account they were bound to.")
+        if os.path.exists(BACKUP) and "--restore" not in args:
+            print(f"  Your settings from before `cc vscode on` are in {tilde(BACKUP)};\n"
+                  f"  `cc vscode off --restore` puts back the {KEY} value from it.")
+    return rc
+
+
+def cmd_status():
+    cfg = load_config()
+    vs = cfg.get("vscode") or {}
+    path = settings_path(cfg)
+    wrapper = None
+    if path:
+        try:
+            wrapper = read_settings(path)[1].get(WRAPPER_KEY)
+        except (ValueError, OSError):
+            wrapper = None
+    if vs.get("enabled") and vs.get("mode") == "wrapper":
+        state = "set" if ours(wrapper) else "MISSING from settings (run cc vscode on)"
+        comp = "companion installed" if vs.get("companion") else "no companion: history may not match"
+        print(f"  VS Code: windows follow their folder's account · wrapper {state} · {comp}")
+    elif vs.get("enabled"):
+        print("  VS Code: set up by an older cc · run `cc vscode on` to switch to per-window binding")
+    elif path:
+        print("  VS Code is not managed · `cc vscode on` runs each window on its folder's account")
+    for w in open_windows():
+        folders = w.get("folders") or []
+        where = tilde(folders[0]) if folders else "(no folder)"
+        if len(folders) > 1:
+            where += f" +{len(folders) - 1}"
+        if w.get("error"):
+            shown = f"? ({w['error']})"
+        else:
+            shown = w.get("account") or "?"
+            if w.get("verb") == "switch":
+                shown += " (fallback)"
+            if w.get("mixed"):
+                shown += " (mixed pins)"
+        print(f"  VS Code window {where} -> {shown}")
     return 0
 
 
@@ -668,115 +1258,80 @@ def main(argv):
     args = argv[2:]
 
     if cmd == "on":
-        cfg = load_config()
-        if "--settings" in args:
-            idx = args.index("--settings")
-            if idx + 1 >= len(args):
-                print("usage: cc vscode on [--settings <path>]", file=sys.stderr)
-                return 2
-            path = os.path.abspath(os.path.expanduser(args[idx + 1]))
-        else:
-            path = settings_path(cfg)
-        if not path:
-            print("cc-vscode: no VS Code settings file found — pass --settings <path>", file=sys.stderr)
-            return 1
-        cfg["vscode"] = {"enabled": True, "settingsPath": path}
-        save_config(cfg)
-        print(f"VS Code sync on · {tilde(path)}")
-        rc = sync(force_carry=True)
-        print(f"VS Code panel -> {current(cfg)}")
-        return rc
+        return cmd_on(args)
 
     if cmd == "off":
-        cfg = load_config()
-        path = settings_path(cfg)
-        cfg["vscode"] = dict(cfg.get("vscode") or {}, enabled=False)
-        save_config(cfg)
-        if path:
-            try:
-                set_config_dir(path, None)
-            except ValueError as exc:
-                print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
-                return 1
-        print("VS Code sync off · the panel is back on the default account")
-        return 0
+        return cmd_off(args)
 
     if cmd == "sync":
-        return sync(quiet="--quiet" in args)
-
-    if cmd == "workspace-apply":
-        if not args:
-            print("usage: cc-vscode workspace-apply <folder> [--yes]", file=sys.stderr)
-            return 2
-        try:
-            workspace_apply(args[0], yes="--yes" in args)
-        except Tracked as exc:
-            print(f"{tilde(str(exc))} is tracked by git, so changing it would show up in the "
-                  "repository.", file=sys.stderr)
-            return 4
-        except ValueError as exc:
-            print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
-            return 1
+        touch_epoch()
         return 0
 
-    if cmd == "workspace-clear":
-        if not args:
-            print("usage: cc-vscode workspace-clear <folder>", file=sys.stderr)
-            return 2
-        try:
-            workspace_clear(args[0])
-        except ValueError as exc:
-            print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
-            return 1
+    if cmd in ("workspace-apply", "workspace-clear"):
+        # Kept for scripts written against older versions: VS Code never read the folder
+        # setting these wrote. Windows now follow pins on their own.
+        print(f"cc-vscode: {cmd} is no longer needed (VS Code ignores folder-level "
+              f"{KEY}); windows follow pins through the wrapper", file=sys.stderr)
         return 0
 
     if cmd == "fallback":
-        found = detect("pin-of", args[0] if args else os.getcwd())
+        folder = args[0] if args else os.getcwd()
+        found = detect("pin-of", folder)
         if not found:
             print("cc-vscode: this folder is not pinned", file=sys.stderr)
             return 1
-        folder, aid, on_limit, fallback = found.split("\t")[:4]
-        state = load_ws()
-        if folder not in state:
-            print(f"cc-vscode: the VS Code window for {tilde(folder)} is not managed — "
-                  f"run: cc pin {tilde(folder)}", file=sys.stderr)
-            return 1
+        root, aid, on_limit, fb = found.split("\t")[:4]
         if on_limit == "stop":
-            print(f"{tilde(folder)} stops at the limit: '{aid}' has no fallback", file=sys.stderr)
+            print(f"{tilde(root)} stops at the limit: '{aid}' has no fallback", file=sys.stderr)
             return 1
-        state[folder]["fallbackChosen"] = True
-        save_ws(state)
-        target = workspace_apply(folder, quiet=True)
-        if target == aid:
-            print(f"'{fallback}' is not free either — the window stays on '{aid}'")
+        choice = args[1] if len(args) > 1 else fb
+        target = detect("choose", root, choice)
+        if target is None:
+            print(f"cc-vscode: could not record the choice for {tilde(root)}", file=sys.stderr)
             return 1
-        print(f"VS Code window for {tilde(folder)} -> {target}, until '{aid}' resets. "
-              "Run Developer: Reload Window to continue there.")
+        touch_epoch()
+        if choice == "stay" or target == aid:
+            print(f"New chats in VS Code windows on {tilde(root)} stay on '{aid}'.")
+        else:
+            print(f"New chats in VS Code windows on {tilde(root)} start on '{target}' until '{aid}' resets.")
         return 0
 
     if cmd == "carry":
+        if "--to" in args:
+            def opt(name):
+                i = args.index(name)
+                if i + 1 >= len(args):
+                    raise SystemExit(f"cc-vscode: {name} needs a value")
+                return args[i + 1]
+            folder = opt("--folder") if "--folder" in args else None
+            src = opt("--from") if "--from" in args else None
+            print(carry(opt("--to"), from_ids=[src] if src else None, folder=folder))
+            return 0
         if not args:
-            print("usage: cc-vscode carry <id>", file=sys.stderr)
+            print("usage: cc-vscode carry <id> | carry --folder <f> --from <a> --to <b>", file=sys.stderr)
             return 2
         print(carry(args[0]))
         return 0
 
     if cmd == "current":
-        print(current(load_config()))
+        r = bind_for(args[0] if args else os.getcwd())
+        if not r or not r.get("account"):
+            return 1
+        print(r["account"])
         return 0
 
     if cmd == "enabled":
-        return 0 if (load_config().get("vscode") or {}).get("enabled") else 1
+        vs = load_config().get("vscode") or {}
+        return 0 if vs.get("enabled") and vs.get("mode") == "wrapper" else 1
 
     if cmd == "status":
-        cfg = load_config()
-        path = settings_path(cfg)
-        if (cfg.get("vscode") or {}).get("enabled"):
-            print(f"  VS Code panel -> {current(cfg)}  (sync on · {tilde(path or '?')})")
-        elif path and not load_ws():
-            print("  VS Code panel is not managed · `cc vscode on` makes it follow")
-        for folder, entry in sorted(load_ws().items()):
-            print(f"  VS Code window {tilde(folder)} -> {entry.get('account', '?')}")
+        return cmd_status()
+
+    if cmd == "migrate":
+        return cmd_migrate(args)
+
+    if cmd == "build":                   # the .vsix alone, for a manual install
+        print(build_vsix(args[0] if args else VSIX))
         return 0
 
     print(__doc__.strip())

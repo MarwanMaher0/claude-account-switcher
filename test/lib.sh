@@ -65,6 +65,10 @@ new_home() {
     # Live usage checks run `claude -p /usage`; off unless a suite turns them on, so
     # the stub's call log stays exactly what each test launched.
     export CC_LIVE_CHECK=0
+    # Never let a test reach a real VS Code: cc-vscode looks only at this (missing) CLI
+    # unless a suite installs a stub there.
+    export CC_VSCODE_CLI="$SANDBOX/stub/code"
+    unset CC_WINDOW_FOLDER CC_SWITCH_DETECT CC_INSTALL_DIR CC_SHARE_DIR
     mkdir -p "$HOME/.claude" "$HOME/.claude-2"
     printf '{"oauthAccount":{"emailAddress":"first@example.com","subscriptionType":"max"}}\n' \
         > "$HOME/.claude.json"
@@ -166,4 +170,39 @@ summary() {
     fi
     printf '%s%d passed, %d FAILED%s\n' "$_red" "$PASS" "$FAIL" "$_rst"
     return 1
+}
+
+# A stub VS Code CLI at $CC_VSCODE_CLI: logs its arguments to code.log beside it;
+# --install-extension keeps the .vsix and --list-extensions reports it.
+# CODE_STUB_FAIL=1 makes installs fail.
+code_stub() {
+    mkdir -p "$SANDBOX/stub"
+    cat > "$SANDBOX/stub/code" <<'STUB'
+#!/usr/bin/env bash
+d="$(dirname "$0")"
+printf '%s\n' "$*" >> "$d/code.log"
+case "${1:-}" in
+  --install-extension)
+    [ -n "${CODE_STUB_FAIL:-}" ] && { echo "install failed" >&2; exit 1; }
+    cp "$2" "$d/installed.vsix" && echo "cc-switch.cc-switch-binding" > "$d/installed" ;;
+  --list-extensions) cat "$d/installed" 2>/dev/null; echo "someone.else" ;;
+  --uninstall-extension) rm -f "$d/installed" ;;
+esac
+exit 0
+STUB
+    chmod 755 "$SANDBOX/stub/code"
+}
+
+# A top-level value from a VS Code settings file (JSON with comments), as JSON, or the
+# bare string for a string value.
+json_setting() {
+    python3 -c '
+import json, re, sys
+text = open(sys.argv[1]).read()
+text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+text = re.sub(r"(?m)^\s*//.*$", "", text)
+text = re.sub(r"(?m)\s//[^\"\n]*$", "", text)
+text = re.sub(r",(\s*[}\]])", r"\1", text)
+v = json.loads(text).get(sys.argv[2])
+print(v if isinstance(v, str) else json.dumps(v))' "$1" "$2"
 }

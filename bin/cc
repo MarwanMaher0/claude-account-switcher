@@ -17,10 +17,11 @@
 #   cc add <id> --email X  pre-fill the login with X and refuse any other account
 #   cc remove <id>         deregister an account  (--purge also deletes its dir)
 #   cc clear <id>          forget a limit recorded for an account
-#   cc vscode on|off       keep the VS Code panel on an account with quota left
+#   cc vscode on|off       run each VS Code window on its folder's account (wrapper + companion)
+#   cc vscode migrate      clean up what older versions wrote (a dry run unless --apply)
 #   cc pin [folder]        keep a folder (and its subfolders) on one account — asks which
-#   cc pin <folder> --account <id> --fallback <id>|none|ask [--no-vscode] [--yes]
-#   cc unpin [folder]      remove a pin, and the VS Code setting it wrote
+#   cc pin <folder> --account <id> --fallback <id>|none|ask [--no-vscode]
+#   cc unpin [folder]      remove a pin
 #   cc pins                list pinned folders
 #   cc cloud "<task>"      start a cloud session on the account holding the cloud credit
 #   cc cloud set <id>      choose that account  (cc cloud --acct <id> overrides once)
@@ -105,8 +106,7 @@ fmt_time() {
     date -d "@$1" "$fmt" 2>/dev/null || date -r "$1" "$fmt" 2>/dev/null || echo '?'
 }
 
-# Keep the VS Code panel on the account a launch would pick. Silent, and a no-op
-# unless `cc vscode on` was run.
+# Nudge open VS Code windows to re-check their account. Silent; writes no settings.
 sync_vscode() {
     [ -x "$VSCODE" ] && "$VSCODE" sync --quiet >/dev/null 2>&1
     return 0
@@ -260,7 +260,7 @@ pin_menu() {
 }
 
 cmd_pin() {
-    local path="" acct="" fb="" vscode=1 yes=0 interactive=0
+    local path="" acct="" fb="" vscode=1
     while [ $# -gt 0 ]; do
         case "$1" in
             --account|--fallback)
@@ -268,7 +268,7 @@ cmd_pin() {
                 if [ "$1" = "--account" ]; then acct="$2"; else fb="$2"; fi
                 shift 2 ;;
             --no-vscode) vscode=0; shift ;;
-            --yes|-y) yes=1; shift ;;
+            --yes|-y) shift ;;                 # accepted for older scripts; nothing to confirm
             -*) die "cc pin: unknown option $1" ;;
             *) [ -z "$path" ] || die "cc pin: one folder at a time"; path="$1"; shift ;;
         esac
@@ -281,7 +281,6 @@ cmd_pin() {
     dflt="$(default_id)"
 
     if [ -z "$acct" ]; then
-        interactive=1
         PIN_ACCT=""; PIN_FB=""; PIN_VSCODE=1
         pin_menu "$folder" "$dflt" || die "nothing saved"
         acct="$PIN_ACCT"; fb="$PIN_FB"; vscode="$PIN_VSCODE"
@@ -296,28 +295,6 @@ cmd_pin() {
     esac
     "$DETECT" pin "$folder" "$acct" "$on_limit" "$fb_id" "$vscode" >/dev/null || exit $?
 
-    if [ "$vscode" = "1" ]; then
-        local rc=0
-        if [ "$yes" = "1" ]; then
-            "$VSCODE" workspace-apply "$folder" --yes || rc=$?
-        else
-            "$VSCODE" workspace-apply "$folder" || rc=$?
-        fi
-        if [ "$rc" -eq 4 ]; then
-            if [ "$interactive" = "1" ] && confirm "Write this folder's account into it anyway?" n; then
-                "$VSCODE" workspace-apply "$folder" --yes || rc=$?
-            else
-                rc=1
-            fi
-            if [ "$rc" -ne 0 ]; then
-                "$DETECT" pin "$folder" "$acct" "$on_limit" "$fb_id" 0 >/dev/null
-                warn "VS Code settings left alone; the pin applies in the terminal only (cc pin --yes writes them)"
-            fi
-        elif [ "$rc" -ne 0 ]; then
-            warn "VS Code settings were not changed; the pin applies in the terminal"
-        fi
-    fi
-
     local rule
     case "$on_limit" in
         switch) rule="then $fb_id" ;;
@@ -325,7 +302,11 @@ cmd_pin() {
         stop)   rule="then stop and wait" ;;
     esac
     good "$(tilde "$folder") -> $acct, $rule"
-    [ "$vscode" = "1" ] && note "open VS Code windows on this folder pick it up after Developer: Reload Window"
+    if [ "$vscode" = "1" ]; then
+        note "VS Code windows on $(tilde "$folder") now use $acct for new chats (open windows re-check automatically)"
+        "$VSCODE" enabled 2>/dev/null || note "VS Code follows pins once you run: cc vscode on"
+    fi
+    sync_vscode
     return 0
 }
 
@@ -339,8 +320,8 @@ cmd_unpin() {
         fi
         die "$(tilde "$folder") is not pinned"
     fi
-    "$VSCODE" workspace-clear "$folder" || warn "the VS Code setting could not be removed — see above"
     "$DETECT" unpin "$folder" >/dev/null
+    sync_vscode
     good "unpinned $(tilde "$folder")"
 }
 

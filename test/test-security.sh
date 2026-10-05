@@ -6,7 +6,8 @@ echo "SPEC-04 — security gates"
 
 # Everything that ships. Tests are excluded where they legitimately mention these
 # strings in order to assert their absence.
-SHIPPED=$(find "$REPO/bin" "$REPO/hooks" "$REPO/commands" "$REPO/skills" -type f 2>/dev/null)
+SHIPPED=$(find "$REPO/bin" "$REPO/hooks" "$REPO/commands" "$REPO/skills" "$REPO/vscode" -type f \
+          -not -name "*.pyc" 2>/dev/null)
 
 # ---- S-1 : never read credentials -------------------------------------------
 # The tool copies settings between accounts. It must never read, copy or print a
@@ -80,7 +81,8 @@ assert_eq "$copilot" "" "AC-9 Copilot is never wired in as a Claude Code backend
 glued="$(python3 - "$REPO" <<'PY'
 import pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
-files = [root / "bin" / "cc", root / "bin" / "cc-watch", root / "install.sh", root / "uninstall.sh"]
+files = [root / "bin" / "cc", root / "bin" / "cc-watch", root / "bin" / "cc-claude-wrapper",
+         root / "install.sh", root / "uninstall.sh"]
 files += sorted((root / "hooks").glob("*.sh")) + sorted((root / "test").glob("*.sh"))
 pat = re.compile(rb'\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xff]')
 for f in files:

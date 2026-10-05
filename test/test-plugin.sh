@@ -135,7 +135,8 @@ assert_contains "$manifest" '"matcher": "rate_limit"' "T-11 ...for rate limits o
 assert_contains "$manifest" '"UserPromptSubmit"' "T-12 UserPromptSubmit hook registered"
 for f in skills/cc-accounts/SKILL.md commands/cc-status.md commands/cc-switch.md commands/cc-setup.md \
          hooks/session-start.sh hooks/limit-notice.sh hooks/limit-hit.sh \
-         bin/cc bin/cc-detect bin/cc-watch bin/cc-vscode install.sh; do
+         bin/cc bin/cc-detect bin/cc-watch bin/cc-vscode bin/cc-claude-wrapper install.sh uninstall.sh \
+         vscode/cc-switch-binding/package.json vscode/cc-switch-binding/extension.js; do
     assert_file "$REPO/$f" "T-10 plugin ships $f"
 done
 assert_contains "$(cat "$REPO/.claude-plugin/marketplace.json")" '"source": "./"' \
@@ -162,6 +163,9 @@ mkdir -p "$SANDBOX/compiler"; printf '#!/bin/sh\n' > "$SANDBOX/compiler/cc"; chm
 out="$(PATH="$SANDBOX/compiler:$PATH" CC_INSTALL_DIR="$SANDBOX/localbin" bash "$REPO/install.sh" 2>&1)"
 assert_contains "$out" "WARNING" "T-14 install warns that another cc, usually the C compiler, already exists"
 assert_file "$SANDBOX/localbin/cc" "T-14 ...and still installs"
+assert_file "$SANDBOX/localbin/cc-claude-wrapper" "T-14 ...including the VS Code process wrapper"
+assert_contains "$out" "cc vscode migrate" "T-14 ...and mentions the migration without running it"
+assert_no_file "$HOME/.claude-switch/vscode-migration.json" "T-14 ...nothing was migrated"
 cleanup_home
 
 summary

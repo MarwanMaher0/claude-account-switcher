@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pinned folders: per-folder accounts, per-pin fallback rules, VS Code window settings,
+# Pinned folders: per-folder accounts, per-pin fallback rules, VS Code windows,
 # auto-continue after a switch, and the opt-in early switch.
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -242,92 +242,44 @@ assert_eq "$runs" "10" "SA-3 no run was lost: five on acme, five on personal"
 assert_eq "$(limited_until personal)" "0" "SA-4 personal is not"
 cleanup_home
 
-# ---- VW : VS Code window settings for a pinned folder -------------------------------
+# ---- PV : pins and VS Code: no folder files, windows re-check by themselves ----------
+# VS Code ignores claudeCode.environmentVariables in a folder's .vscode/settings.json
+# (the setting is machine-scoped), so cc pin never writes one.
 ws() { printf '%s/.vscode/settings.json' "$1"; }
 git_repo() { git -C "$1" init -q && git -C "$1" config user.email t@example.com && git -C "$1" config user.name t; }
 
 new_home >/dev/null; companies
 repo="$HOME/work/acme"; git_repo "$repo"
 mkdir -p "$repo/.vscode"
-cat > "$(ws "$repo")" <<'EOF'
-{
-  // team formatting
-  "editor.tabSize": 2,
-  "files.trimTrailingWhitespace": true
-}
-EOF
+printf '{\n  // team formatting\n  "editor.tabSize": 2\n}\n' > "$(ws "$repo")"
 cp "$(ws "$repo")" "$SANDBOX/original.json"
-"$BIN/cc" pin "$repo" --account acme --fallback personal >/dev/null 2>&1
-s="$(cat "$(ws "$repo")")"
-assert_contains "$s" "// team formatting" "VW-1 an existing workspace file is merged: comments kept"
-assert_contains "$s" '"editor.tabSize": 2' "VW-1 ...other settings kept"
-assert_contains "$s" "$HOME/.claude-2" "VW-1 ...and CLAUDE_CONFIG_DIR set to the pinned account"
-backup="$(ls "$HOME/.claude-switch/vscode-workspace-backups/"*.json 2>/dev/null | head -1)"
-assert_eq "$(cat "$backup" 2>/dev/null)" "$(cat "$SANDBOX/original.json")" "VW-2 the file is backed up before the first change"
-assert_not_contains "$(cat "$repo/.git/info/exclude" 2>/dev/null)" ".vscode/settings.json" \
-    "VW-3 a file that already existed is not added to .git/info/exclude"
-assert_eq "$(git -C "$repo" status --porcelain .gitignore 2>/dev/null)" "" "VW-3 .gitignore is never touched"
-
-detect mark acme "$future" >/dev/null
-"$BIN/cc-vscode" sync --quiet
-s="$(cat "$(ws "$repo")")"
-assert_not_contains "$s" "CLAUDE_CONFIG_DIR" "VW-4 on a limit the window falls back to personal, never as CLAUDE_CONFIG_DIR"
-assert_contains "$s" '"claudeCode.environmentVariables": []' \
-    "VW-4 ...but keeps an empty list, which overrides any user-level account"
-detect mark acme 0 >/dev/null
-"$BIN/cc-vscode" sync --quiet
-assert_contains "$(cat "$(ws "$repo")")" "$HOME/.claude-2" "VW-5 after the reset the window goes back to acme"
-
+rm -f "$HOME/.claude-switch/bind-epoch"
+out="$("$BIN/cc" pin "$repo" --account acme --fallback personal 2>&1)"
+assert_eq "$(cat "$(ws "$repo")")" "$(cat "$SANDBOX/original.json")" "PV-1 cc pin leaves the folder's VS Code settings alone"
+assert_contains "$out" "VS Code windows on ~/work/acme now use acme for new chats" "PV-1 ...and says windows follow"
+assert_contains "$out" "open windows re-check automatically" "PV-1 ...by themselves"
+assert_file "$HOME/.claude-switch/bind-epoch" "PV-1 ...and nudges them"
+assert_eq "$(git -C "$repo" status --porcelain)" "?? .vscode/" "PV-1 git status shows only the user's own file"
+"$BIN/cc" pin "$HOME/work/acme/api" --account acme --fallback none >/dev/null 2>&1
+[ -e "$HOME/work/acme/api/.vscode" ] && no "PV-2 no .vscode folder is created" || ok "PV-2 no .vscode folder is created"
 "$BIN/cc" unpin "$repo" >/dev/null 2>&1
-assert_eq "$(cat "$(ws "$repo")")" "$(cat "$SANDBOX/original.json")" "VW-6 unpin restores the file byte for byte"
+assert_eq "$(cat "$(ws "$repo")")" "$(cat "$SANDBOX/original.json")" "PV-3 cc unpin leaves it alone too"
+out="$("$BIN/cc" pin "$repo" --account acme --fallback personal --yes 2>&1)"; rc=$?
+assert_eq "$rc" "0" "PV-4 --yes from older scripts is still accepted"
+assert_eq "$(detect bind "$repo" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["account"])')" "acme" \
+    "PV-5 the window's decision follows the pin at once"
 cleanup_home
 
+# ---- VC : chats never travel out of a pinned account by way of an unpinned carry ----
 new_home >/dev/null; companies
-repo="$HOME/work/acme"; git_repo "$repo"; mkdir -p "$repo/api"
-"$BIN/cc" pin "$repo/api" --account acme --fallback none >/dev/null 2>&1
-assert_file "$(ws "$repo/api")" "VW-7 a missing workspace file is created"
-assert_contains "$(cat "$repo/.git/info/exclude")" "/api/.vscode/settings.json" \
-    "VW-7 ...and kept out of git through .git/info/exclude"
-assert_eq "$(git -C "$repo" status --porcelain)" "" "VW-7 git status stays clean"
-"$BIN/cc" unpin "$repo/api" >/dev/null 2>&1
-assert_no_file "$(ws "$repo/api")" "VW-8 unpin deletes the file it created"
-[ -d "$repo/api/.vscode" ] && no "VW-8 ...and the empty .vscode folder" || ok "VW-8 ...and the empty .vscode folder"
-assert_not_contains "$(cat "$repo/.git/info/exclude")" "/api/.vscode/settings.json" "VW-8 ...and its exclude line"
-cleanup_home
-
-new_home >/dev/null; companies
-repo="$HOME/work/acme"; git_repo "$repo"; mkdir -p "$repo/.vscode"
-printf '{ "editor.tabSize": 4 }\n' > "$(ws "$repo")"
-git -C "$repo" add .vscode/settings.json && git -C "$repo" commit -qm init
-out="$("$BIN/cc" pin "$repo" --account acme --fallback personal 2>&1 </dev/null)"
-assert_contains "$out" "tracked by git" "VW-9 a tracked workspace file gets a warning"
-assert_eq "$(cat "$(ws "$repo")")" '{ "editor.tabSize": 4 }' "VW-9 ...and is not written without a yes"
-assert_eq "$(detect pin-of "$repo" | cut -f2,5)" "acme	0" "VW-9 ...the pin still applies in the terminal"
-"$BIN/cc" pin "$repo" --account acme --fallback personal --yes >/dev/null 2>&1
-assert_contains "$(cat "$(ws "$repo")")" "$HOME/.claude-2" "VW-10 --yes writes the tracked file"
-assert_not_contains "$(cat "$repo/.git/info/exclude" 2>/dev/null)" ".vscode/settings.json" \
-    "VW-10 ...without hiding a tracked file through exclude"
-cleanup_home
-
-new_home >/dev/null; companies
-mkdir -p "$HOME/notes"
-"$BIN/cc" pin "$HOME/notes" --account personal --fallback none >/dev/null 2>&1
-s="$(cat "$(ws "$HOME/notes")")"
-assert_not_contains "$s" "CLAUDE_CONFIG_DIR" "VW-11 a folder pinned to personal never gets CLAUDE_CONFIG_DIR"
-assert_contains "$s" "claudeCode.environmentVariables" "VW-11 ...it gets an empty list instead"
-cleanup_home
-
-# ---- VC : chats never travel out of a pinned account by way of the global panel ---
-new_home >/dev/null; companies
-mkdir -p "$HOME/.config/Code/User"; printf '{}\n' > "$HOME/.config/Code/User/settings.json"
 "$BIN/cc" pin "$HOME/work/acme" --account acme --fallback personal >/dev/null 2>&1
 mkdir -p "$HOME/.claude-2/projects/-elsewhere" "$HOME/.claude-3/projects/-elsewhere"
 printf 'acme secret\n' > "$HOME/.claude-2/projects/-elsewhere/a.jsonl"
 printf 'globex chat\n' > "$HOME/.claude-3/projects/-elsewhere/g.jsonl"
-"$BIN/cc-vscode" on >/dev/null
+"$BIN/cc-vscode" carry personal >/dev/null
 assert_no_file "$HOME/.claude/projects/-elsewhere/a.jsonl" "VC-1 a pinned account's chats are never carried into personal"
 assert_file "$HOME/.claude/projects/-elsewhere/g.jsonl" "VC-1 ...while an unpinned account's still are"
-assert_eq "$("$BIN/cc-vscode" current)" "personal" "VC-2 the global panel never picks a pinned account"
+assert_eq "$(cd "$HOME/notes" && "$BIN/cc-vscode" current)" "personal" "VC-2 an unpinned window never gets a pinned account"
 cleanup_home
 
 # ---- MN : the menu ---------------------------------------------------------------
@@ -359,12 +311,22 @@ assert_not_contains "$(cat "$HOME/.claude-switch/config.json")" "pins" "NP-3 the
 cleanup_home
 
 # ---- HK : the panel's limit notice follows the pin --------------------------------
+# The hook runs inside the panel's Claude, on the account cc-detect bind chose for it.
 new_home >/dev/null; companies
+python3 - <<'PY'
+import json, os
+p = os.path.expanduser("~/.claude-switch/config.json")
+cfg = json.load(open(p))
+cfg["vscode"] = {"enabled": True, "mode": "wrapper"}
+json.dump(cfg, open(p, "w"))
+PY
+bound_dir() { detect bind "$1" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["dir"])'; }
 hook() { PATH="$REPO/bin:$PATH" CC_HOOK_TRIES=1 CLAUDE_CODE_ENTRYPOINT=claude-vscode \
-             env CLAUDE_CONFIG_DIR="$HOME/.claude-2" bash "$REPO/hooks/$1"; }
+             env CLAUDE_CONFIG_DIR="$HK_DIR" bash "$REPO/hooks/$1"; }
 notice() {
     local d sid="hk-$2"
-    d="$HOME/.claude-2/projects/$(detect slug "$1")"
+    HK_DIR="$(bound_dir "$1")"
+    d="$HK_DIR/projects/$(detect slug "$1")"
     mkdir -p "$d"; printf '{"type":"user","uuid":"q"}\n' > "$d/$sid.jsonl"
     printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s"}' "$sid" "$d/$sid.jsonl" "$1" | hook session-start.sh >/dev/null
     printf '{"type":"assistant","uuid":"l","timestamp":"%s","isApiErrorMessage":true,"quotaLimits":{"status":"rejected","rateLimitType":"five_hour","resetsAt":%s}}\n' \
@@ -372,17 +334,24 @@ notice() {
     printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s"}' "$sid" "$d/$sid.jsonl" "$1" | hook limit-notice.sh
 }
 "$BIN/cc" pin "$HOME/work/acme" --account acme --fallback personal >/dev/null 2>&1
+assert_eq "$(bound_dir "$HOME/work/acme/api")" "$HOME/.claude-2" "HK-0 the panel in a pinned folder runs on its account"
 out="$(notice "$HOME/work/acme/api" 1)"
 assert_contains "$out" "falls back to 'personal'" "HK-1 switch: the notice names the pin's fallback"
-assert_contains "$out" "Reload Window" "HK-1 ...and the reload"
-assert_not_contains "$(cat "$(ws "$HOME/work/acme")")" "CLAUDE_CONFIG_DIR" "HK-1 ...with the window already on personal"
-detect mark acme 0 >/dev/null; "$BIN/cc-vscode" sync --quiet
+assert_contains "$out" "new chats in this VS Code window start on 'personal'" "HK-1 ...says new chats move"
+assert_contains "$out" "this chat stays on 'acme'" "HK-1 ...and the running chat stays"
+assert_not_contains "$out" "Reload Window" "HK-1 ...with no reload instruction"
+assert_eq "$(detect bind "$HOME/work/acme" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["account"])')" \
+    "personal" "HK-1 ...and the next spawn in that window goes to personal"
+detect mark acme 0 >/dev/null
 "$BIN/cc" pin "$HOME/work/acme" --account acme --fallback ask >/dev/null 2>&1
 out="$(notice "$HOME/work/acme" 2)"
-assert_contains "$out" "cc vscode fallback" "HK-2 ask: the notice says the one command to run"
-assert_contains "$(cat "$(ws "$HOME/work/acme")")" "$HOME/.claude-2" "HK-2 ...and leaves the window alone until then"
+assert_contains "$out" "cc-switch notification" "HK-2 ask: the notice points at the choice in the window"
+assert_contains "$out" "cc vscode fallback" "HK-2 ...or the one command to run"
+assert_eq "$(detect bind "$HOME/work/acme" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["account"], d["verb"])')" \
+    "acme ask" "HK-2 ...and new chats stay on acme until then"
 (cd "$HOME/work/acme/api" && "$BIN/cc-vscode" fallback >/dev/null)
-assert_not_contains "$(cat "$(ws "$HOME/work/acme")")" "CLAUDE_CONFIG_DIR" "HK-3 cc vscode fallback moves the window"
+assert_eq "$(detect bind "$HOME/work/acme" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["account"], d["choice"])')" \
+    "personal fallback" "HK-3 cc vscode fallback moves new chats to the fallback"
 detect mark acme 0 >/dev/null
 "$BIN/cc" pin "$HOME/work/acme" --account acme --fallback none >/dev/null 2>&1
 out="$(notice "$HOME/work/acme" 3)"

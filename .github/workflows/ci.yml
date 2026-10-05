@@ -37,13 +37,16 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck --severity=warning \
-            bin/cc bin/cc-watch \
+            bin/cc bin/cc-watch bin/cc-claude-wrapper \
             install.sh uninstall.sh \
             hooks/*.sh \
             test/*.sh
 
       - name: Byte-compile python
-        run: python3 -m py_compile bin/cc-detect bin/cc-vscode
+        run: python3 -m py_compile bin/cc-detect bin/cc-vscode test/contract.py
+
+      - name: Check the companion extension's JavaScript
+        run: node --check vscode/cc-switch-binding/extension.js
 
       - name: Validate JSON manifests
         run: |
