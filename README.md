@@ -7,10 +7,10 @@
 [![CI](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg)](#step-1-check-what-you-need)
-[![Tests](https://img.shields.io/badge/tests-232%20checks-brightgreen.svg)](CONTRIBUTING.md)
+[![Tests](https://img.shields.io/badge/tests-357%20checks-brightgreen.svg)](CONTRIBUTING.md)
 [![No telemetry](https://img.shields.io/badge/telemetry-none-success.svg)](#privacy)
 
-[Get started](#get-started) · [Everyday use](#everyday-use) · [VS Code](#step-6-vs-code-users-only) · [Troubleshooting](docs/TROUBLESHOOTING.md)
+[Get started](#get-started) · [Everyday use](#everyday-use) · [Separate projects](#separate-projects-one-account-per-folder) · [VS Code](#step-6-vs-code-users-only) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 </div>
 
@@ -31,6 +31,8 @@ out, signing back in, and losing the conversation. So you wait.
 
 - ✅ You have **two or more** Claude accounts, for example a personal plan and a work seat.
 - ✅ You use Claude Code in a terminal, in the VS Code panel, or both.
+- ✅ You work for more than one company and must keep each one's work on its own account
+  (see [Separate projects](#separate-projects-one-account-per-folder)).
 - ❌ You have **one** account. This tool does not pool or share accounts, and it cannot raise
   any limit. Each account keeps its own limits.
 
@@ -186,6 +188,116 @@ ran out, when it resets, and asks you to reload. Open the command palette (`Ctrl
 `Cmd+Shift+P` on macOS) and run **Developer: Reload Window**. Your open chats come back on the next
 account.
 
+## Separate projects: one account per folder
+
+If you work for more than one company, each company's folders can stay on that company's
+account, while everything else runs on your own. Run this inside a project folder:
+
+```bash
+cd ~/work/acme
+cc pin
+```
+
+```
+Folder: ~/work/acme   (all subfolders included)
+
+Which account should this folder use?  (↑/↓, Enter)
+  ▶ acme       you@acme.example
+    globex     you@globex.example
+    personal   you@gmail.com
+    + Add a new account
+
+If acme hits its limit:  (↑/↓, Enter)
+  ▶ Switch to personal
+    Stop and wait for reset
+    Ask me each time
+
+Apply to:  (↑/↓, Enter)
+  ▶ Terminal and VS Code
+    Terminal only
+
+Save? (Y/n)
+```
+
+From then on, every `cc` started in that folder or any subfolder uses `acme`. It does not
+matter which account is "next" anywhere else.
+
+**The rules a pin enforces:**
+
+- A company account never falls back to another company's account. The only fallback a pin can
+  name is an account that is not pinned anywhere, normally your own default account.
+- A pinned account is kept for its folders. Outside them, `cc` never picks it, so personal work
+  never uses a company seat.
+- Each session follows its own folder. An `acme` limit only affects `acme` sessions. A `globex`
+  window keeps working until `globex` itself runs out.
+- With no pins, nothing changes: `cc` rotates over your accounts as before.
+- `cc --acct <name>` still overrides the pin for one session.
+
+**If a company account hits its limit**, the pin decides:
+
+| You chose | What happens |
+|---|---|
+| Switch to personal | The session moves to `personal` and the conversation comes with it |
+| Stop and wait for reset | `cc` stops and shows when the account resets |
+| Ask me each time | The terminal asks you. In VS Code, the message tells you the command to run |
+
+> [!NOTE]
+> Falling back to `personal` copies that chat into your personal account's folder **on this
+> machine**, so the conversation can continue there. Nothing leaves your computer, but if a
+> company's rules forbid even that, choose **Stop and wait for reset**.
+
+Scripts can skip the menu:
+
+```bash
+cc pin ~/work/acme --account acme --fallback personal      # or: none, ask
+cc pin ~/work/globex --account globex --fallback none --no-vscode
+cc pins                                                    # list pins
+cc unpin ~/work/acme                                       # remove one
+```
+
+`cc status` also lists your pinned folders, and which account the current folder runs on.
+
+### VS Code with pinned folders
+
+With **Terminal and VS Code**, `cc pin` writes the account into that folder's own VS Code
+settings, `<folder>/.vscode/settings.json`, not into your global settings. Each VS Code window
+then runs on its own folder's account, so several windows can run at once, each on a different
+account. Run **Developer: Reload Window** in windows that were already open.
+
+That file usually lives inside the company's repository, so `cc pin`:
+
+- adds one setting and leaves the rest of the file alone, and backs it up first, to
+  `~/.claude-switch/vscode-workspace-backups/`;
+- creates the file if it is missing, and hides it from git through `.git/info/exclude`. It never
+  edits the repository's `.gitignore`;
+- warns you and asks before writing if the file is tracked by git, because the change would show
+  up as a modification. `--yes` writes it anyway;
+- never writes `CLAUDE_CONFIG_DIR=~/.claude` for a folder pinned to your default account. It
+  writes an empty list instead, which overrides any global setting.
+
+`cc unpin` removes what it wrote, deletes a file it created, and removes its exclude line.
+
+### Never pause: the terminal versus the VS Code panel
+
+- **In a terminal**, `cc` owns the process. When an account runs out, `cc` closes the session,
+  reopens the same conversation on the allowed account, and sends **"Continue where you left
+  off."** for you. Nobody needs to type anything. This works for every terminal at once: five
+  tabs on one account each switch on their own. Change the message, or turn it off, in the
+  [config](docs/CONFIG.md#auto-continue), or with `cc --no-auto-continue`.
+- **In the VS Code panel**, VS Code starts Claude itself, so `cc` cannot restart it or type into
+  it. After a switch you still run **Developer: Reload Window**, and each tab waits for you.
+
+So when you need work to continue without you, run your sessions with `cc` in **VS Code's
+integrated terminal** rather than in the Claude panel.
+
+### Switching before the limit (optional)
+
+`cc` can switch at **98%** of a limit instead of at 100%, between turns, so a session never hits
+the wall mid-task. Claude Code already shows this usage to status line commands; `cc` reads it
+from there. It makes **no network call** of its own. It only works on Pro and Max plans, where
+Claude Code reports usage. It is off by default. See
+[Switching before the limit](docs/CONFIG.md#switching-before-the-limit).
+
 ---
 
 ## Everyday use
@@ -202,6 +314,9 @@ account.
 | Forget a limit that `cc` recorded by mistake | `cc clear work` |
 | Pass options straight to Claude Code | `cc -- <claude options>` |
 | Stop managing the VS Code panel | `cc vscode off` |
+| Keep a folder on one account | `cc pin` (inside the folder) |
+| List or remove pinned folders | `cc pins`, `cc unpin` |
+| After a switch, wait for me instead of carrying on | `cc --no-auto-continue` |
 | See all commands | `cc help` |
 
 ### Reading `cc status`
@@ -220,6 +335,8 @@ account.
 
 ## Remove an account
 
+Unpin any folder that uses the account first (`cc pins` lists them).
+
 ```bash
 cc remove work            # stop using it; its folder stays on disk
 cc remove work --purge    # also delete its folder (you type the name to confirm)
@@ -233,6 +350,7 @@ From the folder you cloned:
 
 ```bash
 cc vscode off        # only if you turned it on
+cc unpin <folder>    # for each pinned folder (cc pins lists them)
 ./uninstall.sh
 ```
 
@@ -269,6 +387,12 @@ Your accounts and their logins stay. To remove everything, also delete `~/.claud
   **on your own machine only**.
 - `cc vscode on` changes one VS Code setting, `claudeCode.environmentVariables`, and first backs
   the file up to `~/.claude-switch/vscode-settings.backup.json`.
+- `cc pin` writes that same setting into the pinned folder's `.vscode/settings.json`, backs the
+  file up first, and keeps a file it created out of git through `.git/info/exclude`.
+- Falling back from a company account to `personal` copies that chat into the personal account's
+  folder, on this machine only.
+- The optional early switch reads the usage Claude Code already passes to status line commands.
+  It adds no network call.
 
 Details in [SECURITY.md](SECURITY.md).
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "cc-switch",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "For Claude Code in the terminal and VS Code: run the Claude accounts you own side by side and move to the next when one hits its usage limit, keeping the conversation. Run /cc-setup after installing.",
   "author": {
     "name": "Marwan Maher",

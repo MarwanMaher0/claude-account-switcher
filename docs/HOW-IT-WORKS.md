@@ -125,8 +125,89 @@ manages that one setting.
 The default account is never written into that setting. Selecting it removes the variable, for
 the reason in the next section.
 
+### One window per account: pinned folders
+
+The extension reads `claudeCode.environmentVariables` at **workspace** scope as well as user scope.
+Its documentation calls out only `initialPermissionMode` as a setting it reads from user settings
+alone. So `cc pin` writes the setting into `<folder>/.vscode/settings.json`, and each window runs
+on its own folder's account.
+
+- VS Code replaces a user-level array with the workspace one rather than merging them. A folder
+  pinned to the default account therefore gets an **empty** list: that keeps a user-level
+  `CLAUDE_CONFIG_DIR`, set by `cc vscode on`, out of the window, without ever writing
+  `CLAUDE_CONFIG_DIR=~/.claude`.
+- The extension accepts `CLAUDE_CONFIG_DIR` only as an absolute path. `cc` always writes one.
+- When the pinned account runs out, the plugin's `StopFailure` hook updates that folder's file to
+  the pin's fallback, and hard-links that folder's chats, and only that folder's, into the
+  fallback account. When the account resets, the next sync points the window back.
+- For a pin set to ask, the window stays put until you run `cc vscode fallback` in that folder.
+- `cc vscode on` never selects a pinned account for the global setting and never carries a pinned
+  account's chats anywhere.
+
+### What the panel cannot do
+
+The panel's Claude processes are started by the extension, so `cc` cannot restart them or type
+into them. After a switch, **Developer: Reload Window** is still needed, and tabs wait for you
+afterwards. For hands-free work, use `cc` in the integrated terminal.
+
 `StopFailure`, not `Stop`, is the event that fires when a turn ends on an API error, and its output
 is ignored. That is why the notice comes from `UserPromptSubmit`.
+
+## Pinned folders
+
+`cc pin` ties a folder, and everything under it, to one account. The pins live in one central
+file, `~/.claude-switch/pins.json`, so nothing is written into a company repository just to pin
+it.
+
+**Lookup.** `cc` resolves the current directory (`~`, `..` and symlinks) and takes the pin with
+the longest matching path. `/work/acme-tools` is not inside a pin on `/work/acme`: a match must end
+at a path separator.
+
+**Choosing the account.** Every launch asks `cc-detect start-for <cwd>`:
+
+```
+pinned, account free           ->  use <account>
+pinned, account limited        ->  switch / ask <fallback>, or stop
+unpinned                       ->  the usual pick, over accounts that are not pinned
+```
+
+After a limit, `cc-detect fallback-for` applies the same rule. In a pinned folder the only move is
+to the pin's fallback, and a second limit there stops. Unpinned folders keep the original rotation,
+but pinned accounts are taken out of it. That single rule gives both "personal never borrows a
+company seat" and "nothing changes for users without pins".
+
+**Isolation.** Each `cc` process has its own session id, watcher and run files. The only shared
+files are `state.json` and `pins.json`, written under a lock, and the per-account usage files,
+replaced atomically. So five terminals on one account each switch on their own when it runs out,
+without waiting on each other, and sessions on other accounts never notice.
+
+## Continuing without anyone typing
+
+At a real limit, the request that failed was the model call, so no tool is running in the
+foreground. `cc-watch` ends the run, `cc` carries the transcript over and starts the next
+account with `claude --resume <session> "Continue where you left off."`. The message is
+configurable, and `--no-auto-continue` turns it off.
+
+## Switching before the limit
+
+There is no local file with a usage percentage, and asking the API would be a network call this
+tool does not make. What does exist is the status line input: Claude Code passes it
+`rate_limits.five_hour.used_percentage` and `rate_limits.seven_day.used_percentage`, with their
+reset times, from the answers it already received (Pro and Max plans only).
+
+So when `earlySwitch` is on, `cc` starts each run with `--settings` pointing at a file that adds:
+
+1. a status line, `cc-detect statusline`, that records those numbers per account and then runs the
+   user's own status line command, if any, so the display does not change;
+2. a `Stop` hook, `cc-detect turn-ended`, that notes where the transcript ended when Claude
+   finished a turn.
+
+`cc-watch` ends the run when the account is past the threshold **and** no new `user` line (a new
+prompt or a tool result) has been written since the last `Stop`. That means Claude is waiting for
+you, so nothing is cut off. No continue message is sent, because the turn was complete.
+
+Without the data (another plan, or the feature off), `cc` switches at the real limit, and
+auto-continue makes that nearly as smooth.
 
 ## When every account is spent
 

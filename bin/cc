@@ -17,11 +17,20 @@
 #   cc remove <id>         deregister an account  (--purge also deletes its dir)
 #   cc clear <id>          forget a limit recorded for an account
 #   cc vscode on|off       keep the VS Code panel on an account with quota left
+#   cc pin [folder]        keep a folder (and its subfolders) on one account — asks which
+#   cc pin <folder> --account <id> --fallback <id>|none|ask [--no-vscode] [--yes]
+#   cc unpin [folder]      remove a pin, and the VS Code setting it wrote
+#   cc pins                list pinned folders
 #   cc --acct <id>         force a specific account for this run
 #   cc --manual            never end a run automatically on a limit
+#   cc --no-auto-continue  after a switch, wait for you instead of carrying on by itself
 #   cc -- <claude args>    hand anything else straight to claude
 #
+# Inside a pinned folder the pin decides: its account, then only the fallback it names
+# (or nothing). Elsewhere, cc rotates over the accounts that are not pinned anywhere.
+#
 # Config: ~/.claude-switch/config.json    State: ~/.claude-switch/state.json
+# Pins:   ~/.claude-switch/pins.json
 
 set -uo pipefail
 
@@ -30,6 +39,8 @@ DETECT="$HERE/cc-detect"
 WATCH="$HERE/cc-watch"
 VSCODE="$HERE/cc-vscode"
 AUTOKILL=1
+AUTO_CONTINUE=1
+RUN_DIR="$HOME/.claude-switch/run"
 
 c_dim=$'\033[2m'; c_yel=$'\033[33m'; c_grn=$'\033[32m'; c_bold=$'\033[1m'; c_rst=$'\033[0m'
 note() { printf '%s[cc]%s %s\n' "$c_dim" "$c_rst" "$*" >&2; }
@@ -96,6 +107,251 @@ fmt_time() {
 sync_vscode() {
     [ -x "$VSCODE" ] && "$VSCODE" sync --quiet >/dev/null 2>&1
     return 0
+}
+
+tilde() {
+    case "$1" in "$HOME"|"$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac
+}
+
+default_id() { "$DETECT" accounts | awk -F'\t' '$3 == 1 { print $1; exit }'; }
+
+# ---- menus ------------------------------------------------------------------
+# menu <question> <default index> <option>...  — the chosen index lands in MENU_PICK.
+# Arrow keys (or j/k, or a digit) and Enter on a terminal. With no terminal, or
+# TERM=dumb, a numbered list read line by line from stdin, so scripts and tests can
+# answer it. Returns 1 when cancelled (q, or end of input). Plain bash 3.2.
+MENU_PICK=0
+menu() {
+    local question="$1" sel="$2" i key rest
+    shift 2
+    local opts=("$@") n=$#
+    if [ -t 0 ] && [ -t 2 ] && [ "${TERM:-dumb}" != "dumb" ] && [ -z "${CC_NUMBERED_MENUS:-}" ]; then
+        printf '%s%s%s  %s(↑/↓, Enter)%s\n' "$c_bold" "$question" "$c_rst" "$c_dim" "$c_rst" >&2
+        printf '\033[?25l' >&2
+        trap 'printf "\033[?25h\n" >&2; exit 130' INT
+        while :; do
+            i=0
+            while [ "$i" -lt "$n" ]; do
+                if [ "$i" -eq "$sel" ]; then
+                    printf '\033[2K  %s▶ %s%s\n' "$c_grn" "${opts[$i]}" "$c_rst" >&2
+                else
+                    printf '\033[2K    %s\n' "${opts[$i]}" >&2
+                fi
+                i=$((i + 1))
+            done
+            IFS= read -rsn1 key || key=q
+            case "$key" in
+                $'\033') IFS= read -rsn2 rest || rest=""
+                          case "$rest" in
+                              "[A"|"OA") sel=$(( (sel + n - 1) % n )) ;;
+                              "[B"|"OB") sel=$(( (sel + 1) % n )) ;;
+                          esac ;;
+                k) sel=$(( (sel + n - 1) % n )) ;;
+                j) sel=$(( (sel + 1) % n )) ;;
+                [1-9]) [ "$key" -le "$n" ] && sel=$((key - 1)) ;;
+                "") break ;;
+                q) printf '\033[?25h' >&2; trap - INT; return 1 ;;
+            esac
+            printf '\033[%dA' "$n" >&2
+        done
+        printf '\033[?25h' >&2
+        trap - INT
+    else
+        printf '%s\n' "$question" >&2
+        i=0
+        while [ "$i" -lt "$n" ]; do
+            printf '  %d) %s\n' "$((i + 1))" "${opts[$i]}" >&2
+            i=$((i + 1))
+        done
+        while :; do
+            printf '  choose 1-%d [%d]: ' "$n" "$((sel + 1))" >&2
+            IFS= read -r key || { printf '\n' >&2; return 1; }
+            [ -z "$key" ] && break
+            case "$key" in
+                *[!0-9]*) ;;
+                *) if [ "$key" -ge 1 ] && [ "$key" -le "$n" ]; then sel=$((key - 1)); break; fi ;;
+            esac
+            printf '  type a number from 1 to %d\n' "$n" >&2
+        done
+    fi
+    MENU_PICK=$sel
+}
+
+# confirm <question> <y|n>  — Enter takes the default; end of input is "no".
+confirm() {
+    local hint="y/N" ans
+    [ "$2" = "y" ] && hint="Y/n"
+    printf '%s%s (%s)%s ' "$c_bold" "$1" "$hint" "$c_rst" >&2
+    IFS= read -r ans || { printf '\n' >&2; return 1; }
+    [ -z "$ans" ] && ans="$2"
+    case "$ans" in [yY]*) return 0 ;; *) return 1 ;; esac
+}
+
+# ---- cc pin / unpin / pins --------------------------------------------------
+# The interactive part of `cc pin`. Sets PIN_ACCT, PIN_FB (an id, none, or ask) and
+# PIN_VSCODE; returns 1 when the user backs out.
+pin_menu() {
+    local folder="$1" dflt="$2" sel=0 ids labels id email name i
+    printf '\nFolder: %s   (all subfolders included)\n\n' "$(tilde "$folder")" >&2
+    while :; do
+        ids=(); labels=()
+        while IFS=$'\t' read -r id email; do
+            ids+=("$id")
+            labels+=("$(printf '%-10s %s' "$id" "${email:-not logged in}")")
+        done < <("$DETECT" emails)
+        labels+=("+ Add a new account")
+        menu "Which account should this folder use?" "$sel" "${labels[@]}" || return 1
+        if [ "$MENU_PICK" -lt "${#ids[@]}" ]; then
+            PIN_ACCT="${ids[$MENU_PICK]}"
+            break
+        fi
+        printf '%sName for the new account (a-z, 0-9, - and _):%s ' "$c_bold" "$c_rst" >&2
+        IFS= read -r name || return 1
+        [ -n "$name" ] || continue
+        if "$HERE/cc" add "$name"; then
+            i=0
+            for id in "${ids[@]}"; do i=$((i + 1)); done
+            sel=$i                           # a new account is appended last
+        fi
+        echo >&2
+    done
+
+    # Only an account that is not pinned anywhere can catch this folder's overflow:
+    # normally that is the default account. One employer's account never covers another's.
+    local fbs=() fbl=() pinned
+    pinned=" $("$DETECT" pins | awk -F'\t' -v me="$folder" '$1 != me { printf "%s ", $2 }')"
+    if [ "$PIN_ACCT" != "$dflt" ]; then
+        fbs+=("$dflt"); fbl+=("Switch to $dflt")
+    else
+        for id in "${ids[@]}"; do
+            [ "$id" = "$dflt" ] && continue
+            case "$pinned" in *" $id "*) continue ;; esac
+            fbs+=("$id"); fbl+=("Switch to $id")
+        done
+    fi
+    fbl+=("Stop and wait for reset")
+    [ "${#fbs[@]}" -gt 0 ] && fbl+=("Ask me each time")
+    echo >&2
+    menu "If $PIN_ACCT hits its limit:" 0 "${fbl[@]}" || return 1
+    if [ "$MENU_PICK" -lt "${#fbs[@]}" ]; then
+        PIN_FB="${fbs[$MENU_PICK]}"
+    elif [ "$MENU_PICK" -eq "${#fbs[@]}" ]; then
+        PIN_FB=none
+    else
+        PIN_FB="ask:${fbs[0]}"
+    fi
+
+    echo >&2
+    menu "Apply to:" 0 "Terminal and VS Code" "Terminal only" || return 1
+    PIN_VSCODE=1
+    [ "$MENU_PICK" -eq 1 ] && PIN_VSCODE=0
+    echo >&2
+    confirm "Save?" y
+}
+
+cmd_pin() {
+    local path="" acct="" fb="" vscode=1 yes=0 interactive=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --account|--fallback)
+                { [ $# -ge 2 ] && [ -n "$2" ]; } || die "cc pin: $1 needs a value"
+                if [ "$1" = "--account" ]; then acct="$2"; else fb="$2"; fi
+                shift 2 ;;
+            --no-vscode) vscode=0; shift ;;
+            --yes|-y) yes=1; shift ;;
+            -*) die "cc pin: unknown option $1" ;;
+            *) [ -z "$path" ] || die "cc pin: one folder at a time"; path="$1"; shift ;;
+        esac
+    done
+    [ -n "$path" ] || path="$PWD"
+    [ -d "$path" ] || die "cc pin: not a folder: $path"
+    "$DETECT" accounts >/dev/null || exit 3
+    local folder dflt
+    folder="$("$DETECT" canon "$path")"
+    dflt="$(default_id)"
+
+    if [ -z "$acct" ]; then
+        interactive=1
+        PIN_ACCT=""; PIN_FB=""; PIN_VSCODE=1
+        pin_menu "$folder" "$dflt" || die "nothing saved"
+        acct="$PIN_ACCT"; fb="$PIN_FB"; vscode="$PIN_VSCODE"
+    fi
+
+    local on_limit fb_id
+    case "${fb:-none}" in
+        none|stop) on_limit=stop; fb_id="-" ;;
+        ask)       on_limit=ask;  fb_id="$dflt" ;;
+        ask:*)     on_limit=ask;  fb_id="${fb#ask:}" ;;
+        *)         on_limit=switch; fb_id="$fb" ;;
+    esac
+    "$DETECT" pin "$folder" "$acct" "$on_limit" "$fb_id" "$vscode" >/dev/null || exit $?
+
+    if [ "$vscode" = "1" ]; then
+        local rc=0
+        if [ "$yes" = "1" ]; then
+            "$VSCODE" workspace-apply "$folder" --yes || rc=$?
+        else
+            "$VSCODE" workspace-apply "$folder" || rc=$?
+        fi
+        if [ "$rc" -eq 4 ]; then
+            if [ "$interactive" = "1" ] && confirm "Write this folder's account into it anyway?" n; then
+                "$VSCODE" workspace-apply "$folder" --yes || rc=$?
+            else
+                rc=1
+            fi
+            if [ "$rc" -ne 0 ]; then
+                "$DETECT" pin "$folder" "$acct" "$on_limit" "$fb_id" 0 >/dev/null
+                warn "VS Code settings left alone; the pin applies in the terminal only (cc pin --yes writes them)"
+            fi
+        elif [ "$rc" -ne 0 ]; then
+            warn "VS Code settings were not changed; the pin applies in the terminal"
+        fi
+    fi
+
+    local rule
+    case "$on_limit" in
+        switch) rule="then $fb_id" ;;
+        ask)    rule="then ask about $fb_id" ;;
+        stop)   rule="then stop and wait" ;;
+    esac
+    good "$(tilde "$folder") -> $acct, $rule"
+    [ "$vscode" = "1" ] && note "open VS Code windows on this folder pick it up after Developer: Reload Window"
+    return 0
+}
+
+cmd_unpin() {
+    local path="${1:-$PWD}" folder pin
+    "$DETECT" accounts >/dev/null || exit 3
+    folder="$("$DETECT" canon "$path")"
+    if ! "$DETECT" pins | cut -f1 | grep -qxF "$folder"; then
+        if pin="$("$DETECT" pin-of "$folder")"; then
+            die "$(tilde "$folder") is inside the pin on $(tilde "${pin%%$'\t'*}") — run: cc unpin $(tilde "${pin%%$'\t'*}")"
+        fi
+        die "$(tilde "$folder") is not pinned"
+    fi
+    "$VSCODE" workspace-clear "$folder" || warn "the VS Code setting could not be removed — see above"
+    "$DETECT" unpin "$folder" >/dev/null
+    good "unpinned $(tilde "$folder")"
+}
+
+cmd_pins() {
+    local rows
+    "$DETECT" accounts >/dev/null || exit 3
+    rows="$("$DETECT" pins)"
+    if [ -z "$rows" ]; then
+        note "no pinned folders — run cc pin inside one"
+        return 0
+    fi
+    printf '%s\n' "$rows" | while IFS=$'\t' read -r path acct on fb vs; do
+        case "$on" in
+            switch) rule="then $fb" ;;
+            ask)    rule="then ask about $fb" ;;
+            *)      rule="then stop" ;;
+        esac
+        where="terminal"
+        [ "$vs" = "1" ] && where="terminal + VS Code"
+        printf '  %-40s %-10s %-24s %s\n' "$(tilde "$path")" "$acct" "$rule" "$where"
+    done
 }
 
 # ---- cc status --------------------------------------------------------------
@@ -297,6 +553,9 @@ cmd_remove() {
     shift
     [ "${1:-}" = "--purge" ] && purge=1
     is_default "$id" && die "cc remove: refusing — '$id' is the default account"
+    if "$DETECT" pins | awk -F'\t' -v id="$id" '$2 == id || $4 == id { found = 1 } END { exit !found }'; then
+        die "cc remove: '$id' is used by a pinned folder — see cc pins, then cc unpin it first"
+    fi
     local dir; dir="$(acct_dir "$id")" || die "no such account: $id"
 
     if [ "$purge" = "1" ]; then
@@ -409,6 +668,9 @@ case "${1:-}" in
     remove) shift; cmd_remove "$@"; exit $? ;;
     use)    shift; cmd_use "$@"; exit $? ;;
     clear)  shift; cmd_clear "$@"; exit $? ;;
+    pin)    shift; cmd_pin "$@"; exit $? ;;
+    unpin)  shift; cmd_unpin "$@"; exit $? ;;
+    pins)   shift; cmd_pins; exit $? ;;
     vscode)
         shift
         [ -x "$VSCODE" ] || die "missing $VSCODE"
@@ -427,6 +689,7 @@ while :; do
     case "${1:-}" in
         --acct)   FORCED="${2:-}"; shift 2 ;;
         --manual) AUTOKILL=0; shift ;;
+        --no-auto-continue) AUTO_CONTINUE=0; shift ;;
         --)       shift; break ;;
         *) break ;;
     esac
@@ -434,22 +697,73 @@ done
 
 "$DETECT" accounts >/dev/null || exit 3   # surfaces config errors before launching
 
-ACCT="$FORCED"
-if [ -z "$ACCT" ]; then
-    ACCT="$("$DETECT" pick)" || ACCT=""
-fi
+# Several cc sessions can run at once, on one account or many. Each keeps its own
+# session id, watcher and run files; the only shared files (state, pins, usage) are
+# written under a lock or by atomic replace, so sessions never wait on each other.
 SESSION="$(new_session)"
 CWD="$PWD"
 RESUME=0
+CONTINUE_MSG=""
+PIN_ACCT=""
+if pin="$("$DETECT" pin-of "$CWD" 2>/dev/null)"; then
+    PIN_ACCT="$(printf '%s' "$pin" | cut -f2)"
+fi
 # Accounts already used in this run, space-delimited. A plain string rather than
 # an associative array because macOS ships bash 3.2, which has no `declare -A`.
 # Account ids are restricted to [a-z0-9_-], so they can never contain a space.
 TRIED=""
 
+if "$DETECT" get earlySwitch.enabled >/dev/null 2>&1; then EARLY=1; else EARLY=0; fi
+if [ "$AUTO_CONTINUE" = "1" ] && ! "$DETECT" get autoContinue.enabled true >/dev/null 2>&1; then
+    AUTO_CONTINUE=0
+fi
+
+# A pinned folder whose account is limited and that allows nothing else. The
+# conversation is safe in that account's folder; it simply waits for the reset.
+stop_pinned() {
+    local id="$1" until
+    until="$("$DETECT" until "$id" 2>/dev/null)" || until=0
+    if [ "${until:-0}" -gt "$(date +%s)" ] 2>/dev/null; then
+        warn "'$id' is limited until $(fmt_time "$until"), and this folder is pinned to it with nothing else allowed."
+    else
+        warn "'$id' is limited, and this folder is pinned to it with nothing else allowed."
+    fi
+    if [ "$RESUME" = "1" ] || [ -n "$TRIED" ]; then
+        note "after the reset, run cc here and use /resume to pick this conversation up ($SESSION)"
+    fi
+    exit 1
+}
+
+# A pin set to ask: ask on a terminal, and treat no terminal as "stop".
+ask_fallback() {
+    local from="$1" to="$2"
+    if [ ! -t 0 ] && [ -z "${CC_NUMBERED_MENUS:-}" ]; then
+        note "this folder asks before moving off '$from', and there is no terminal to ask on"
+        return 1
+    fi
+    menu "'$from' is limited. Continue on '$to'?" 0 "Switch to $to" "Stop and wait for the reset" || return 1
+    [ "$MENU_PICK" -eq 0 ]
+}
+
+clean_run_files() { rm -f "$RUN_DIR/$SESSION".turn "$RUN_DIR/$SESSION".next "$RUN_DIR/$SESSION".settings.json "$RUN_DIR/$SESSION".early; }
+trap clean_run_files EXIT
+
+# Where this session starts: the pin's account, its fallback, or the global rotation.
+decision="$("$DETECT" start-for "$CWD" "$FORCED")" || exit 3
+verb="${decision%% *}"; ACCT="${decision#"$verb"}"; ACCT="${ACCT# }"
+case "$verb" in
+    use) ;;
+    switch) warn "'$PIN_ACCT' is limited — this folder falls back to '$ACCT'" ;;
+    ask) ask_fallback "$PIN_ACCT" "$ACCT" || stop_pinned "$PIN_ACCT" ;;
+    stop) stop_pinned "$ACCT" ;;
+    *) ACCT="" ;;
+esac
+
 # ---- main loop --------------------------------------------------------------
 while :; do
     if [ -z "$ACCT" ]; then
-        # Tier 1 exhausted. Try the configured fallbacks, in order.
+        # Tier 1 exhausted. Try the configured fallbacks, in order. Only reached outside
+        # pinned folders: a pin names everything its folder may use.
         slug="$("$DETECT" slug "$CWD")"
         last_transcript=""
         for d in $("$DETECT" accounts | cut -f2); do
@@ -470,9 +784,20 @@ while :; do
     # limited.
     offset="$("$DETECT" size "$dir" "$SESSION" "$CWD")"
 
+    # Early switch (opt-in): a status line of ours records the account's usage, and a
+    # Stop hook marks the end of each turn, so the watcher can end the run between
+    # turns once usage passes the threshold. Nothing is sent anywhere.
+    extra=()
+    rm -f "$RUN_DIR/$SESSION.turn" "$RUN_DIR/$SESSION.early"
+    if [ "$EARLY" = "1" ]; then
+        if settings="$("$DETECT" early-settings "$ACCT" "$SESSION" "$CWD")"; then
+            extra=(--settings "$settings")
+        fi
+    fi
+
     WATCHER=""
     if [ "$AUTOKILL" = "1" ] && [ -x "$WATCH" ]; then
-        "$WATCH" "$dir" "$SESSION" "$CWD" "$offset" "$$" &
+        CC_EARLY_SWITCH="$EARLY" "$WATCH" "$dir" "$SESSION" "$CWD" "$offset" "$$" "$ACCT" &
         WATCHER=$!
     fi
 
@@ -482,10 +807,13 @@ while :; do
     "$DETECT" record-run "$ACCT" "$SESSION" >/dev/null 2>&1 || true
     export CC_MANAGED=1
 
-    if [ "$RESUME" = "1" ]; then
-        run_acct "$ACCT" --resume "$SESSION" "$@"
+    # ${extra[@]+...}: bash 3.2 treats an empty array as unset under set -u.
+    if [ "$RESUME" = "1" ] && [ -n "$CONTINUE_MSG" ]; then
+        run_acct "$ACCT" --resume "$SESSION" ${extra[@]+"${extra[@]}"} "$@" "$CONTINUE_MSG"
+    elif [ "$RESUME" = "1" ]; then
+        run_acct "$ACCT" --resume "$SESSION" ${extra[@]+"${extra[@]}"} "$@"
     else
-        run_acct "$ACCT" --session-id "$SESSION" "$@"
+        run_acct "$ACCT" --session-id "$SESSION" ${extra[@]+"${extra[@]}"} "$@"
     fi
 
     if [ -n "$WATCHER" ]; then
@@ -493,22 +821,35 @@ while :; do
         wait "$WATCHER" 2>/dev/null
     fi
 
+    # A real limit cut the turn short; an early switch waited for the turn to end.
+    reason=limit
     hit="$("$DETECT" scan "$dir" "$SESSION" "$CWD" "$offset")" || hit=""
+    if [ -z "$hit" ] && [ -s "$RUN_DIR/$SESSION.early" ]; then
+        hit="$(cat "$RUN_DIR/$SESSION.early")"
+        reason=early
+    fi
     [ -n "$hit" ] || exit 0               # normal exit — nothing to do
     read -r resets ltype <<<"$hit"
 
     "$DETECT" raise "$ACCT" "$resets" ${ltype:+"$ltype"} >/dev/null
-    warn "$ACCT hit its limit · resets $(fmt_time "$resets")"
+    if [ "$reason" = "early" ]; then
+        warn "$ACCT is nearly at its limit · resets $(fmt_time "$resets") — switching between turns"
+    else
+        warn "$ACCT hit its limit · resets $(fmt_time "$resets")"
+    fi
     sync_vscode                           # the panel follows, when it is managed
 
-    # Next available account that this run has not already used.
-    # comma-separate the used ids for cc-detect
-    NEXT="$("$DETECT" next-free "$(echo "$TRIED" | tr -s ' ' ',' | sed 's/^,//;s/,$//')")" || NEXT=""
-
-    if [ -z "$NEXT" ]; then
-        ACCT=""            # fall through to the fallback tiers
-        continue
-    fi
+    # Where to go next: the pin's fallback in a pinned folder, else the next free
+    # unpinned account this run has not used yet.
+    decision="$("$DETECT" fallback-for "$CWD" "$ACCT" "$(echo "$TRIED" | tr -s ' ' ',' | sed 's/^,//;s/,$//')")" \
+        || decision="stop $ACCT"
+    verb="${decision%% *}"; NEXT="${decision#"$verb"}"; NEXT="${NEXT# }"
+    case "$verb" in
+        switch) ;;
+        ask) ask_fallback "$ACCT" "$NEXT" || stop_pinned "$ACCT" ;;
+        stop) RESUME=1; stop_pinned "$NEXT" ;;
+        *) ACCT=""; continue ;;            # fall through to the fallback tiers
+    esac
 
     # ---- carry the conversation across --------------------------------------
     slug="$("$DETECT" slug "$CWD")"
@@ -520,12 +861,24 @@ while :; do
         # already one file when VS Code sync has linked this chat across
         [ "$src" -ef "$dst_dir/$SESSION.jsonl" ] || cp -p "$src" "$dst_dir/$SESSION.jsonl"
         RESUME=1
+        # The limit cut a turn short, so nobody is about to type: say "carry on" for
+        # them. After an early switch the turn had finished and Claude waits for you.
+        CONTINUE_MSG=""
+        if [ "$reason" = "limit" ] && [ "$AUTO_CONTINUE" = "1" ]; then
+            CONTINUE_MSG="$("$DETECT" get autoContinue.message 2>/dev/null)" || CONTINUE_MSG=""
+            [ -n "$CONTINUE_MSG" ] || CONTINUE_MSG="Continue where you left off."
+        fi
     else
         warn "no transcript found — starting fresh on $NEXT"
         SESSION="$(new_session)"
         RESUME=0
+        CONTINUE_MSG=""
     fi
 
     ACCT="$NEXT"
-    good "switching to $ACCT — same conversation"
+    if [ -n "$CONTINUE_MSG" ]; then
+        good "switching to $ACCT — same conversation, continuing by itself"
+    else
+        good "switching to $ACCT — same conversation"
+    fi
 done

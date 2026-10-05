@@ -22,13 +22,14 @@ when_is() {
     date -d "@$1" "$fmt" 2>/dev/null || date -r "$1" "$fmt" 2>/dev/null || echo '?'
 }
 
-IFS=$'\037' read -r session transcript < <(python3 -c '
+IFS=$'\037' read -r session transcript cwd < <(python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     d = {}
-print("%s\x1f%s" % (d.get("session_id") or "", d.get("transcript_path") or ""))' 2>/dev/null)
+print("%s\x1f%s\x1f%s" % (d.get("session_id") or "", d.get("transcript_path") or "", d.get("cwd") or ""))' 2>/dev/null)
+[ -n "${cwd:-}" ] || cwd="$PWD"
 [ -n "${session:-}" ] && [ -f "${transcript:-}" ] || exit 0
 
 acct="$("$DETECT" account-of "${CLAUDE_CONFIG_DIR:-}" 2>/dev/null)" || exit 0
@@ -47,6 +48,41 @@ esac
 hit="'$id' hit its ${kind}limit (resets $(when_is "$resets"))."
 
 VSCODE="$(dirname "$DETECT")/cc-vscode"
+in_vscode=0
+[ "${CLAUDE_CODE_ENTRYPOINT:-}" = "claude-vscode" ] && in_vscode=1
+
+# A pinned folder follows its own rule: its fallback, a question, or a stop. It never
+# moves to whichever account happens to be free.
+if pin="$("$DETECT" pin-of "$cwd" 2>/dev/null)"; then
+    folder="$(printf '%s' "$pin" | cut -f1)"
+    pin_vscode="$(printf '%s' "$pin" | cut -f5)"
+    decision="$("$DETECT" fallback-for "$cwd" "$id" 2>/dev/null)" || decision="stop $id"
+    verb="${decision%% *}"; next="${decision#"$verb"}"; next="${next# }"
+    case "$verb" in
+        switch)
+            if [ "${CC_MANAGED:-}" = "1" ]; then
+                msg="$hit Exit this session and cc continues it on '$next', with the conversation carried over."
+            elif [ "$in_vscode" = "1" ] && [ "$pin_vscode" = "1" ] && [ -x "$VSCODE" ]; then
+                "$VSCODE" sync --quiet >/dev/null 2>&1
+                msg="$hit This folder falls back to '$next': its VS Code window is now set to '$next' and this chat was carried over. Run \"Developer: Reload Window\" (Ctrl+Shift+P) and it continues there."
+            else
+                msg="$hit This folder falls back to '$next'. Exit and run \`cc\` in this folder to continue there."
+            fi ;;
+        ask)
+            if [ "${CC_MANAGED:-}" = "1" ]; then
+                msg="$hit Exit this session and cc asks whether to continue on '$next'."
+            elif [ "$in_vscode" = "1" ] && [ "$pin_vscode" = "1" ]; then
+                msg="$hit This folder asks before leaving '$id'. To continue on '$next' now, run \`cc vscode fallback\` in a terminal in this folder, then \"Developer: Reload Window\". Or wait for the reset."
+            else
+                msg="$hit This folder asks before leaving '$id'. Exit and run \`cc\` in this folder to choose, or wait for the reset."
+            fi ;;
+        *)
+            msg="$hit $(printf '%s' "$folder" | sed "s|^$HOME|~|") is pinned to '$id' with nothing else allowed, so wait for the reset." ;;
+    esac
+    python3 -c 'import json, sys; print(json.dumps({"decision": "block", "reason": sys.argv[1]}))' "$msg"
+    exit 0
+fi
+
 next="$("$DETECT" next-free "$id" 2>/dev/null)" || next=""
 
 if [ -z "$next" ]; then
