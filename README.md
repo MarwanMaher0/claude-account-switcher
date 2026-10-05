@@ -337,7 +337,6 @@ Claude Code reports usage. It is off by default. See
 
 Unpin any folder that uses the account first (`cc pins` lists them).
 
-
 ```bash
 cc remove work            # stop using it; its folder stays on disk
 cc remove work --purge    # also delete its folder (you type the name to confirm)
