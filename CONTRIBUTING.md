@@ -40,6 +40,12 @@ explains why. A change that needs that test edited needs a very good reason.
 
 **No network calls, no telemetry.** Also enforced by the security suite.
 
+**Hooks stay offline.** Every script in `hooks/` exports `CC_LIVE_CHECK=0` before calling
+`cc-detect`, so it reads local state only and never starts `claude` (the live usage check runs
+`claude -p /usage` with a 30 s timeout, longer than any hook's). `test/test-hooks-offline.sh`
+runs each hook with a recording fake `claude` on `PATH` and fails if it is called or a hook takes
+2 s or more.
+
 **Keep both false-positive guards.** Expired limit events must be ignored, and scanning must start
 from the pre-run byte offset. Both were real bugs; HOW-IT-WORKS.md explains them.
 

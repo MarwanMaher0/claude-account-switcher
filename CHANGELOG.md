@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed — hooks could start `claude` and outlive their timeout
+- The SessionStart and UserPromptSubmit hooks called `cc-detect next-free` (and
+  `soonest`/`fallback-for`), which could re-check limited accounts live by running
+  `claude -p /usage`, with a 30 s timeout, inside hooks allowed 10 s and 15 s. Every hook now
+  sets `CC_LIVE_CHECK=0` and reads local state only. A new suite, `test/test-hooks-offline.sh`,
+  proves no hook runs `claude` and each finishes in under 2 s.
+- The security suite's denylist check (S-2) names only the files a private string was found
+  in, never the string itself.
+- `CC_TEST_SKIP="test-live.sh"` leaves suites out of `test/run-all.sh`.
+
 ### Fixed — a folder pinned after it was used lost its chats in VS Code
 - A folder's chats stay in the account they ran on. A folder pinned after it had been used had
   its earlier chats in other accounts (the default one, or one reserved for another folder's

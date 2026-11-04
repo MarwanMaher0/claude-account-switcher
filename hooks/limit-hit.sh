@@ -9,6 +9,12 @@
 # writes VS Code settings. What to do next is said by limit-notice.sh on the next prompt.
 set -uo pipefail
 
+# Hooks must stay offline: they run inside the session under a short timeout, and the
+# live usage check behind next-free/soonest/fallback-for runs `claude -p /usage` with
+# a 30 s timeout. CC_LIVE_CHECK=0 makes cc-detect read local state only, for every
+# tool this hook calls. test/test-hooks-offline.sh guards it.
+export CC_LIVE_CHECK=0
+
 # The plugin ships its own copy of the tools, so a plugin installed from the directory
 # works before the cc command is installed. Prefer that copy: it is the version these
 # hooks were released with.

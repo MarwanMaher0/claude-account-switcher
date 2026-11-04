@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run every suite. No framework to install, no API quota consumed: `claude` is
-# stubbed and each test runs against a throwaway HOME.
+# stubbed and each test runs against a throwaway HOME. CC_TEST_SKIP names suites
+# to leave out, space-separated: CC_TEST_SKIP=test-live.sh bash test/run-all.sh
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,7 +9,8 @@ rc=0
 
 for suite in test-config.sh test-launch.sh test-accounts.sh test-plugin.sh test-vscode.sh test-pins.sh \
              test-bind.sh test-wrapper.sh test-companion.sh test-migrate.sh test-adopt.sh test-extension-contract.sh \
-             test-live.sh test-security.sh; do
+             test-hooks-offline.sh test-live.sh test-security.sh; do
+    case " ${CC_TEST_SKIP:-} " in *" $suite "*) echo; echo "$suite: skipped (CC_TEST_SKIP)"; continue ;; esac
     echo
     bash "$HERE/$suite" || rc=1
 done

@@ -42,22 +42,65 @@ done < <(
     printf '\n%s\n' "${SECURITY_DENYLIST:-}" | tr ',' '\n'
 )
 
+# Only what is published matters: tracked files when <root> is a git checkout.
+# Prints the matching paths, relative to <root>, one per line.
+s2_search() {   # s2_search <root> <pattern>
+    if git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$1" grep -ilF -e "$2" -- . ':(exclude).security-denylist' 2>/dev/null || true
+    else
+        (cd "$1" && grep -rilF -e "$2" . --exclude-dir=.git --exclude=.security-denylist 2>/dev/null \
+            | sed 's|^\./||') || true
+    fi
+}
+
+# The S-2 check and its report. A failure names only the files: the patterns are
+# private, so they must never reach the output, a CI log included.
+s2_check() {    # s2_check <root> <pattern>...
+    local root="$1"; shift
+    local leaks
+    leaks="$(for pat in "$@"; do s2_search "$root" "$pat"; done | sort -u | tr '\n' ' ')"
+    leaks="${leaks% }"
+    if [ -z "$leaks" ]; then
+        ok "S-2 no work or machine identifiers anywhere in the repo ($# patterns)"
+    else
+        no "S-2 no work or machine identifiers anywhere in the repo ($# patterns)" \
+           "a denylisted string appears in: $leaks"
+    fi
+}
+
 if [ "${#BAD_PATTERNS[@]}" -eq 0 ]; then
     echo "  - S-2 no denylist (.security-denylist or SECURITY_DENYLIST): skipped"
 else
-    # Only what is published matters: tracked files when this is a git checkout.
-    if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        search() { git -C "$REPO" grep -ilF -e "$1" -- . ':(exclude).security-denylist' 2>/dev/null || true; }
-    else
-        search() { grep -rilF -e "$1" "$REPO" --exclude-dir=.git --exclude=.security-denylist 2>/dev/null || true; }
-    fi
-    leaks=""
-    for pat in "${BAD_PATTERNS[@]}"; do
-        found="$(search "$pat" | tr '\n' ' ')"
-        [ -n "$found" ] && leaks="$leaks [${pat}: ${found% }]"
-    done
-    assert_eq "$leaks" "" "S-2 no work or machine identifiers anywhere in the repo (${#BAD_PATTERNS[@]} patterns)"
+    s2_check "$REPO" "${BAD_PATTERNS[@]}"
 fi
+
+# ---- S-2 self-test : a leak report never prints the pattern -------------------
+# Runs with or without a denylist. A synthetic pattern is planted in a throwaway
+# fixture, the same s2_check runs on it in a subshell (its failure must not count
+# here), and the report must name the file but never contain the pattern, in any case.
+S2_FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/cc-s2-XXXXXX")"
+S2_FIXTURE="${S2_FIXTURE%/}"
+s2_secret="s2-selftest-$$-$RANDOM$RANDOM-private"
+s2_upper="$(printf '%s' "$s2_secret" | tr '[:lower:]' '[:upper:]')"
+mkdir -p "$S2_FIXTURE/plain/docs" "$S2_FIXTURE/git/docs"
+for kind in plain git; do
+    printf 'notes\nreach me at %s today\n' "$s2_upper" > "$S2_FIXTURE/$kind/docs/leaky-notes.md"
+    printf 'nothing to see here\n' > "$S2_FIXTURE/$kind/clean.txt"
+done
+git -C "$S2_FIXTURE/git" init -q >/dev/null 2>&1 && git -C "$S2_FIXTURE/git" add -A >/dev/null 2>&1
+for kind in plain git; do
+    report="$(GIT_CEILING_DIRECTORIES="$S2_FIXTURE" s2_check "$S2_FIXTURE/$kind" "$s2_secret" "s2-selftest-absent-$$" 2>&1)"
+    report_lc="$(printf '%s' "$report" | tr '[:upper:]' '[:lower:]')"
+    assert_contains "$report" "✗" "S-2 self-test ($kind): a planted pattern fails the check"
+    assert_contains "$report" "docs/leaky-notes.md" "S-2 self-test ($kind): the report names the leaking file"
+    assert_not_contains "$report" "clean.txt" "S-2 self-test ($kind): ...and no clean file"
+    case "$report_lc" in
+        *"$s2_secret"*) no "S-2 self-test ($kind): the report never prints the pattern" \
+                           "the planted pattern appeared in the report (pattern withheld)" ;;
+        *) ok "S-2 self-test ($kind): the report never prints the pattern" ;;
+    esac
+done
+rm -rf "$S2_FIXTURE"
 
 # The published identity, on the other hand, must be present and correct.
 assert_contains "$(cat "$REPO/.claude-plugin/plugin.json" 2>/dev/null)" \
