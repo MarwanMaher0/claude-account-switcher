@@ -9,10 +9,22 @@
   "plugins": [
     {
       "name": "cc-switch",
+      "displayName": "Claude Account Switcher",
       "version": "2.3.1",
       "description": "Claude Code: switch to your next Claude account when one hits its usage limit, keeping the conversation. Run /cc-setup after installing.",
       "source": "./",
-      "category": "productivity"
+      "category": "productivity",
+      "homepage": "https://github.com/MarwanMaher0/claude-account-switcher",
+      "repository": "https://github.com/MarwanMaher0/claude-account-switcher",
+      "license": "MIT",
+      "keywords": [
+        "accounts",
+        "multiple-accounts",
+        "usage-limit",
+        "rate-limit",
+        "failover",
+        "vscode"
+      ]
     }
   ]
 }

@@ -4,3 +4,9 @@ __pycache__/
 
 # Private identifiers for test/test-security.sh S-2; never commit
 .security-denylist
+
+# Personal marketing drafts (backed up outside the repo); never re-add
+docs/LINKEDIN-DRAFT.md
+docs/LINKEDIN-POST.txt
+docs/REDDIT-DRAFT.md
+docs/PROFILE-README-DRAFT.md
