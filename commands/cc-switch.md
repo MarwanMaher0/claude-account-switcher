@@ -27,3 +27,8 @@ Then tell them plainly:
 
 If the other account is also rate limited, say so and give the reset time instead
 of suggesting a switch.
+
+This is one of the plugin's three slash commands (`/cc-setup`, `/cc-status`, `/cc-switch`);
+the plugin also has three hooks: `SessionStart` (`startup|resume|clear|compact`),
+`StopFailure` (`rate_limit`) and `UserPromptSubmit`. This command is never blocked by the
+`UserPromptSubmit` hook, even while the session's account is limited.

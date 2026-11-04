@@ -30,3 +30,7 @@ Set up the `cc` account switcher that ships inside this plugin.
      folders' `.vscode/settings.json` (a dry run; `--apply` cleans up).
 
 Never set `CLAUDE_CONFIG_DIR` to `~/.claude` for any command.
+
+This plugin ships three slash commands (`/cc-setup`, `/cc-status`, `/cc-switch`) and three
+hooks: `SessionStart` (`startup|resume|clear|compact`), `StopFailure` (`rate_limit`) and
+`UserPromptSubmit`.

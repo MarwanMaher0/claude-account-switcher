@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# SessionStart: name the account this session runs on, note when the run started —
-# so a limit hit later can be pinned on the right account even after the chat has
-# moved between accounts — and warn when failover is not available. Never changes
-# auth.
+# SessionStart (startup|resume|clear|compact): name the account this session runs
+# on, note when the run started — so a limit hit later can be pinned on the right
+# account even after the chat has moved between accounts — and warn when failover
+# is not available. Never changes auth.
+#
+# The run is recorded on startup, resume and clear (a new session, or one resumed
+# possibly on another account after a handoff), but NOT on compact: compaction
+# continues the same session, and stamping a fresh start would move the start past
+# a limit this session already hit, so limit-notice.sh would stop blocking on it.
 set -uo pipefail
 
 # Hooks must stay offline: they run inside the session under a short timeout, and the
@@ -31,15 +36,20 @@ id="${acct%%$'\t'*}"
 [ -n "$id" ] || exit 0
 
 session=""
+source=""
 if [ ! -t 0 ]; then
-    session="$(python3 -c '
+    IFS=$'\037' read -r session source < <(python3 -c '
 import json, sys
 try:
-    print(json.load(sys.stdin).get("session_id") or "")
+    d = json.load(sys.stdin)
 except Exception:
-    print("")' 2>/dev/null)"
+    d = {}
+print("%s\x1f%s" % (d.get("session_id") or "", d.get("source") or ""))' 2>/dev/null)
 fi
-[ -n "$session" ] && "$DETECT" record-run "$id" "$session" >/dev/null 2>&1
+case "${source:-}" in
+    compact) ;;   # same session continuing: keep the run's original start (above)
+    *) [ -n "${session:-}" ] && "$DETECT" record-run "$id" "$session" >/dev/null 2>&1 ;;
+esac
 
 email="$("$DETECT" emails 2>/dev/null | awk -F'\t' -v id="$id" '$1 == id { print $2 }')"
 printf 'Account in use: %s (%s)\n' "$id" "${email:-?}"

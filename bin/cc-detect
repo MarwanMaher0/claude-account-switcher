@@ -357,6 +357,17 @@ def limit_type(state, aid):
     return state.get("accounts", {}).get(aid, {}).get("limitType")
 
 
+def cleared_at(state, aid):
+    """When the account's limit was last cleared by hand (`cc clear`, i.e. `mark 0`),
+    or 0. A transcript keeps its limit event after the clear, so without this the
+    cleared limit would be re-learned and keep blocking: only an event written
+    after the clear counts."""
+    try:
+        return float(state.get("accounts", {}).get(aid, {}).get("clearedAt", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def raise_limit(state, aid, resets, ltype=None):
     """Record a limit window, never shortening one already known. True if changed."""
     entry = state.setdefault("accounts", {}).setdefault(aid, {})
@@ -993,6 +1004,8 @@ def _superseded(state, aid, ev):
     straight back on the next refresh — the event stays "unexpired" until its resetsAt.
     """
     checked = state.get("accounts", {}).get(aid, {}).get("liveCheckedAt", 0)
+    if cleared_at(state, aid) and (ev["ts"] is None or ev["ts"] <= cleared_at(state, aid)):
+        return True   # cleared by hand after this event: do not re-learn it
     if not checked:
         return False
     return ev["ts"] is None or ev["ts"] <= checked
@@ -1634,7 +1647,8 @@ def main(argv):
         # used by the StopFailure hook, which fires the moment the limit lands.
         path, aid, session = args[0], args[1], args[2]
         mode = args[3] if len(args) > 3 else "own"
-        run = latest_run(load_state().get("runs", []), session, aid=aid)
+        state = load_state()
+        run = latest_run(state.get("runs", []), session, aid=aid)
         started = run.get("startedAt") if run else None
         if mode == "own":
             if started is None:
@@ -1644,6 +1658,11 @@ def main(argv):
             since = max(time.time() - 900, started or 0)
         ev = session_limit(path, since)
         if not ev:
+            return 1
+        # A limit cleared by hand (`cc clear`) must not keep blocking on the event
+        # still sitting in the transcript: only a newer event counts.
+        cleared = cleared_at(state, aid)
+        if cleared and (ev["ts"] is None or ev["ts"] <= cleared):
             return 1
         _print_limit(ev)
 
@@ -1658,6 +1677,8 @@ def main(argv):
             else:
                 entry = state.setdefault("accounts", {}).setdefault(aid, {})
                 entry["limitedUntil"] = resets
+                if not resets:
+                    entry["clearedAt"] = time.time()   # `cc clear`: see cleared_at()
                 if ltype and resets:
                     entry["limitType"] = ltype
                 else:

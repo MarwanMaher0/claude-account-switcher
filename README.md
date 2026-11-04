@@ -7,7 +7,7 @@
 [![CI](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg)](#step-1-check-what-you-need)
-[![Tests](https://img.shields.io/badge/tests-357%20checks-brightgreen.svg)](CONTRIBUTING.md)
+[![Tests](https://img.shields.io/badge/tests-746%20checks-brightgreen.svg)](CONTRIBUTING.md)
 [![No telemetry](https://img.shields.io/badge/telemetry-none-success.svg)](#privacy)
 
 [Get started](#get-started) · [Everyday use](#everyday-use) · [Separate projects](#separate-projects-one-account-per-folder) · [VS Code](#step-6-vs-code-users-only) · [Troubleshooting](docs/TROUBLESHOOTING.md)
@@ -81,8 +81,14 @@ claude plugin marketplace add https://github.com/MarwanMaher0/claude-account-swi
 claude plugin install cc-switch
 ```
 
-Start `claude` and type `/cc-setup`. It installs the same four commands and shows what to do
+Start `claude` and type `/cc-setup`. It installs the same five commands and shows what to do
 next. This also covers Step 6a for your first account.
+
+The plugin itself adds **three slash commands** — `/cc-setup`, `/cc-status` and `/cc-switch` —
+and **three hooks**: `SessionStart` (on `startup|resume|clear|compact`, naming the account in
+use), `StopFailure` (on `rate_limit`, recording a limit the moment it lands) and
+`UserPromptSubmit` (keeping the next prompt out of a guaranteed 429 — except the three slash
+commands above, which are always let through so you can check or fix a limit).
 
 ### Step 3: See your first account
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.3.1 — 2026-11-04
+
+### Fixed
+- Sessions started by `/clear` or `/compact` never ran the `SessionStart` hook: its matcher
+  was `startup|resume` only. It is now `startup|resume|clear|compact`. A `clear` records a
+  run for the new session, as `startup` and `resume` do; a `compact` does not, since it
+  continues the same session and a fresh start stamp would move the run's start past a
+  limit it already hit, so the limit notice would stop blocking on it.
+- The `UserPromptSubmit` limit notice could block the plugin's own commands — `/cc-status`,
+  `/cc-switch` and `/cc-setup` — which are exactly how a limited user checks the accounts,
+  switches, or fixes the setup. It now reads the prompt from its stdin and always lets those
+  three (as the prompt's first word) through.
+- A limit cleared by hand with `cc clear <id>` kept blocking: the limit event stays in the
+  transcript, so the next prompt re-learned and re-raised it. `cc clear` now records when it
+  ran (`clearedAt`), and only a transcript limit event newer than that blocks (or is
+  re-learned by a refresh); a limit hit after the clear blocks again as before.
+
+### Changed
+- Documentation: the README and `commands/*.md` now state the plugin's real counts — three
+  slash commands (`/cc-setup`, `/cc-status`, `/cc-switch`), three hooks (`SessionStart`,
+  `StopFailure`, `UserPromptSubmit`) and the five installed commands (`cc`, `cc-detect`,
+  `cc-watch`, `cc-vscode`, `cc-claude-wrapper`) — and the README tests badge shows the real
+  check count.
+
 ## Unreleased
 
 ### Fixed — hooks could start `claude` and outlive their timeout

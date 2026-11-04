@@ -126,6 +126,74 @@ out="$(payload "$sid" "$d/$sid.jsonl" | hookenv env -u CLAUDE_CONFIG_DIR CC_MANA
 assert_contains "$out" "Exit this session" "T-12 under cc, exiting is the whole instruction"
 cleanup_home
 
+# ---- T-15 : SessionStart sources — clear records a run, compact does not restart one ----
+new_home >/dev/null; three_accounts
+d="$HOME/.claude/projects/-work"; mkdir -p "$d"
+sid="source-session"
+printf '{"type":"assistant","uuid":"a"}\n' > "$d/$sid.jsonl"
+spayload() { printf '{"session_id":"%s","transcript_path":"%s","source":"%s"}' "$1" "$2" "$3"; }
+run_stamp() { python3 -c 'import json, os, sys
+s = json.load(open(os.path.expanduser("~/.claude-switch/state.json")))
+r = [x for x in s.get("runs", []) if x.get("session") == sys.argv[1]]
+print("%d %d" % (len(r), r[-1].get("startedAt", 0) if r else 0))' "$1"; }
+
+out="$(spayload "$sid" "$d/$sid.jsonl" startup | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/session-start.sh")"
+assert_contains "$out" "Account in use: one" "T-15 startup names the account"
+before="$(run_stamp "$sid")"
+out="$(spayload "$sid" "$d/$sid.jsonl" compact | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/session-start.sh")"
+assert_contains "$out" "Account in use: one" "T-15 compact still names the account"
+assert_eq "$(run_stamp "$sid")" "$before" "T-15 compact does not record a fresh run (the session's start is unchanged)"
+
+# a limit hit long after the run started, then a compact: the limit must still block
+python3 -c 'import json, os, time
+p = os.path.expanduser("~/.claude-switch/state.json"); s = json.load(open(p))
+s["runs"] = [dict(r, startedAt=int(time.time()) - 3600) for r in s.get("runs", [])]
+json.dump(s, open(p, "w"))'
+limit_line aged "$week" seven_day "$(( $(date +%s) - 300 ))" >> "$d/$sid.jsonl"
+spayload "$sid" "$d/$sid.jsonl" compact | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/session-start.sh" >/dev/null
+out="$(payload "$sid" "$d/$sid.jsonl" | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/limit-notice.sh")"
+assert_contains "$out" '"decision": "block"' "T-15 a limit hit before compact still blocks after it"
+
+out="$(spayload "$sid" "$d/$sid.jsonl" resume | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/session-start.sh")"
+assert_contains "$out" "Account in use: one" "T-15 resume names the account"
+out="$(spayload clear-session "$d/$sid.jsonl" clear | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/session-start.sh")"
+assert_contains "$out" "Account in use: one" "T-15 clear names the account"
+assert_contains "$(cat "$HOME/.claude-switch/state.json")" '"session": "clear-session"' \
+    "T-15 clear records a run for the new session"
+cleanup_home
+
+# ---- T-16 : plugin commands are never blocked; a cleared limit stops blocking ----
+new_home >/dev/null; three_accounts
+d="$HOME/.claude/projects/-work"; mkdir -p "$d"
+sid="notice-session"
+printf '{"type":"assistant","uuid":"a"}\n' > "$d/$sid.jsonl"
+payload "$sid" "$d/$sid.jsonl" | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/session-start.sh" >/dev/null
+limit_line hit "$week" seven_day >> "$d/$sid.jsonl"
+ppayload() { python3 -c 'import json, sys; print(json.dumps({"session_id": sys.argv[1], "transcript_path": sys.argv[2], "prompt": sys.argv[3]}))' "$sid" "$d/$sid.jsonl" "$1"; }
+
+out="$(ppayload "hello" | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/limit-notice.sh")"
+assert_contains "$out" '"decision": "block"' "T-16 control: an ordinary prompt is blocked at the limit"
+for cmd in /cc-status /cc-switch /cc-setup "/cc-status please"; do
+    out="$(ppayload "$cmd" | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/limit-notice.sh")"
+    assert_eq "$out" "" "T-16 $cmd is let through while the account is limited"
+done
+out="$(ppayload "$(printf '\n/cc-status')" | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/limit-notice.sh")"
+assert_eq "$out" "" "T-16 a leading newline before /cc-status is let through while the account is limited"
+out="$(ppayload "  /cc-switch" | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/limit-notice.sh")"
+assert_eq "$out" "" "T-16 leading spaces before /cc-switch are let through while the account is limited"
+out="$(ppayload "please run /cc-status" | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/limit-notice.sh")"
+assert_contains "$out" '"decision": "block"' "T-16 a prompt merely mentioning a plugin command still blocks"
+
+PATH="$REPO/bin:$PATH" "$REPO/bin/cc" clear one >/dev/null 2>&1
+out="$(ppayload "hello again" | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/limit-notice.sh")"
+assert_eq "$out" "" "T-16 a limit cleared with cc clear does not keep blocking"
+"$REPO/bin/cc-detect" refresh >/dev/null 2>&1
+assert_eq "$(limited_until one)" "0" "T-16 ...and the transcript does not re-record it on refresh"
+limit_line again "$week" seven_day >> "$d/$sid.jsonl"
+out="$(ppayload "hello once more" | hookenv env -u CLAUDE_CONFIG_DIR bash "$HOOKS/limit-notice.sh")"
+assert_contains "$out" '"decision": "block"' "T-16 a limit hit after the clear blocks again"
+cleanup_home
+
 # ---- manifest ----------------------------------------------------------------
 assert_ok python3 -c "import json;json.load(open('$REPO/.claude-plugin/plugin.json'))"
 ok "T-10 plugin.json is valid JSON"
@@ -133,6 +201,8 @@ manifest="$(cat "$REPO/.claude-plugin/plugin.json")"
 assert_contains "$manifest" '"StopFailure"' "T-11 StopFailure hook registered"
 assert_contains "$manifest" '"matcher": "rate_limit"' "T-11 ...for rate limits only"
 assert_contains "$manifest" '"UserPromptSubmit"' "T-12 UserPromptSubmit hook registered"
+assert_contains "$manifest" '"matcher": "startup|resume|clear|compact"' \
+    "T-15 SessionStart also runs on clear and compact, not only startup/resume"
 for f in skills/cc-accounts/SKILL.md commands/cc-status.md commands/cc-switch.md commands/cc-setup.md \
          hooks/session-start.sh hooks/limit-notice.sh hooks/limit-hit.sh \
          bin/cc bin/cc-detect bin/cc-watch bin/cc-vscode bin/cc-claude-wrapper install.sh uninstall.sh \
@@ -141,6 +211,17 @@ for f in skills/cc-accounts/SKILL.md commands/cc-status.md commands/cc-switch.md
 done
 assert_contains "$(cat "$REPO/.claude-plugin/marketplace.json")" '"source": "./"' \
     "T-10 the marketplace installs the whole repo, so bin/ travels with the plugin"
+versions="$(python3 -c '
+import json, sys
+p = json.load(open(sys.argv[1]))["version"]
+m = json.load(open(sys.argv[2]))["plugins"][0]["version"]
+v = json.load(open(sys.argv[3]))["version"]
+print("%s %s %s" % (p, m, v))' \
+    "$REPO/.claude-plugin/plugin.json" \
+    "$REPO/.claude-plugin/marketplace.json" \
+    "$REPO/vscode/cc-switch-binding/package.json" 2>/dev/null)"
+distinct="$(python3 -c 'import sys; print(len(set(sys.argv[1].split())))' "$versions" 2>/dev/null)"
+assert_eq "$distinct" "1" "T-17 plugin.json, marketplace.json and the companion package.json carry one version ($versions)"
 
 # ---- T-13 : installed from the plugin directory, with nothing else on the machine ----
 # The directory copies only the plugin into its cache. The hooks must find cc-detect

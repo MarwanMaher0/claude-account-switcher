@@ -28,13 +28,25 @@ when_is() {
     date -d "@$1" "$fmt" 2>/dev/null || date -r "$1" "$fmt" 2>/dev/null || echo '?'
 }
 
-IFS=$'\037' read -r session transcript cwd < <(python3 -c '
+IFS=$'\037' read -r session transcript cwd first < <(python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     d = {}
-print("%s\x1f%s\x1f%s" % (d.get("session_id") or "", d.get("transcript_path") or "", d.get("cwd") or ""))' 2>/dev/null)
+words = (d.get("prompt") or "").split()
+print("%s\x1f%s\x1f%s\x1f%s" % (d.get("session_id") or "", d.get("transcript_path") or "", d.get("cwd") or "", words[0] if words else ""))' 2>/dev/null)
+
+# The plugin's own commands are how the user checks or fixes a limit, so they must
+# never be blocked by one: /cc-status and /cc-switch are the way out, and /cc-setup
+# is the way in. The python above hands over only the prompt's first word — split()
+# there strips leading whitespace, newlines included, and a multi-line prompt never
+# reaches bash `read` past its first line — so "/cc-status please" passes but an
+# ordinary prompt that merely mentions one does not.
+case "${first:-}" in
+    /cc-status|/cc-switch|/cc-setup|/cc-switch:cc-status|/cc-switch:cc-switch|/cc-switch:cc-setup) exit 0 ;;
+esac
+
 [ -n "${cwd:-}" ] || cwd="$PWD"
 [ -n "${session:-}" ] && [ -f "${transcript:-}" ] || exit 0
 

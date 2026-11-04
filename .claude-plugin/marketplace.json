@@ -9,6 +9,7 @@
   "plugins": [
     {
       "name": "cc-switch",
+      "version": "2.3.1",
       "description": "Claude Code: switch to your next Claude account when one hits its usage limit, keeping the conversation. Run /cc-setup after installing.",
       "source": "./",
       "category": "productivity"
