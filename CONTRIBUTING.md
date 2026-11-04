@@ -44,7 +44,9 @@ explains why. A change that needs that test edited needs a very good reason.
 from the pre-run byte offset. Both were real bugs; HOW-IT-WORKS.md explains them.
 
 **No work or machine identifiers in the repo.** The security suite rejects them. Use neutral
-examples such as `personal`, `work` and `you@example.com`.
+examples such as `personal`, `work` and `you@example.com`. The forbidden strings are private, so
+the suite reads them from a gitignored `.security-denylist` at the repo root (one literal per
+line) or the `SECURITY_DENYLIST` env var, and skips that check when neither is set.
 
 ## Style
 

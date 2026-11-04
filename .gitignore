@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 *.tmp
+
+# Private identifiers for test/test-security.sh S-2; never commit
+.security-denylist

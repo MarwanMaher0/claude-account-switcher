@@ -26,20 +26,38 @@ assert_eq "$(grep -cE 'cp -r|cp -a .*\$src|rsync' "$REPO/bin/cc" || true)" "0" \
     "S-1 cc add copies named files only, never a recursive tree"
 
 # ---- S-2 : no work or machine identifiers -----------------------------------
-# Written split so this file does not itself trip the grep.
-BAD_PATTERNS=(
-    "mmaher@""siprc.sa"
-    "marwan.maher@""id3m.com"
-    "siprc"
-    "/home/""electronica-care"
-    "IPORA"
+# The forbidden strings are private, so they never live in the repo. They come from
+# SECURITY_DENYLIST (newline- or comma-separated) and/or a gitignored file,
+# $SECURITY_DENYLIST_FILE (default: .security-denylist at the repo root), one
+# case-insensitive literal per line; blank lines and lines starting with # are ignored.
+# With no list available the check is skipped, not failed.
+DENYLIST_FILE="${SECURITY_DENYLIST_FILE:-$REPO/.security-denylist}"
+BAD_PATTERNS=()
+while IFS= read -r pat; do
+    pat="$(printf '%s' "$pat" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    case "$pat" in ''|'#'*) continue ;; esac
+    BAD_PATTERNS+=("$pat")
+done < <(
+    [ -f "$DENYLIST_FILE" ] && cat "$DENYLIST_FILE"
+    printf '\n%s\n' "${SECURITY_DENYLIST:-}" | tr ',' '\n'
 )
-leaks=""
-for pat in "${BAD_PATTERNS[@]}"; do
-    found="$(grep -ril "$pat" "$REPO" --exclude-dir=.git --exclude="test-security.sh" 2>/dev/null || true)"
-    [ -n "$found" ] && leaks="$leaks [$pat: $found]"
-done
-assert_eq "$leaks" "" "S-2 no work or machine identifiers anywhere in the repo"
+
+if [ "${#BAD_PATTERNS[@]}" -eq 0 ]; then
+    echo "  - S-2 no denylist (.security-denylist or SECURITY_DENYLIST): skipped"
+else
+    # Only what is published matters: tracked files when this is a git checkout.
+    if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        search() { git -C "$REPO" grep -ilF -e "$1" -- . ':(exclude).security-denylist' 2>/dev/null || true; }
+    else
+        search() { grep -rilF -e "$1" "$REPO" --exclude-dir=.git --exclude=.security-denylist 2>/dev/null || true; }
+    fi
+    leaks=""
+    for pat in "${BAD_PATTERNS[@]}"; do
+        found="$(search "$pat" | tr '\n' ' ')"
+        [ -n "$found" ] && leaks="$leaks [${pat}: ${found% }]"
+    done
+    assert_eq "$leaks" "" "S-2 no work or machine identifiers anywhere in the repo (${#BAD_PATTERNS[@]} patterns)"
+fi
 
 # The published identity, on the other hand, must be present and correct.
 assert_contains "$(cat "$REPO/.claude-plugin/plugin.json" 2>/dev/null)" \
