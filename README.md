@@ -440,7 +440,13 @@ Your accounts and their logins stay. To remove everything, also delete `~/.claud
 
 ## Privacy
 
-- No network calls and no telemetry.
+- The plugin itself makes no network calls and has no telemetry.
+- The optional live usage check runs your own `claude -p /usage` for your own accounts:
+  Claude Code contacts Anthropic using each account's login. Automatic checks are **on by
+  default** for `cc status` and re-checks of accounts recorded as limited. Disable them with
+  `CC_LIVE_CHECK=0` or `"liveCheck": false` in `~/.claude-switch/config.json`; `cc refresh`
+  explicitly forces a live check even when automatic checks are disabled.
+- Hooks never run live usage checks (`CC_LIVE_CHECK=0`, guarded by `test/test-hooks-offline.sh`).
 - Never reads, copies or prints your login credentials.
 - `cc add` copies only `settings.json` and `CLAUDE.md` into a new account.
 - To carry a conversation across, chats are copied or hard-linked between your account folders,

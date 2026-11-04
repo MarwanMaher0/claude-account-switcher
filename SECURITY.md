@@ -12,7 +12,16 @@ new account directory: `settings.json` and `CLAUDE.md`. This is asserted both st
 credential read path in the source) and at runtime (a marked token in a source account is
 searched for in a newly created one).
 
-**No network calls, no telemetry.** Enforced by a test over everything shipped.
+**No network calls of its own, no telemetry.** `test/test-security.sh` checks the shipped code
+for direct network calls.
+
+**Live usage check (optional, enabled by default).** `cc status` and re-checks of accounts
+recorded as limited can run your own `claude -p /usage` for your own accounts. Claude Code
+contacts Anthropic using each account's login; the plugin does not make the request itself.
+Disable automatic checks with `CC_LIVE_CHECK=0` or `"liveCheck": false` in
+`~/.claude-switch/config.json`. `cc refresh` explicitly forces a live check even when automatic
+checks are disabled. Hooks never run it: they set `CC_LIVE_CHECK=0`, guarded by
+`test/test-hooks-offline.sh`. See [PRIVACY.md](PRIVACY.md#what-it-sends).
 
 **Local file movement.** Failover copies your session transcript between config directories on
 your own machine so the conversation can continue. It never leaves the machine. Directories are

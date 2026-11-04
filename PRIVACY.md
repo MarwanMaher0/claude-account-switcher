@@ -45,15 +45,23 @@ What follows is the full picture of what it does read and write, all of it local
 
 ## What it sends
 
-Nothing. The plugin makes no network call of its own and transmits no data to anyone — not
-to the author, not to Anthropic, not to any third party. Its hooks run offline
-(`CC_LIVE_CHECK=0`, guarded by `test/test-hooks-offline.sh`), the usage percentages behind
-the opt-in early switch come from data Claude Code already passed to a status-line command
-(no request is made to obtain them), and failover copies transcripts only between folders on
-your own disk.
+The plugin itself makes no network calls and has no telemetry, analytics or crash reports.
+The exception to offline operation is the optional **live usage check**: it runs your own
+`claude -p /usage` for your own accounts. That is Claude Code talking to Anthropic using each
+account's login, not a direct network request or telemetry from the plugin.
 
-Claude Code itself still talks to Anthropic when *you* run `claude` — that is Claude Code,
-not this plugin.
+Automatic live checks are **enabled by default** (`liveCheck` defaults to `true` in
+`bin/cc-detect`). They can run during `cc status` and when an account recorded as limited is
+re-checked. To turn these automatic checks off, set `CC_LIVE_CHECK=0` in your environment or
+`"liveCheck": false` in `~/.claude-switch/config.json`. `cc refresh` explicitly forces a live
+usage check even when automatic checks are disabled.
+
+Hooks never run the live usage check: they set `CC_LIVE_CHECK=0`, guarded by
+`test/test-hooks-offline.sh`. The usage percentages behind the separate, opt-in early switch
+come from data Claude Code already passed to a status-line command (no request is made to
+obtain them), and failover copies transcripts only between folders on your own disk.
+
+Normal Claude Code sessions still talk to Anthropic independently of these checks.
 
 ## Contact
 
