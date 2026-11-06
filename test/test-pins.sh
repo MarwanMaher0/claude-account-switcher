@@ -328,8 +328,12 @@ notice() {
     d="$HK_DIR/projects/$(detect slug "$1")"
     mkdir -p "$d"; printf '{"type":"user","uuid":"q"}\n' > "$d/$sid.jsonl"
     printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s"}' "$sid" "$d/$sid.jsonl" "$1" | hook session-start.sh >/dev/null
+    # Milliseconds, as Claude Code writes them: a whole-second stamp truncates, so a
+    # limit written in the same second as the preceding `mark acme 0` (cc clear) would
+    # read as older than the clear and be ignored, leaving the notice empty.
     printf '{"type":"assistant","uuid":"l","timestamp":"%s","isApiErrorMessage":true,"quotaLimits":{"status":"rejected","rateLimitType":"five_hour","resetsAt":%s}}\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$future" >> "$d/$sid.jsonl"
+        "$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))')" \
+        "$future" >> "$d/$sid.jsonl"
     printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s"}' "$sid" "$d/$sid.jsonl" "$1" | hook limit-notice.sh
 }
 "$BIN/cc" pin "$HOME/work/acme" --account acme --fallback personal >/dev/null 2>&1

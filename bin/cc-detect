@@ -1051,15 +1051,26 @@ def parse_reset(text, now=None):
             tz = None
     ref = datetime.fromtimestamp(now, tz)
     for fmt in ("%b %d, %I:%M%p", "%b %d, %I%p", "%I:%M%p", "%I%p"):
-        try:
-            parsed = datetime.strptime(body, fmt)     # %b and %p match case-insensitively
-        except ValueError:
-            continue
         if "%b" in fmt:
-            dt = parsed.replace(year=ref.year, tzinfo=tz)
-            if dt.timestamp() < now - 86400:        # "Jan 2" read in late December
-                dt = dt.replace(year=ref.year + 1)
+            # claude prints no year. Supply one rather than let strptime assume 1900:
+            # Python 3.15 refuses a day of month without a year (cpython#70647), and
+            # 1900 cannot hold Feb 29. This year, or next for "Jan 2" read in late December.
+            dt = None
+            for year in (ref.year, ref.year + 1):
+                try:   # %b and %p match case-insensitively
+                    dt = datetime.strptime(f"{year} {body}", "%Y " + fmt).replace(tzinfo=tz)
+                except ValueError:
+                    dt = None
+                    continue
+                if dt.timestamp() >= now - 86400:
+                    break
+            if dt is None:
+                continue
         else:
+            try:
+                parsed = datetime.strptime(body, fmt)
+            except ValueError:
+                continue
             dt = ref.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
             if dt.timestamp() < now - 60:
                 dt = datetime.fromtimestamp(dt.timestamp() + 86400, tz)
