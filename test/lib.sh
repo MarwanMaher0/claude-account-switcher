@@ -51,8 +51,8 @@ assert_not_contains() {
 
 assert_ok()   { if "$@" >/dev/null 2>&1; then ok; else no "$CURRENT" "command failed: $*"; fi; }
 assert_fails() { if "$@" >/dev/null 2>&1; then no "$CURRENT" "expected failure: $*"; else ok; fi; }
-assert_file()  { [ -f "$1" ] && ok "$2" || no "$2" "missing file: $1"; }
-assert_no_file() { [ -f "$1" ] && no "$2" "file should not exist: $1" || ok "$2"; }
+assert_file()  { if [ -f "$1" ]; then ok "$2"; else no "$2" "missing file: $1"; fi; }
+assert_no_file() { if [ -f "$1" ]; then no "$2" "file should not exist: $1"; else ok "$2"; fi; }
 
 # A throwaway HOME with two logged-in accounts, mirroring a normal install.
 new_home() {
@@ -174,19 +174,36 @@ summary() {
 
 # A stub VS Code CLI at $CC_VSCODE_CLI: logs its arguments to code.log beside it;
 # --install-extension keeps the .vsix and --list-extensions reports it.
-# CODE_STUB_FAIL=1 makes installs fail.
+# CODE_STUB_FAIL=1 makes installs fail; CODE_STUB_QUIET=1 makes failures print nothing.
 code_stub() {
     mkdir -p "$SANDBOX/stub"
     cat > "$SANDBOX/stub/code" <<'STUB'
 #!/usr/bin/env bash
 d="$(dirname "$0")"
 printf '%s\n' "$*" >> "$d/code.log"
+[ -z "${CODE_STUB_SHARED_LOG:-}" ] || printf '%s %s\n' "$d" "$*" >> "$CODE_STUB_SHARED_LOG"
+say() { [ -n "${CODE_STUB_QUIET:-}" ] || echo "$1" >&2; }
 case "${1:-}" in
   --install-extension)
-    [ -n "${CODE_STUB_FAIL:-}" ] && { echo "install failed" >&2; exit 1; }
-    cp "$2" "$d/installed.vsix" && echo "cc-switch.cc-switch-binding" > "$d/installed" ;;
-  --list-extensions) cat "$d/installed" 2>/dev/null; echo "someone.else" ;;
-  --uninstall-extension) rm -f "$d/installed" ;;
+    { [ -n "${CODE_STUB_FAIL:-}" ] || [ -f "$d/install-fail" ]; } && { say "install failed"; exit 1; }
+    cp "$2" "$d/installed.vsix" || exit 1
+    [ -n "${CODE_STUB_SKIP_INSTALL:-}" ] || echo "marwanmaher.cc-switch-binding" > "$d/installed" ;;
+  --list-extensions)
+    if [ -n "${CODE_STUB_LIST_FAIL:-}" ] ||
+       { [ -n "${CODE_STUB_LIST_FAIL_AFTER_UNINSTALL:-}" ] && [ -f "$d/uninstalled" ]; }; then
+      echo "list failed" >&2; exit 1
+    fi
+    cat "$d/installed" "$d/legacy-installed" 2>/dev/null; echo "someone.else" ;;
+  --uninstall-extension)
+    { [ "$2" = "${CODE_STUB_UNINSTALL_FAIL:-}" ] || [ -f "$d/uninstall-fail" ]; } && { say "uninstall failed"; exit 1; }
+    case "$2" in
+      marwanmaher.cc-switch-binding) f="$d/installed" ;;
+      cc-switch.cc-switch-binding) f="$d/legacy-installed" ;;
+      *) exit 1 ;;
+    esac
+    [ -n "${CODE_STUB_UNINSTALL_KEEP:-}" ] || rm -f "$f"
+    [ -z "${CODE_STUB_UNINSTALL_DROPS_NEW:-}" ] || rm -f "$d/installed"
+    : > "$d/uninstalled" ;;
 esac
 exit 0
 STUB

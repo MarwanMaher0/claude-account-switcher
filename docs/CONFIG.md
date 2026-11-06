@@ -205,5 +205,5 @@ status line of your own, it still runs and shows as before.
 |---|---|
 | `CC_INSTALL_DIR` | Where `install.sh` puts the commands. Default `~/.local/bin`. |
 | `CC_WATCH_POLL` | Watcher poll interval, seconds. Default `2`. |
-| `CC_WATCH_GRACE` | Seconds between `SIGTERM` and `SIGKILL`. Default `8`. |
+| `CC_WATCH_GRACE` | Seconds between `SIGTERM` and `SIGKILL`, a whole number; `0` sends `SIGKILL` right after `SIGTERM`. Default `8`, also used for anything that is not a whole number. |
 | `CC_NUMBERED_MENUS` | Set to use numbered menus instead of arrow keys, even on a terminal. |

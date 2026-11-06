@@ -1,0 +1,83 @@
+---
+import Default from '@astrojs/starlight/components/Head.astro'
+import { siteUrl, siteOrigin, siteName, base } from '../../site.config.mjs'
+
+const route = Astro.locals.starlightRoute
+const { entry, locale, lang } = route
+const title = entry.data.title
+const description = entry.data.description ?? ''
+const isAr = lang === 'ar'
+const is404 = entry.id === '404' || /\/404\/?$/.test(Astro.url.pathname)
+// AR docs are Starlight fallbacks: English content rendered at /ar/docs/*. They stay reachable
+// from the language switch and sidebar, but must not be indexed, canonicalised to themselves,
+// advertised as an ar alternate, or listed in the sitemap.
+const isFallback = route.isFallback === true
+const ogImage = `${siteUrl}og/${isAr ? 'ar' : 'en'}.png`
+const pageUrl = new URL(Astro.url.pathname, siteUrl).href
+const enPath = Astro.url.pathname.replace(`${base}ar/`, base)
+const enUrl = new URL(enPath, siteOrigin).href
+const prefix = locale ? locale + '/' : ''
+const docsHome = siteUrl + prefix + 'docs/'
+const home = siteUrl + prefix
+
+const crumbs = [
+  { name: siteName, item: home },
+  { name: isAr ? 'التوثيق' : 'Documentation', item: docsHome },
+]
+if (pageUrl !== docsHome) crumbs.push({ name: title, item: pageUrl })
+const breadcrumbs = {
+  '@context': 'https://schema.org',
+  '@type': 'BreadcrumbList',
+  itemListElement: crumbs.map((c, i) => ({ '@type': 'ListItem', position: i + 1, name: c.name, item: c.item })),
+}
+const article = {
+  '@context': 'https://schema.org',
+  '@type': 'TechArticle',
+  headline: title,
+  description,
+  url: pageUrl,
+  inLanguage: lang,
+  isPartOf: { '@type': 'WebSite', name: siteName, url: siteUrl },
+  about: { '@type': 'SoftwareApplication', name: siteName, url: siteUrl },
+}
+const jsonLd = JSON.stringify([breadcrumbs, article]).split(String.fromCharCode(60)).join('\\u003c')
+
+type HeadTag = { tag: string; attrs?: Record<string, string | boolean>; content?: string }
+const head = route.head as unknown as HeadTag[]
+route.head = head.filter((tag) => {
+  if (is404 && tag.tag === 'meta' && tag.attrs?.property === 'og:url') return false
+  if (tag.tag !== 'link' || !tag.attrs) return true
+  const rel = tag.attrs.rel
+  const href = String(tag.attrs.href ?? '')
+  if (rel === 'sitemap') {
+    tag.attrs.href = `${base}sitemap.xml`
+    return true
+  }
+  if (is404 && (rel === 'canonical' || rel === 'alternate')) return false
+  if (rel === 'alternate' && (isFallback || (tag.attrs.hreflang === 'ar' && href.includes(`${base}ar/docs/`)))) return false
+  return true
+}) as typeof route.head
+if (isFallback) {
+  for (const tag of route.head as unknown as HeadTag[]) {
+    if (tag.tag === 'link' && tag.attrs?.rel === 'canonical') tag.attrs.href = enUrl
+    if (tag.tag === 'meta' && tag.attrs?.property === 'og:url') tag.attrs.content = enUrl
+  }
+  ;(route.head as unknown as HeadTag[]).push({ tag: 'meta', attrs: { name: 'robots', content: 'noindex, follow' } })
+}
+---
+
+<Default><slot /></Default>
+{!is404 && !isFallback && <link rel="alternate" hreflang="x-default" href={pageUrl.replace(`${siteUrl}ar/`, siteUrl)} />}
+{!isFallback && <meta name="robots" content={is404 ? 'noindex, follow' : 'index, follow, max-image-preview:large'} />}
+<meta property="og:image" content={ogImage} />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:alt" content={`${siteName}: ${title}`} />
+<meta name="twitter:title" content={`${title} | ${siteName}`} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={ogImage} />
+<meta name="twitter:image:alt" content={`${siteName}: ${title}`} />
+<meta name="color-scheme" content="light dark" />
+{isAr && <link rel="preload" as="font" type="font/woff2" crossorigin="anonymous" href={`${base}fonts/IBMPlexSansArabic-Regular-arabic.woff2`} />}
+{!is404 && !isFallback && <script is:inline type="application/ld+json" set:html={jsonLd}></script>}

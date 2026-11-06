@@ -1,0 +1,5 @@
+# Read by shellcheck for every script in this repository (test/lint.sh runs it).
+# Follow `. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"` to the file beside the script, so
+# the suites are checked with the helpers and variables lib.sh defines.
+source-path=SCRIPTDIR
+external-sources=true

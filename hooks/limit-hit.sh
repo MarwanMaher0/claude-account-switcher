@@ -39,11 +39,16 @@ id="${acct%%$'\t'*}"
 
 # The error line can land just after the hook starts, so look a few times. A 429
 # without a quota payload never matches: that is server throttling, not a limit.
+# A counted loop, not `seq`: BSD/macOS `seq 0` counts down to "1 0" (two tries).
+tries="${CC_HOOK_TRIES:-6}"
+case "$tries" in ''|*[!0-9]*) tries=6 ;; esac
 limit=""
-for _ in $(seq "${CC_HOOK_TRIES:-6}"); do
+n=0
+while [ "$n" -lt "$tries" ]; do
+    n=$((n + 1))
     limit="$("$DETECT" session-limit "$transcript" "$id" "$session" recent 2>/dev/null)" && break
     limit=""
-    sleep 0.5
+    [ "$n" -lt "$tries" ] && sleep 0.5
 done
 [ -n "$limit" ] || exit 0
 

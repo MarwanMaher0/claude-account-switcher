@@ -3,8 +3,30 @@
   "displayName": "cc-switch window binding",
   "description": "Runs Claude Code in each VS Code window on the account its folder is pinned to with cc-switch, and moves new chats to the pin's fallback on a usage limit.",
   "version": "2.3.1",
-  "publisher": "cc-switch",
+  "publisher": "marwanmaher",
   "license": "MIT",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MarwanMaher0/claude-account-switcher.git",
+    "directory": "vscode/cc-switch-binding"
+  },
+  "homepage": "https://github.com/MarwanMaher0/claude-account-switcher#step-6-vs-code-users-only",
+  "bugs": {
+    "url": "https://github.com/MarwanMaher0/claude-account-switcher/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "accounts",
+    "cc-switch",
+    "workspace",
+    "usage-limits"
+  ],
+  "galleryBanner": {
+    "color": "#172B3A",
+    "theme": "dark"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -13,7 +35,7 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "*"
+    "onStartupFinished"
   ],
   "extensionKind": [
     "workspace"

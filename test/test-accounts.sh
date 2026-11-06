@@ -43,7 +43,7 @@ out="$("$BIN/cc" add ghost 2>&1)"; rc=$?
 assert_eq "$rc" "1" "AC-3 failed add exits non-zero"
 assert_contains "$out" "nothing added" "AC-3 rollback is announced"
 assert_not_contains "$("$BIN/cc-detect" accounts)" "ghost" "AC-3 no config entry left behind"
-[ -d "$HOME/.claude-ghost" ] && no "AC-3 no directory left behind" || ok "AC-3 no directory left behind"
+if [ -d "$HOME/.claude-ghost" ]; then no "AC-3 no directory left behind"; else ok "AC-3 no directory left behind"; fi
 cleanup_home
 
 # ---- AC-4 / AC-5 : guards ---------------------------------------------------
@@ -93,8 +93,8 @@ assert_contains "$("$BIN/cc-detect" accounts)" "personal" "AC-7 default account 
 out="$("$BIN/cc" remove account2 2>&1)"
 assert_contains "$out" "deregistered" "AC-8 account deregistered"
 assert_not_contains "$("$BIN/cc-detect" accounts)" "account2" "AC-8 gone from the list"
-[ -d "$HOME/.claude-2" ] && ok "AC-8 directory left in place without --purge" \
-    || no "AC-8 directory left in place without --purge"
+if [ -d "$HOME/.claude-2" ]; then ok "AC-8 directory left in place without --purge"
+else no "AC-8 directory left in place without --purge"; fi
 cleanup_home
 
 # ---- AC-8 : purge needs the typed id ----------------------------------------
@@ -103,12 +103,12 @@ new_home >/dev/null; stub_claude
 out="$(printf 'wrong-name\n' | "$BIN/cc" remove account2 --purge 2>&1)"; rc=$?
 assert_eq "$rc" "1" "AC-8 wrong confirmation aborts"
 assert_contains "$("$BIN/cc-detect" accounts)" "account2" "AC-8 nothing removed on bad confirmation"
-[ -d "$HOME/.claude-2" ] && ok "AC-8 directory survives a bad confirmation" \
-    || no "AC-8 directory survives a bad confirmation"
+if [ -d "$HOME/.claude-2" ]; then ok "AC-8 directory survives a bad confirmation"
+else no "AC-8 directory survives a bad confirmation"; fi
 
 out="$(printf 'account2\n' | "$BIN/cc" remove account2 --purge 2>&1)"
 assert_contains "$out" "deleted" "AC-8 correct confirmation purges"
-[ -d "$HOME/.claude-2" ] && no "AC-8 directory actually deleted" || ok "AC-8 directory actually deleted"
+if [ -d "$HOME/.claude-2" ]; then no "AC-8 directory actually deleted"; else ok "AC-8 directory actually deleted"; fi
 cleanup_home
 
 # ---- AC-10 / AC-11 : a second login of the same account; the plugin is shared -
@@ -118,17 +118,20 @@ export STUB_MODE=login
 mkdir -p "$HOME/.claude/skills/cc-switch"
 
 "$BIN/cc" add work3 >/dev/null 2>&1
-[ -L "$HOME/.claude-work3/skills/cc-switch" ] && ok "AC-11 a new account shares the cc-switch plugin" \
-    || no "AC-11 a new account shares the cc-switch plugin"
+if [ -L "$HOME/.claude-work3/skills/cc-switch" ]; then ok "AC-11 a new account shares the cc-switch plugin"
+else no "AC-11 a new account shares the cc-switch plugin"; fi
 
 # the stub logs every add in as new@example.com — exactly the browser mistake
 out="$("$BIN/cc" add work4 2>&1)"; rc=$?
 assert_eq "$rc" "1" "AC-10 a second login of the same account is refused"
 assert_contains "$out" "that is 'work3' again" "AC-10 ...naming the account it duplicates"
 assert_not_contains "$("$BIN/cc-detect" accounts)" "work4" "AC-10 nothing is registered"
-[ -d "$HOME/.claude-work4" ] && no "AC-10 its directory is removed" || ok "AC-10 its directory is removed"
-[ -L "$HOME/.claude/skills/cc-switch" ] || [ -d "$HOME/.claude/skills/cc-switch" ] \
-    && ok "AC-10 rollback never touches the shared plugin" || no "AC-10 rollback never touches the shared plugin"
+if [ -d "$HOME/.claude-work4" ]; then no "AC-10 its directory is removed"; else ok "AC-10 its directory is removed"; fi
+if [ -L "$HOME/.claude/skills/cc-switch" ] || [ -d "$HOME/.claude/skills/cc-switch" ]; then
+    ok "AC-10 rollback never touches the shared plugin"
+else
+    no "AC-10 rollback never touches the shared plugin"
+fi
 cleanup_home
 
 # ---- AC-12..AC-16 : the browser signs in with whatever it already has open ------
@@ -149,8 +152,8 @@ assert_contains "$out" "alpha (a@example.com)" "AC-13 ...by id and email"
 assert_contains "$out" "private window" "AC-13 warns that the browser reuses its open session"
 w=$(printf '%s\n' "$out" | grep -n "private window" | head -1 | cut -d: -f1)
 r=$(printf '%s\n' "$out" | grep -n "'beta' added" | head -1 | cut -d: -f1)
-{ [ -n "$w" ] && [ -n "$r" ] && [ "$w" -lt "$r" ]; } && ok "AC-13 ...before the login, not after" \
-    || no "AC-13 ...before the login, not after"
+if [ -n "$w" ] && [ -n "$r" ] && [ "$w" -lt "$r" ]; then ok "AC-13 ...before the login, not after"
+else no "AC-13 ...before the login, not after"; fi
 
 # a personal plan and a work seat can share one address and still have separate limits
 out="$(STUB_EMAIL=a@example.com STUB_ACCOUNT=acct-a STUB_ORG=org-work "$BIN/cc" add alpha-work 2>&1)"; rc=$?
@@ -161,7 +164,7 @@ assert_not_contains "$("$BIN/cc-detect" status 2>&1)" "same account" "AC-14 stat
 out="$(STUB_EMAIL=A@Example.com STUB_ACCOUNT=acct-a STUB_ORG=org-a "$BIN/cc" add alpha-again 2>&1)"; rc=$?
 assert_eq "$rc" "1" "AC-15 the same account and organization under another id is refused"
 assert_contains "$out" "that is 'alpha' again" "AC-15 ...naming the account it duplicates"
-[ -d "$HOME/.claude-alpha-again" ] && no "AC-15 its directory is removed" || ok "AC-15 its directory is removed"
+if [ -d "$HOME/.claude-alpha-again" ]; then no "AC-15 its directory is removed"; else ok "AC-15 its directory is removed"; fi
 
 : > "$STUB_LOG"
 out="$(STUB_EMAIL=wrong@example.com STUB_ACCOUNT=acct-w STUB_ORG=org-w "$BIN/cc" add gamma --email Right@Example.com 2>&1)"; rc=$?
@@ -194,8 +197,8 @@ assert_contains "$("$BIN/cc-detect" accounts)" "kept" "AC-17 ...and registers it
 
 out="$("$BIN/cc" add leftover --dir "$HOME/leftover" --adopt 2>&1)"; rc=$?
 assert_eq "$rc" "1" "AC-17 adopting a second login of a registered account is refused"
-[ -d "$HOME/leftover" ] && ok "AC-17 ...leaving a directory it did not create in place" \
-    || no "AC-17 ...leaving a directory it did not create in place"
+if [ -d "$HOME/leftover" ]; then ok "AC-17 ...leaving a directory it did not create in place"
+else no "AC-17 ...leaving a directory it did not create in place"; fi
 cleanup_home
 
 # ---- AC-18 : a claude without the auth subcommand ------------------------------
@@ -216,8 +219,8 @@ export STUB_MODE=login
 out="$(STUB_EMAIL=easy@example.com STUB_ACCOUNT=acct-e STUB_ORG=org-e "$BIN/cc" add easy 2>&1)"
 assert_contains "$(printf '%s\n' "$out" | head -1)" "adding 'easy'" "AC-20 output starts by saying what it is doing"
 before=$(printf '%s\n' "$out" | sed -n '1,/opening login/p' | wc -l | tr -d ' ')
-[ "$before" -le 4 ] && ok "AC-20 no more than four lines before the login opens" \
-    || no "AC-20 no more than four lines before the login opens" "got $before"
+if [ "$before" -le 4 ]; then ok "AC-20 no more than four lines before the login opens"
+else no "AC-20 no more than four lines before the login opens" "got $before"; fi
 assert_not_contains "$out" "registered '" "AC-20 never claims registration before the login succeeds"
 assert_contains "$out" "cc use easy" "AC-20 success says how to use the new account"
 
@@ -237,7 +240,7 @@ assert_not_contains "$(cat "$STUB_LOG")" "--email" "AC-19 ...and signs in withou
 
 out="$(printf 'not-an-email\n' | CC_PROMPT=1 "$BIN/cc" add typo 2>&1)"; rc=$?
 assert_eq "$rc" "1" "AC-19 an answer that is not an email is refused"
-[ -d "$HOME/.claude-typo" ] && no "AC-19 ...before anything is created" || ok "AC-19 ...before anything is created"
+if [ -d "$HOME/.claude-typo" ]; then no "AC-19 ...before anything is created"; else ok "AC-19 ...before anything is created"; fi
 
 assert_contains "$("$BIN/cc" add 2>&1)" "cc add work" "AC-20 usage shows an example"
 cleanup_home

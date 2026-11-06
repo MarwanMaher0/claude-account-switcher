@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased (after 2.3.1)
+
+### Fixed — macOS and bash 3.2 portability
+- `CC_WATCH_GRACE=0` gave a running session 2 s to shut down on macOS instead of none: the
+  wait was `for _ in $(seq 1 "$GRACE")`, and BSD `seq 1 0` counts down (`1 0`) where GNU prints
+  nothing. `cc-watch` now counts with a plain loop. A value that is not a whole number falls
+  back to the default, 8.
+- `CC_HOOK_TRIES` had the same `seq` bug in the `StopFailure` hook: `0` meant 2 tries on macOS.
+  It now means 0 there too, a value that is not a whole number falls back to the default, 6,
+  and the hook no longer sleeps after its last try.
+- The limit notice shortened pinned folders to `~/…` with a `sed` pattern built from `$HOME`.
+  It printed the full path when `HOME` is reached through a symlink (macOS `/var` →
+  `/private/var`), broke when `HOME` held `|`, `&` or regex characters, and turned a sibling
+  folder such as `/Users/me2/x` into `~2/x`. It now compares path prefixes directly.
+- Adding an account from the `cc pin` menu when it listed none stopped `cc` with
+  `ids[@]: unbound variable` on bash 3.2, which macOS ships: expanding an empty array under
+  `set -u` is an error there. The menu no longer expands a possibly empty array unguarded.
+- Two checks in `test/test-security.sh` did less than they said. S-1 meant to skip comment
+  lines, but `grep -n` puts `12:` in front of each line, so `^\s*#` never matched and
+  `\s` is not in POSIX `grep -E` anyway. S-4's `\b` word boundary is a GNU extension that BSD
+  `grep` does not honour. Both now use POSIX patterns, S-2 puts its grep options before the
+  file names (BSD `grep` stops reading options at the first operand), and S-1 and S-4 test
+  themselves against known-good and known-bad samples.
+
+### Added
+- `test/lint.sh` runs `bash -n` and ShellCheck (`--severity=style`) on every shell script,
+  found by its shebang, and fails on a `# shellcheck disable=` that does not say why
+  (`# reason: …`). A `.shellcheckrc` at the repo root sets the shared options.
+- `test/test-portability.sh` (32 checks) runs the hooks and `cc` against BSD-flavoured
+  `date`, `seq`, `sed`, `readlink`, `stat`, `grep` and `xargs` stand-ins, so macOS behaviour is
+  tested on Linux, and scans the scripts for GNU-only flags and bash 4 features.
+- CI runs the full suite and the lint on both `ubuntu-latest` and `macos-latest`, with a pinned,
+  checksum-verified ShellCheck v0.11.0, then runs them again under macOS's `/bin/bash` 3.2.
+
+### Changed
+- Every ShellCheck finding is fixed; the remaining `disable` directives each give a reason.
+
 ## 2.3.1 — 2026-11-04
 
 ### Fixed
@@ -102,7 +139,7 @@
   the pin's account is limited, or what `cc` would pick for an unpinned folder. It never sets
   `CLAUDE_CONFIG_DIR` to the default account's own dir, and it fails closed: if the account for
   a pinned folder cannot be decided, Claude does not start there.
-- A companion VS Code extension, `cc-switch.cc-switch-binding` (plain JavaScript, no
+- A companion VS Code extension, `marwanmaher.cc-switch-binding` (plain JavaScript, no
   dependencies; built into a `.vsix` and installed by `cc vscode on`). Per window it binds the
   extension host's `CLAUDE_CONFIG_DIR`, so the panel's history and resume match the account,
   re-binds when a limit is recorded or ends, carries the folder's recent chats before a move,

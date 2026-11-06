@@ -222,14 +222,13 @@ cleanup_home
 new_home >/dev/null; companies; limit_stub
 "$BIN/cc" pin "$HOME/work/acme" --account acme --fallback personal --no-vscode >/dev/null 2>&1
 export LIMIT_DIRS="$HOME/.claude-2"
-pids=""
+pids=()
 for n in 1 2 3 4 5; do
     mkdir -p "$HOME/work/acme/tab$n"
     (cd "$HOME/work/acme/tab$n" && "$BIN/cc" --manual >"$SANDBOX/tab$n.out" 2>&1) &
-    pids="$pids $!"
+    pids+=("$!")
 done
-# shellcheck disable=SC2086
-wait $pids
+wait "${pids[@]}"
 unset LIMIT_DIRS
 switched=0
 for n in 1 2 3 4 5; do grep -q "switching to personal" "$SANDBOX/tab$n.out" && switched=$((switched + 1)); done
@@ -238,7 +237,7 @@ it "SA-2 state.json is still valid JSON after the concurrent writes"
 assert_ok python3 -c 'import json, os; json.load(open(os.path.expanduser("~/.claude-switch/state.json")))'
 runs="$(python3 -c 'import json, os; s = json.load(open(os.path.expanduser("~/.claude-switch/state.json"))); print(len(s["runs"]))')"
 assert_eq "$runs" "10" "SA-3 no run was lost: five on acme, five on personal"
-[ "$(limited_until acme)" -gt "$(date +%s)" ] && ok "SA-4 acme is marked limited" || no "SA-4 acme is marked limited"
+if [ "$(limited_until acme)" -gt "$(date +%s)" ]; then ok "SA-4 acme is marked limited"; else no "SA-4 acme is marked limited"; fi
 assert_eq "$(limited_until personal)" "0" "SA-4 personal is not"
 cleanup_home
 
@@ -261,7 +260,7 @@ assert_contains "$out" "open windows re-check automatically" "PV-1 ...by themsel
 assert_file "$HOME/.claude-switch/bind-epoch" "PV-1 ...and nudges them"
 assert_eq "$(git -C "$repo" status --porcelain)" "?? .vscode/" "PV-1 git status shows only the user's own file"
 "$BIN/cc" pin "$HOME/work/acme/api" --account acme --fallback none >/dev/null 2>&1
-[ -e "$HOME/work/acme/api/.vscode" ] && no "PV-2 no .vscode folder is created" || ok "PV-2 no .vscode folder is created"
+if [ -e "$HOME/work/acme/api/.vscode" ]; then no "PV-2 no .vscode folder is created"; else ok "PV-2 no .vscode folder is created"; fi
 "$BIN/cc" unpin "$repo" >/dev/null 2>&1
 assert_eq "$(cat "$(ws "$repo")")" "$(cat "$SANDBOX/original.json")" "PV-3 cc unpin leaves it alone too"
 out="$("$BIN/cc" pin "$repo" --account acme --fallback personal --yes 2>&1)"; rc=$?

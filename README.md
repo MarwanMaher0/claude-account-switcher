@@ -7,10 +7,10 @@
 [![CI](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg)](#step-1-check-what-you-need)
-[![Tests](https://img.shields.io/badge/tests-746%20checks-brightgreen.svg)](CONTRIBUTING.md)
+[![Tests](https://img.shields.io/badge/tests-965%20checks-brightgreen.svg)](CONTRIBUTING.md)
 [![No telemetry](https://img.shields.io/badge/telemetry-none-success.svg)](#privacy)
 
-[Get started](#get-started) · [Everyday use](#everyday-use) · [Separate projects](#separate-projects-one-account-per-folder) · [VS Code](#step-6-vs-code-users-only) · [Troubleshooting](docs/TROUBLESHOOTING.md)
+[Website](https://marwanmaher0.github.io/claude-account-switcher/) · [Docs](https://marwanmaher0.github.io/claude-account-switcher/docs/) · [Get started](#get-started) · [Everyday use](#everyday-use) · [Separate projects](#separate-projects-one-account-per-folder) · [VS Code](#step-6-vs-code-users-only) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 </div>
 
@@ -181,7 +181,7 @@ You should see:
 ```
 VS Code: each window now runs Claude on its folder's account · ~/.config/Code/User/settings.json
   wrapper    ~/.local/bin/cc-claude-wrapper
-  companion  cc-switch.cc-switch-binding installed with code
+  companion  marwanmaher.cc-switch-binding installed with code
   Open windows re-check within a few seconds. A chat already running stays where it is.
 ```
 
@@ -196,6 +196,18 @@ This does two things, and changes VS Code settings only after the first one work
    account for that window's folder, the same way `cc` does in a terminal. It also removes the
    `CLAUDE_CONFIG_DIR` entry an older `cc` put into `claudeCode.environmentVariables`, after a
    backup to `~/.claude-switch/vscode-settings.backup.json`.
+
+Upgrading from the former `cc-switch.cc-switch-binding` companion? `cc vscode on` installs and
+verifies the new companion in every editor, then removes the old one from each of them and checks
+that it is gone and the new one is still there. Every editor is processed. `cc vscode on` then
+exits with status 1 and changes no VS Code settings if any editor still lists the old companion
+(because its new install failed or was not listed, or the removal did not take), lost the new one
+during the removal, or could not list its extensions after the removal; each such editor is named
+with the command to fix it. As before, it also stops when no editor verified the new companion.
+`--wrapper-only` sets the wrapper anyway and names each editor once, under the companions it runs.
+`cc vscode status` checks the editors again each time. Reload open windows after migration.
+The companion now activates on `onStartupFinished`; if Claude Code initialized first, follow
+the companion's safe reload notice after chats are linked. See the [startup-order details](vscode/cc-switch-binding/README.md#startup-activation).
 
 It finds the settings for VS Code, VS Code Insiders, VSCodium and Cursor on Linux and macOS. If it
 says no settings file was found, give the path yourself:

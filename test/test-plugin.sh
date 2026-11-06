@@ -235,7 +235,7 @@ mkdir -p "$HOME/.local/bin"; printf '#!/bin/sh\n' > "$HOME/.local/bin/cc-watch";
 out="$(PATH="$bare_path" CLAUDE_PLUGIN_ROOT="$REPO" env -u CLAUDE_CONFIG_DIR bash "$HOOKS/session-start.sh" </dev/null)"
 assert_not_contains "$out" "/cc-setup" "T-13 no setup hint once the cc command is installed"
 cleanup_home
-assert_contains "$(cat "$REPO/commands/cc-setup.md")" '${CLAUDE_PLUGIN_ROOT}/install.sh' \
+assert_contains "$(cat "$REPO/commands/cc-setup.md")" "\${CLAUDE_PLUGIN_ROOT}/install.sh" \
     "T-13 /cc-setup runs the install.sh shipped inside the plugin"
 
 # ---- T-14 : installing next to a C compiler named cc -----------------------------

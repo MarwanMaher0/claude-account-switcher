@@ -6,8 +6,8 @@
 bash test/run-all.sh
 ```
 
-746 checks across the fourteen suites run with `CC_TEST_SKIP=test-live.sh` (`test-live.sh` is
-the fifteenth suite in `run-all.sh`). There is no framework to install. `claude` is replaced with a
+965 checks across the fifteen suites run with `CC_TEST_SKIP=test-live.sh` (`test-live.sh` is
+the sixteenth suite in `run-all.sh`). There is no framework to install. `claude` is replaced with a
 stub and every test runs against a throwaway `HOME`, so the suite cannot touch a real account and
 uses no API quota. CI runs it on Linux and macOS.
 
@@ -20,7 +20,11 @@ bash test/demo.sh
 ## Before opening a pull request
 
 1. `bash test/run-all.sh` passes.
-2. `shellcheck --severity=warning bin/cc bin/cc-watch bin/cc-claude-wrapper install.sh uninstall.sh hooks/*.sh test/*.sh` is clean.
+2. `bash test/lint.sh` is clean. It runs `bash -n` and ShellCheck on every shell script (found
+   by shebang) at `--severity=style`, using the options in `.shellcheckrc`. It needs
+   `shellcheck` on `PATH`, or `SHELLCHECK=/path/to/shellcheck`; CI pins v0.11.0. Fix a finding
+   rather than silencing it. When a `# shellcheck disable=` is the right call, it must say why
+   on the same line (`# shellcheck disable=SC2016  # reason: …`), or the lint fails.
 3. `python3 -m py_compile bin/cc-detect bin/cc-vscode test/contract.py` and
    `node --check vscode/cc-switch-binding/extension.js` succeed.
 4. After a Claude Code extension update, `bash test/test-extension-contract.sh` still passes
@@ -58,5 +62,13 @@ line) or the `SECURITY_DENYLIST` env var, and skips that check when neither is s
 ## Style
 
 Shell is bash with `set -uo pipefail`, and must run on bash 3.2, which macOS ships: no associative
-arrays. Comments explain *why*, especially where the reason is a trap that is not obvious from the
-code. User-facing messages are short, and every failure ends with the command to run next.
+arrays, no `mapfile`/`readarray`, no `${var,,}`, and guard empty arrays under `set -u`
+(`${arr[@]+"${arr[@]}"}`). Tools must behave the same with the BSD versions macOS ships: no
+`sed -i` (write a temp file and `mv`), `readlink -f`, `grep -P` or `\b`/`\s` in a regex, no
+`date -d` or `stat -c` without a `date -r`/`stat -f` fallback, and no `seq` (BSD `seq 1 0`
+counts down; use a counted `while` loop). `test/test-portability.sh` scans for these and more,
+and runs the hooks against BSD-style stand-ins; CI
+also runs the whole suite on macOS under `/bin/bash`. To try bash 3.2 locally, put it first on
+`PATH` and run `bash test/run-all.sh`. Comments explain *why*, especially where the reason is a
+trap that is not obvious from the code. User-facing messages are short, and every failure ends
+with the command to run next.

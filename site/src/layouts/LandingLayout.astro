@@ -1,0 +1,130 @@
+---
+import type { Locale } from '../data/faq'
+import { faqs } from '../data/faq'
+import { landingCopy } from '../data/landing-copy'
+import facts from '../generated/facts.json'
+import { base, repo, siteUrl, siteName, author } from '../../site.config.mjs'
+import '../styles/tokens.css'
+import '../styles/landing.css'
+
+interface Props {
+  locale: Locale
+}
+
+const { locale } = Astro.props
+const copy = landingCopy[locale]
+const dir = locale === 'ar' ? 'rtl' : 'ltr'
+const pageUrl = locale === 'ar' ? `${siteUrl}ar/` : siteUrl
+const ogImage = `${siteUrl}og/${locale}.png`
+const version = String(facts.version)
+
+const software = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareApplication',
+  name: siteName,
+  alternateName: 'claude-account-switcher',
+  description: copy.metaDescription,
+  url: pageUrl,
+  applicationCategory: 'DeveloperApplication',
+  operatingSystem: 'Linux, macOS',
+  softwareVersion: version,
+  license: 'https://opensource.org/license/mit',
+  isAccessibleForFree: true,
+  offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+  downloadUrl: repo,
+  softwareHelp: { '@type': 'CreativeWork', url: `${siteUrl}docs/` },
+  author: { '@type': 'Person', name: author.name, url: author.url },
+  inLanguage: locale,
+}
+const source = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareSourceCode',
+  name: 'claude-account-switcher',
+  codeRepository: repo,
+  programmingLanguage: ['Bash', 'Python'],
+  runtimePlatform: 'bash 3.2+, Python 3.6+',
+  license: 'https://opensource.org/license/mit',
+  url: pageUrl,
+}
+const faqPage = {
+  '@context': 'https://schema.org',
+  '@type': 'FAQPage',
+  inLanguage: locale,
+  mainEntity: faqs[locale].map((f) => ({
+    '@type': 'Question',
+    name: f.question,
+    acceptedAnswer: { '@type': 'Answer', text: f.answer },
+  })),
+}
+const website = {
+  '@context': 'https://schema.org',
+  '@type': 'WebSite',
+  name: siteName,
+  url: siteUrl,
+  inLanguage: ['en', 'ar'],
+}
+const jsonLd = JSON.stringify([website, software, source, faqPage]).split(String.fromCharCode(60)).join('\\u003c')
+---
+
+<!doctype html>
+<html lang={locale} dir={dir} data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{copy.htmlTitle}</title>
+    <meta name="description" content={copy.metaDescription} />
+    <meta name="author" content={author.name} />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <link rel="canonical" href={pageUrl} />
+    <link rel="alternate" hreflang="en" href={siteUrl} />
+    <link rel="alternate" hreflang="ar" href={`${siteUrl}ar/`} />
+    <link rel="alternate" hreflang="x-default" href={siteUrl} />
+    <link rel="icon" href={`${base}favicon.svg`} type="image/svg+xml" />
+    <link rel="sitemap" href={`${base}sitemap.xml`} />
+    <meta name="theme-color" content="#0b100d" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f4f6f4" media="(prefers-color-scheme: light)" />
+    <meta name="color-scheme" content="light dark" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={siteName} />
+    <meta property="og:locale" content={locale === 'ar' ? 'ar_AR' : 'en_US'} />
+    <meta property="og:locale:alternate" content={locale === 'ar' ? 'en_US' : 'ar_AR'} />
+    <meta property="og:url" content={pageUrl} />
+    <meta property="og:title" content={copy.htmlTitle} />
+    <meta property="og:description" content={copy.metaDescription} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:alt" content={copy.ogAlt} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={copy.htmlTitle} />
+    <meta name="twitter:description" content={copy.metaDescription} />
+    <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content={copy.ogAlt} />
+
+    <link rel="preload" as="font" type="font/woff2" crossorigin="anonymous" href={`${base}fonts/BricolageGrotesque-latin.woff2`} />
+    {locale === 'ar' && (
+      <link rel="preload" as="font" type="font/woff2" crossorigin="anonymous" href={`${base}fonts/IBMPlexSansArabic-Regular-arabic.woff2`} />
+    )}
+
+    <script is:inline>
+      (function () {
+        document.documentElement.classList.add('js')
+        try {
+          var stored = localStorage.getItem('starlight-theme')
+          var theme = stored === 'dark' || stored === 'light' ? stored : window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          document.documentElement.dataset.theme = theme
+        } catch (e) {
+          /* ignore */
+        }
+      })()
+    </script>
+    <script is:inline type="application/ld+json" set:html={jsonLd}></script>
+  </head>
+  <body class="landing">
+    <a class="skip-link" href="#main">{copy.skip}</a>
+    <slot />
+  </body>
+</html>

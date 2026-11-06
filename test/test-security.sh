@@ -12,17 +12,20 @@ SHIPPED=$(find "$REPO/bin" "$REPO/hooks" "$REPO/commands" "$REPO/skills" "$REPO/
 # ---- S-1 : never read credentials -------------------------------------------
 # The tool copies settings between accounts. It must never read, copy or print a
 # credentials file — that is what made a real user lose their login.
+# A mention is fine (comments explain the danger); an actual read is not. grep -n
+# prefixes "N:", and [[:space:]] rather than \s, which BSD/macOS grep need not know.
+reads_credentials() {
+    grep -nE '(cat|cp|open|read|<)[^#]*\.credentials\.json' "$1" 2>/dev/null \
+        | grep -qvE '^[0-9]+:[[:space:]]*#'
+}
 hits=""
 for f in $SHIPPED; do
-    # a mention is fine (comments explain the danger); an actual read is not
-    if grep -nE '(cat|cp|open|read|<)[^#]*\.credentials\.json' "$f" 2>/dev/null | grep -qv '^\s*#'; then
-        hits="$hits $f"
-    fi
+    reads_credentials "$f" && hits="$hits $f"
 done
 assert_eq "$hits" "" "S-1 no code path reads or copies .credentials.json"
 
 # cc add must copy an explicit allow-list, never a whole directory
-assert_eq "$(grep -cE 'cp -r|cp -a .*\$src|rsync' "$REPO/bin/cc" || true)" "0" \
+assert_eq "$(grep -cE 'cp -r|cp -a .*[$]src|rsync' "$REPO/bin/cc" || true)" "0" \
     "S-1 cc add copies named files only, never a recursive tree"
 
 # ---- S-2 : no work or machine identifiers -----------------------------------
@@ -48,7 +51,9 @@ s2_search() {   # s2_search <root> <pattern>
     if git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         git -C "$1" grep -ilF -e "$2" -- . ':(exclude).security-denylist' 2>/dev/null || true
     else
-        (cd "$1" && grep -rilF -e "$2" . --exclude-dir=.git --exclude=.security-denylist 2>/dev/null \
+        # Options before the operand: BSD/macOS grep, like any POSIX getopt, stops
+        # reading options at the first operand, so a trailing --exclude is a file name.
+        (cd "$1" && grep -rilF --exclude-dir=.git --exclude=.security-denylist -e "$2" . 2>/dev/null \
             | sed 's|^\./||') || true
     fi
 }
@@ -78,8 +83,8 @@ fi
 # Runs with or without a denylist. A synthetic pattern is planted in a throwaway
 # fixture, the same s2_check runs on it in a subshell (its failure must not count
 # here), and the report must name the file but never contain the pattern, in any case.
-S2_FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/cc-s2-XXXXXX")"
-S2_FIXTURE="${S2_FIXTURE%/}"
+s2_tmp="${TMPDIR:-/tmp}"     # macOS ends TMPDIR with a slash; see new_home in lib.sh
+S2_FIXTURE="$(mktemp -d "${s2_tmp%/}/cc-s2-XXXXXX")"
 s2_secret="s2-selftest-$$-$RANDOM$RANDOM-private"
 s2_upper="$(printf '%s' "$s2_secret" | tr '[:lower:]' '[:upper:]')"
 mkdir -p "$S2_FIXTURE/plain/docs" "$S2_FIXTURE/git/docs"
@@ -107,14 +112,41 @@ assert_contains "$(cat "$REPO/.claude-plugin/plugin.json" 2>/dev/null)" \
     "marwanmaher635@gmail.com" "S-3 plugin.json carries the published author identity"
 
 # ---- S-4 : no network, no telemetry -----------------------------------------
+# NET_RE is a whole-word match spelled in POSIX ERE: \b and \s are GNU extensions,
+# and a grep that does not know them may match nothing, which would pass this gate
+# silently. The self-test below plants calls to prove it still catches them.
+NET_RE='(^|[^[:alnum:]_])(curl|wget|nc|telnet)([^[:alnum:]_]|$)|urllib|requests\.|http_client|socket\.'
+calls_network() {
+    grep -nE "$NET_RE" "$1" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' | grep -q .
+}
 netcalls=""
 for f in $SHIPPED; do
-    if grep -nE '\b(curl|wget|nc|telnet)\b|urllib|requests\.|http_client|socket\.' "$f" 2>/dev/null \
-       | grep -vE '^\s*[0-9]+:\s*#' | grep -q .; then
-        netcalls="$netcalls $f"
-    fi
+    calls_network "$f" && netcalls="$netcalls $f"
 done
 assert_eq "$netcalls" "" "S-4 no network calls anywhere in the shipped code"
+
+# ---- S-1 / S-4 self-test : the static gates catch what they are for -----------
+gate_tmp="${TMPDIR:-/tmp}"
+GATE_DIR="$(mktemp -d "${gate_tmp%/}/cc-gate-XXXXXX")"
+gate_case() {   # gate_case <check> <expect: hit|clean> <label> <line>
+    printf '#!/usr/bin/env bash\n%s\n' "$4" > "$GATE_DIR/probe"
+    if "$1" "$GATE_DIR/probe"; then
+        if [ "$2" = hit ]; then ok "$3"; else no "$3" "flagged: $4"; fi
+    elif [ "$2" = hit ]; then no "$3" "not flagged: $4"
+    else ok "$3"; fi
+}
+# The probe lines are literal shell text, written to a file and never run here.
+# shellcheck disable=SC2016  # $(...) and $dir belong to the probe, not to this script
+gate_case calls_network hit   "S-4 self-test: curl is caught" 'out="$(curl -s https://example.com)"'
+gate_case calls_network hit   "S-4 self-test: wget at the start of a line is caught" 'wget -q https://example.com'
+gate_case calls_network hit   "S-4 self-test: nc after a pipe is caught" 'echo hi |nc host 80'
+gate_case calls_network hit   "S-4 self-test: python urllib is caught" 'python3 -c "import urllib.request"'
+gate_case calls_network clean "S-4 self-test: a commented-out call is not" '    # curl would phone home here'
+gate_case calls_network clean "S-4 self-test: a word that contains nc is not" 'sync_vscode; func_nc_x=1; ncurses=1'
+# shellcheck disable=SC2016  # $dir belongs to the probe, not to this script
+gate_case reads_credentials hit   "S-1 self-test: cat of the credentials file is caught" 'cat "$dir/.credentials.json"'
+gate_case reads_credentials clean "S-1 self-test: a comment about it is not" '  # never cp .credentials.json'
+rm -rf "$GATE_DIR"
 
 # ---- S-5 : file modes asserted in code --------------------------------------
 assert_contains "$(cat "$REPO/bin/cc-detect")" "0o600" "S-5 config and state written mode 600"

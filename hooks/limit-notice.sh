@@ -28,6 +28,18 @@ when_is() {
     date -d "@$1" "$fmt" 2>/dev/null || date -r "$1" "$fmt" 2>/dev/null || echo '?'
 }
 
+# Show a folder under the home directory as ~/…. Pins are stored with symlinks
+# resolved, so match the resolved home too (on macOS /var is a link to /private/var).
+# A plain prefix match rather than sed: a home path may hold |, & or regex characters.
+REAL_HOME="$(cd "$HOME" 2>/dev/null && pwd -P)" || REAL_HOME="$HOME"
+tilde() {
+    case "$1" in
+        "$HOME"|"$HOME"/*)           printf '~%s' "${1#"$HOME"}" ;;
+        "$REAL_HOME"|"$REAL_HOME"/*) printf '~%s' "${1#"$REAL_HOME"}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 IFS=$'\037' read -r session transcript cwd first < <(python3 -c '
 import json, sys
 try:
@@ -99,7 +111,7 @@ if pin="$("$DETECT" pin-of "$cwd" 2>/dev/null)"; then
                 msg="$hit This folder asks before leaving '$id'. Exit and run \`cc\` in this folder to choose, or wait for the reset."
             fi ;;
         *)
-            msg="$hit $(printf '%s' "$folder" | sed "s|^$HOME|~|") is pinned to '$id' with nothing else allowed, so wait for the reset." ;;
+            msg="$hit $(tilde "$folder") is pinned to '$id' with nothing else allowed, so wait for the reset." ;;
     esac
     python3 -c 'import json, sys; print(json.dumps({"decision": "block", "reason": sys.argv[1]}))' "$msg"
     exit 0

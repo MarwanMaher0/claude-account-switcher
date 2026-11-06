@@ -66,11 +66,15 @@ while :; do
         exit 0
     fi
 
-    # SIGTERM first so the transcript is flushed cleanly.
+    # SIGTERM first so the transcript is flushed cleanly. A counted loop, not
+    # `seq`: BSD/macOS `seq 0` counts down to "1 0", so a grace of 0 would wait 2 s.
     kill -TERM "$pid" 2>/dev/null
-    for _ in $(seq "$GRACE"); do
+    case "$GRACE" in ''|*[!0-9]*) GRACE=8 ;; esac
+    waited=0
+    while [ "$waited" -lt "$GRACE" ]; do
         sleep 1
         kill -0 "$pid" 2>/dev/null || exit 0
+        waited=$((waited + 1))
     done
     kill -KILL "$pid" 2>/dev/null
     exit 0

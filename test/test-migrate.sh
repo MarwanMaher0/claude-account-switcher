@@ -113,7 +113,7 @@ assert_contains "$out" "dry run" "MG-1 ...and says it is one"
 # shellcheck disable=SC2088  # the literal ~ the plan prints
 assert_contains "$out" "~/work/acme: 2 chats, 1 subagent/tool file, 2 checkpoint/todo files, 1 already there" \
     "MG-1 the plan counts acme's chats in personal (the folder's own and a subfolder's)"
-# shellcheck disable=SC2088
+# shellcheck disable=SC2088  # the literal ~ the plan prints
 assert_contains "$out" "~/work/acme: 1 chat from globex -> acme" "MG-1 ...and in globex (a worktree's)"
 assert_contains "$out" "clash.jsonl already exists in acme with different content" "MG-1 ...and names the conflict"
 assert_contains "$out" "delete ~/work/acme/.vscode/settings.json" "MG-1 ...and the file cc created"
@@ -122,7 +122,7 @@ assert_contains "$out" "delete ~/work/acme/.vscode/settings.json" "MG-1 ...and t
 out="$(mig --apply)"; rc=$?
 assert_eq "$rc" "0" "MG-2 --apply succeeds"
 assert_no_file "$HOME/work/acme/.vscode/settings.json" "MG-2 the file cc created is deleted"
-[ -d "$HOME/work/acme/.vscode" ] && no "MG-2 ...with its empty .vscode folder" || ok "MG-2 ...with its empty .vscode folder"
+if [ -d "$HOME/work/acme/.vscode" ]; then no "MG-2 ...with its empty .vscode folder"; else ok "MG-2 ...with its empty .vscode folder"; fi
 assert_not_contains "$(cat "$HOME/work/acme/.git/info/exclude")" "/.vscode/settings.json" "MG-2 ...and the exclude line cc added"
 assert_contains "$(cat "$HOME/work/acme/.git/info/exclude")" "# git ls-files" "MG-2 ...the rest of exclude is kept"
 assert_eq "$(cat "$HOME/work/globex/.vscode/settings.json")" "$(cat "$SANDBOX/globex-original.json")" \

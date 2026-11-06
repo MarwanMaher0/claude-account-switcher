@@ -135,13 +135,13 @@ So `cc vscode on` binds both:
    or removed for the default account. Whatever was inherited is overridden. It reads no stdin
    (that is Claude's stream-json channel) and runs no live check, so it costs tens of
    milliseconds.
-2. **The companion extension** `cc-switch.cc-switch-binding` (`vscode/cc-switch-binding`, plain
+2. **The companion extension** `marwanmaher.cc-switch-binding` (`vscode/cc-switch-binding`, plain
    JavaScript, no dependencies; `cc vscode on` zips it into a `.vsix` and installs it with the
-   `code` CLI). It activates on `*` in each window, asks `cc-detect bind` for the window's
-   folders, and sets that window's extension-host `process.env.CLAUDE_CONFIG_DIR` (deleting it for
-   the default account), plus `CC_WINDOW_FOLDER`, so helpers the extension starts in a temp dir
-   still resolve by window. The same value goes to the window's terminals. The panel's history
-   and resume then read the same account the wrapper runs chats on.
+   `code` CLI). It activates on `onStartupFinished` in each local window, asks `cc-detect bind`
+   for the window's folders, and sets that window's extension-host `process.env.CLAUDE_CONFIG_DIR`
+   (deleting it for the default account), plus `CC_WINDOW_FOLDER`, so helpers the extension
+   starts in a temp dir still resolve by window. The same value goes to the window's terminals.
+   The panel's history and resume then read the same account the wrapper runs chats on.
 3. **Terminal mode.** With `claudeCode.useTerminal` the extension types plain `claude` into a
    new terminal: no process wrapper, and (with a wrapper set) no `CLAUDE_CONFIG_DIR` of its own.
    So in that mode the companion prepends `~/.claude-switch/terminal-bin` to the window's
@@ -150,6 +150,12 @@ So `cc vscode on` binds both:
    even when the companion could not bind. `cc` and the processes it starts set
    `CC_SWITCH_DIRECT=1` and run Claude directly. A shell startup file that puts another `claude`
    first on `PATH`, or an alias, bypasses the shim.
+
+Startup-finished activation no longer attempts early environment sanitization or chat adoption
+before Claude Code initializes. If Claude Code is already active, the companion's existing
+late-activation path explains the history mismatch and offers a reload only when the folder's
+chats are safely available. The wrapper still decides every new Claude process independently;
+running chats are never switched in place. See the [startup-order details](../vscode/cc-switch-binding/README.md#startup-activation).
 
 The extension passes its bundled binary as the wrapper's first argument. A build without one
 passes only Claude's own arguments; the wrapper then uses the `claude` on `PATH`.

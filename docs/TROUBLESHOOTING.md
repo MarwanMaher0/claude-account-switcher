@@ -56,8 +56,10 @@ Three common reasons:
 Check these in order:
 
 1. **Windows are bound.** `cc status` should list `VS Code: windows follow their folder's
-   account · wrapper set · companion installed`, and a `VS Code window <folder> -> <name>` line
-   for each open window. If not, run `cc vscode on`. The status bar of each window shows
+   account · wrapper set · companion installed with code`, and a `VS Code window <folder> -> <name>`
+   line for each open window. The companion part is checked each time, so it shows what each
+   editor lists now. If any of this is missing, or the companion part names both companions,
+   only the legacy one, or none, run `cc vscode on`. The status bar of each window shows
    `Claude: <name>`; clicking it re-checks.
 2. **The folder is pinned the way you think.** `cc pins` lists pins; a pin made with
    `--no-vscode` (Terminal only) does not apply in VS Code. A workspace with several folders runs
@@ -126,6 +128,28 @@ cc clear <id>
 
 Then please open an issue — the two known false-positive causes (expired events and copied
 events) are both guarded and tested, so a third would be a real bug worth fixing.
+
+## It behaves differently on macOS than on Linux
+
+cc-switch runs on the bash 3.2 and BSD tools that macOS ships, and CI tests both systems. A few
+things changed in the release after 2.3.1 because they did not match before:
+
+- **`CC_WATCH_GRACE=0`** now stops a limited session at once on macOS, as on Linux; before, it
+  waited 2 s. A value that is not a whole number uses the default, 8 s.
+- **The limit notice shows `~/…` for pinned folders** even when your home folder is reached
+  through a symlink (on macOS, `/var` is a link to `/private/var`). Older versions printed the
+  full path there.
+
+If something still differs, run the checks with the `bash` and tools you use every day, and
+include the output in an issue:
+
+```bash
+bash test/run-all.sh                     # every suite; no real account is touched
+bash test/test-portability.sh            # the macOS/BSD-specific checks on their own
+/bin/bash test/run-all.sh                # on macOS: the same under the system bash 3.2
+```
+
+`bash test/lint.sh` also needs [ShellCheck](https://www.shellcheck.net) installed.
 
 ## The account I added turned out to be one I already had
 

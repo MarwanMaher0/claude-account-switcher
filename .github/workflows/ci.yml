@@ -6,20 +6,59 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  # Linux and macOS, each running shellcheck and the whole suite; macOS also runs both
+  # again under the stock /bin/bash 3.2.
   test:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      SHELLCHECK_VERSION: v0.11.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Show environment
         run: |
+          uname -sm
           bash --version | head -1
           python3 --version
+
+      # The same pinned shellcheck on both systems (distribution packages lag and
+      # differ), checked against the release's sha256 before it runs.
+      - name: Install shellcheck ${{ env.SHELLCHECK_VERSION }}
+        run: |
+          case "$(uname -s).$(uname -m)" in
+            Linux.x86_64)  arch=linux.x86_64;    sum=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 ;;
+            Darwin.arm64)  arch=darwin.aarch64;  sum=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79 ;;
+            Darwin.x86_64) arch=darwin.x86_64;   sum=3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6 ;;
+            *) echo "no pinned shellcheck for $(uname -sm)" >&2; exit 1 ;;
+          esac
+          dir="$RUNNER_TEMP/shellcheck"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/sc.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/$SHELLCHECK_VERSION/shellcheck-$SHELLCHECK_VERSION.$arch.tar.xz"
+          python3 - "$dir/sc.tar.xz" "$sum" <<'PY'
+          import hashlib, sys
+          got = hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()
+          if got != sys.argv[2]:
+              sys.exit("shellcheck download sha256 mismatch: " + got)
+          PY
+          tar -xJf "$dir/sc.tar.xz" -C "$dir"
+          echo "$dir/shellcheck-$SHELLCHECK_VERSION" >> "$GITHUB_PATH"
+
+      # bash -n on every script, then shellcheck at style severity; a disable must say why.
+      - name: Lint shell scripts
+        run: |
+          shellcheck --version | head -2
+          bash test/lint.sh
 
       # The suite stubs `claude` and runs against a throwaway HOME, so it needs
       # no API key, no Claude install, and consumes no quota.
@@ -29,29 +68,20 @@ jobs:
       # GitHub's macOS images put Homebrew's bash 5 first on PATH, but a stock Mac (and
       # the VS Code extension host running cc-claude-wrapper there) has /bin/bash 3.2.
       # Run everything again with `bash` and `env bash` resolving to /bin/bash.
-      - name: Run test suites under the stock /bin/bash (3.2)
+      - name: Lint and run test suites under the stock /bin/bash (3.2)
         if: runner.os == 'macOS'
         run: |
           /bin/bash --version | head -1
           shim="$(mktemp -d)"
           ln -s /bin/bash "$shim/bash"
-          PATH="$shim:$PATH" /bin/bash -c 'bash --version | head -1; /bin/bash test/run-all.sh'
+          PATH="$shim:$PATH" /bin/bash -c 'bash --version | head -1; /bin/bash test/lint.sh && /bin/bash test/run-all.sh'
 
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-
-      - name: shellcheck
-        run: |
-          shellcheck --severity=warning \
-            bin/cc bin/cc-watch bin/cc-claude-wrapper \
-            install.sh uninstall.sh \
-            hooks/*.sh \
-            test/*.sh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Byte-compile python
         run: python3 -m py_compile bin/cc-detect bin/cc-vscode test/contract.py
@@ -64,10 +94,40 @@ jobs:
           python3 -c "import json;json.load(open('.claude-plugin/marketplace.json'))"
           python3 -c "import json;json.load(open('.claude-plugin/plugin.json'))"
 
+  site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Astro 7 needs Node >= 22.23.4; site/.nvmrc pins the version.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: site/.nvmrc
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install site dependencies
+        working-directory: site
+        run: npm ci
+
+      # The build regenerates every page from README.md, docs/, PRIVACY.md and
+      # SECURITY.md, and fails on a section or anchor it cannot resolve.
+      - name: Build site
+        working-directory: site
+        run: npm run build
+
+      - name: Check internal links
+        working-directory: site
+        run: npm run check:links
+
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Publication gate: no credential reads, no private identifiers, no network
       # calls. Run separately from the main suite so a failure here is unmissable.

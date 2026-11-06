@@ -154,7 +154,7 @@ start=$(python3 -c 'import time; print(time.time())')
 CC_LIVE_CHECK=1 detect bind "$HOME/notes" --json >/dev/null </dev/null
 elapsed=$(python3 -c "import time; print(int((time.time() - $start) * 1000))")
 assert_eq "$(cat "$STUB_LOG")" "" "BD-17 bind never runs claude (no live check), even with liveCheck on"
-[ "$elapsed" -lt 1500 ] && ok "BD-18 bind answers fast (${elapsed} ms)" || no "BD-18 bind answers fast" "${elapsed} ms"
+if [ "$elapsed" -lt 1500 ]; then ok "BD-18 bind answers fast (${elapsed} ms)"; else no "BD-18 bind answers fast" "${elapsed} ms"; fi
 cleanup_home
 
 summary

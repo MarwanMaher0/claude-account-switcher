@@ -97,7 +97,7 @@ start=$(python3 -c 'import time; print(time.time())')
 out="$(cd "$HOME/work/acme" && CC_BIND_TIMEOUT=1 "$WRAP" "$FAKE" </dev/null 2>&1)"; rc=$?
 elapsed=$(python3 -c "import time; print(int(time.time() - $start))")
 assert_eq "$rc/$( [ -f "$FAKE_OUT" ] && echo ran || echo not-run)" "1/not-run" "WR-10 cc's state cannot be read in time: fail closed"
-[ "$elapsed" -lt 5 ] && ok "WR-10 ...after the timeout, not forever (${elapsed}s)" || no "WR-10 ...after the timeout" "${elapsed}s"
+if [ "$elapsed" -lt 5 ]; then ok "WR-10 ...after the timeout, not forever (${elapsed}s)"; else no "WR-10 ...after the timeout" "${elapsed}s"; fi
 cleanup_home
 
 # ---- WR-15..WR-19 : state that hangs or is malformed never reads as "not pinned" ----------
@@ -115,7 +115,7 @@ start=$(python3 -c 'import time; print(time.time())')
 out="$(cd "$HOME/work/acme" && CC_BIND_TIMEOUT=1 "$WRAP" "$FAKE" </dev/null 2>&1)"; rc=$?
 elapsed=$(python3 -c "import time; print(int(time.time() - $start))")
 assert_eq "$rc/$( [ -f "$FAKE_OUT" ] && echo ran || echo not-run)" "1/not-run" "WR-16 config.json hangs: fail closed"
-[ "$elapsed" -lt 5 ] && ok "WR-16 ...after the timeout (${elapsed}s)" || no "WR-16 ...after the timeout" "${elapsed}s"
+if [ "$elapsed" -lt 5 ]; then ok "WR-16 ...after the timeout (${elapsed}s)"; else no "WR-16 ...after the timeout" "${elapsed}s"; fi
 rm -f "$HOME/.claude-switch/config.json"; mv "$SANDBOX/config.json" "$HOME/.claude-switch/config.json"
 
 cp "$HOME/.claude-switch/pins.json" "$SANDBOX/pins.json"
@@ -191,8 +191,8 @@ new_home >/dev/null; companies; fake_claude
 start=$(python3 -c 'import time; print(time.time())')
 for _ in 1 2 3 4 5; do (cd "$HOME/work/acme" && "$WRAP" "$FAKE" auth status --json </dev/null); done
 avg=$(python3 -c "import time; print(int((time.time() - $start) * 1000 / 5))")
-[ "$avg" -lt 600 ] && ok "WR-14 a spawn through the wrapper costs little (${avg} ms on average)" \
-    || no "WR-14 a spawn through the wrapper costs little" "${avg} ms"
+if [ "$avg" -lt 600 ]; then ok "WR-14 a spawn through the wrapper costs little (${avg} ms on average)"
+else no "WR-14 a spawn through the wrapper costs little" "${avg} ms"; fi
 cleanup_home
 
 summary

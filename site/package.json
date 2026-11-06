@@ -1,0 +1,32 @@
+{
+  "name": "cc-switch-site",
+  "private": true,
+  "type": "module",
+  "description": "Documentation website for claude-account-switcher (cc-switch), generated from the repository's own Markdown.",
+  "engines": {
+    "node": ">=22.23.4"
+  },
+  "scripts": {
+    "sync": "node scripts/sync-docs.mjs",
+    "og": "node scripts/og-image.mjs",
+    "predev": "npm run sync",
+    "dev": "astro dev",
+    "prebuild": "npm run sync && npm run og",
+    "build": "astro build",
+    "postbuild": "node scripts/postbuild.mjs && npm run check:links",
+    "preview": "astro preview",
+    "check": "astro check",
+    "check:links": "node scripts/check-links.mjs"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.9",
+    "astro": "7.4.6"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.12",
+    "@resvg/resvg-js": "2.6.2",
+    "github-slugger": "2.0.0",
+    "satori": "0.63.2",
+    "typescript": "5.9.3"
+  }
+}

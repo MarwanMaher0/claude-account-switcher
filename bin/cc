@@ -207,7 +207,7 @@ confirm() {
 # The interactive part of `cc pin`. Sets PIN_ACCT, PIN_FB (an id, none, or ask) and
 # PIN_VSCODE; returns 1 when the user backs out.
 pin_menu() {
-    local folder="$1" dflt="$2" sel=0 ids labels id email name i
+    local folder="$1" dflt="$2" sel=0 ids labels id email name
     printf '\nFolder: %s   (all subfolders included)\n\n' "$(tilde "$folder")" >&2
     while :; do
         ids=(); labels=()
@@ -225,9 +225,7 @@ pin_menu() {
         IFS= read -r name || return 1
         [ -n "$name" ] || continue
         if "$HERE/cc" add "$name"; then
-            i=0
-            for id in "${ids[@]}"; do i=$((i + 1)); done
-            sel=$i                           # a new account is appended last
+            sel=${#ids[@]}                   # a new account is appended last
         fi
         echo >&2
     done
@@ -239,7 +237,8 @@ pin_menu() {
     if [ "$PIN_ACCT" != "$dflt" ]; then
         fbs+=("$dflt"); fbl+=("Switch to $dflt")
     else
-        for id in "${ids[@]}"; do
+        # ${ids[@]+...}: bash 3.2 treats an empty array as unset under set -u.
+        for id in ${ids[@]+"${ids[@]}"}; do
             [ "$id" = "$dflt" ] && continue
             case "$pinned" in *" $id "*) continue ;; esac
             fbs+=("$id"); fbl+=("Switch to $id")

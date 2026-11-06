@@ -10,7 +10,7 @@ CLAUDE_CONFIG_DIR therefore never worked. cc binds windows in two parts instead:
                       every Claude process through it; it asks `cc-detect bind` which
                       account the session's folder runs on and execs Claude there. It
                       fails closed in a pinned folder when that cannot be decided.
-  companion extension cc-switch.cc-switch-binding, built and installed by `on`. In each
+  companion extension marwanmaher.cc-switch-binding, built and installed by `on`. In each
                       window it sets the extension host's CLAUDE_CONFIG_DIR to the same
                       account, so the panel's history and resume match it, and re-binds
                       when a limit moves the window to its pin's fallback (or back).
@@ -82,7 +82,8 @@ MIG_BACKUPS = os.path.join(SWITCH_DIR, "vscode-migration-backups")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
 KEY = "claudeCode.environmentVariables"
 WRAPPER_KEY = "claudeCode.claudeProcessWrapper"
-EXT_ID = "cc-switch.cc-switch-binding"
+EXT_ID = "marwanmaher.cc-switch-binding"
+LEGACY_EXT_ID = "cc-switch.cc-switch-binding"
 WRAPPER_NAME = "cc-claude-wrapper"
 CARRY_DAYS = 7
 
@@ -419,6 +420,7 @@ def build_vsix(dest=VSIX):
                            "(vscode/cc-switch-binding); reinstall cc")
     with open(os.path.join(src, "package.json"), encoding="utf-8") as fh:
         pkg = json.load(fh)
+    pkg.pop("icon", None)
     esc = lambda v: (str(v).replace("&", "&amp;").replace("<", "&lt;")   # noqa: E731
                      .replace(">", "&gt;").replace('"', "&quot;"))
     manifest = f"""<?xml version="1.0" encoding="utf-8"?>
@@ -453,8 +455,8 @@ def build_vsix(dest=VSIX):
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", types)
         zf.writestr("extension.vsixmanifest", manifest)
-        for name in ("package.json", "extension.js"):
-            zf.write(os.path.join(src, name), f"extension/{name}")
+        zf.writestr("extension/package.json", json.dumps(pkg, indent=2) + "\n")
+        zf.write(os.path.join(src, "extension.js"), "extension/extension.js")
     os.replace(tmp, dest)
     return dest
 
@@ -521,9 +523,27 @@ def run_cli(cli, *args):
     return res.returncode, (res.stdout or "") + (res.stderr or "")
 
 
-def companion_installed(cli):
+def installed_extensions(cli):
     rc, out = run_cli(cli, "--list-extensions")
-    return rc == 0 and EXT_ID in {line.strip().lower() for line in out.splitlines()}
+    return {line.strip().lower() for line in out.splitlines()} if rc == 0 else None
+
+
+def said(out):
+    text = (out or "").strip()[-300:]
+    return f": {text}" if text else ""
+
+
+def cli_labels(clis):
+    bases = [os.path.basename(c) for c in clis]
+    return {c: (b if bases.count(b) == 1 else c) for c, b in zip(clis, bases)}
+
+
+def companions_now(cli):
+    extensions = installed_extensions(cli)
+    if extensions is None:
+        return None
+    new, legacy = EXT_ID in extensions, LEGACY_EXT_ID in extensions
+    return "both" if new and legacy else "new" if new else "legacy" if legacy else "none"
 
 
 def tool_path(name):
@@ -2010,19 +2030,92 @@ def cmd_on(args):
         print(f"cc-vscode: {exc}", file=sys.stderr)
         return 1
     write_binding()
-    installed = []
     # Only the editor whose settings get the wrapper gets the companion: elsewhere it
     # would bind the panel to an account no wrapper enforces.
     clis, skipped = clis_for(path, vscode_clis())
     for cli in skipped:
         print(f"cc-vscode: {os.path.basename(cli)} keeps its own settings, not {tilde(path)}: skipped "
               f"(run `cc vscode on --settings <its settings.json>` for it)", file=sys.stderr)
+    labels = cli_labels(clis)
+    install = f"--install-extension {shell_quote(vsix)} --force"
+
+    def problem(text, *fix):
+        print(f"cc-vscode: {text}"
+              + ("\n  Fix it with\n" + "".join(f"  {cmd}\n" for cmd in fix)
+                 + "  then run `cc vscode on` again." if fix else ""), file=sys.stderr)
+
+    outcome = {}
     for cli in clis:
+        q = shell_quote(cli)
         rc, out = run_cli(cli, "--install-extension", vsix, "--force")
-        if rc == 0 and companion_installed(cli):
-            installed.append(cli)
+        now = companions_now(cli)
+        if rc != 0:
+            if now == "legacy":
+                outcome[cli] = "legacy-only"
+                problem(f"{cli} could not install the companion{said(out)}\n"
+                        f"  It still runs only the legacy companion {LEGACY_EXT_ID}.", f"{q} {install}")
+            elif now == "both":
+                outcome[cli] = "both"
+                problem(f"{cli} could not install the companion{said(out)}\n"
+                        f"  An earlier {EXT_ID} and the legacy companion {LEGACY_EXT_ID} both still run there.",
+                        f"{q} {install}", f"{q} --uninstall-extension {LEGACY_EXT_ID}")
+            else:
+                outcome[cli] = "failed"
+                problem(f"{cli} could not install the companion{said(out)}")
+        elif now is None:
+            outcome[cli] = "unverified"
+            problem(f"{cli} reported the companion installed, but could not list its "
+                    f"extensions to verify {EXT_ID}")
+        elif now == "legacy":
+            outcome[cli] = "legacy-only"
+            problem(f"{cli} reported the companion installed, but {EXT_ID} is not listed{said(out)}\n"
+                    f"  It still runs only the legacy companion {LEGACY_EXT_ID}.", f"{q} {install}")
+        elif now == "none":
+            outcome[cli] = "missing"
+            problem(f"{cli} reported the companion installed, but {EXT_ID} is not listed{said(out)}")
         else:
-            print(f"cc-vscode: {cli} could not install the companion: {out.strip()[-300:]}", file=sys.stderr)
+            outcome[cli] = "legacy" if now == "both" else "ok"
+    for cli in [c for c in clis if outcome[c] == "legacy"]:
+        q = shell_quote(cli)
+        rc, out = run_cli(cli, "--uninstall-extension", LEGACY_EXT_ID)
+        ran = f"its uninstall command failed{said(out)}" if rc else "its uninstall command reported success"
+        now = companions_now(cli)
+        if now == "new":
+            outcome[cli] = "migrated"
+            print(f"cc-vscode: removed legacy companion {LEGACY_EXT_ID} from {cli}; "
+                  "reload open windows to finish publisher migration.")
+        elif now is None:
+            outcome[cli] = "unknown"
+            problem(f"{cli} tried to remove the legacy companion {LEGACY_EXT_ID} ({ran}), but could not "
+                    "list its extensions afterwards, so which companions run there is unknown.\n"
+                    f"  Check with `{q} --list-extensions`.",
+                    f"{q} --uninstall-extension {LEGACY_EXT_ID}")
+        elif now == "both":
+            outcome[cli] = "both"
+            problem(f"{cli} still lists the legacy companion {LEGACY_EXT_ID} ({ran}): both {EXT_ID} and "
+                    f"{LEGACY_EXT_ID} still run there.", f"{q} --uninstall-extension {LEGACY_EXT_ID}")
+        elif now == "legacy":
+            outcome[cli] = "legacy-only"
+            problem(f"{cli} still lists the legacy companion {LEGACY_EXT_ID} ({ran}), and {EXT_ID} is no "
+                    "longer listed: it runs only the legacy companion.", f"{q} {install}")
+        else:
+            outcome[cli] = "lost"
+            problem(f"{cli} no longer lists the legacy companion {LEGACY_EXT_ID} ({ran}), but {EXT_ID} is "
+                    "no longer listed either: neither companion runs there.", f"{q} {install}")
+
+    def names(*kinds):
+        return ", ".join(labels[c] for c in clis if outcome[c] in kinds)
+
+    installed = [c for c in clis if outcome[c] in ("ok", "migrated", "both")]
+    if names("both", "legacy-only", "unknown", "lost") and not wrapper_only:
+        print(f"cc-vscode: every editor was processed, but the move to {EXT_ID} is incomplete in "
+              f"{names('both', 'legacy-only', 'unknown', 'lost')}"
+              + (f" (complete in {names('ok', 'migrated')})" if names("ok", "migrated") else "")
+              + ". VS Code settings were not changed.\n"
+              "  Fix the editors named above and run `cc vscode on` again, or run\n"
+              "  `cc vscode on --wrapper-only` to set the wrapper anyway.", file=sys.stderr)
+        return 1
+
     if not installed and not wrapper_only:
         print(("No VS Code command-line tool (code, code-insiders, codium) was found. " if not clis else
                "The companion extension could not be installed and verified. ")
@@ -2066,10 +2159,22 @@ def cmd_on(args):
     touch_epoch()
     print(f"VS Code: each window now runs Claude on its folder's account · {tilde(path)}")
     print(f"  wrapper    {tilde(wrapper)}")
-    if installed:
-        print(f"  companion  {EXT_ID} installed with {', '.join(os.path.basename(c) for c in installed)}")
-    else:
-        print("  companion  NOT installed (--wrapper-only): the history list may show another account")
+    for tag, kinds, text in (
+            ("companion", ("ok", "migrated"), f"{EXT_ID} installed with {{}}"),
+            ("both", ("both",), f"{{}}: {LEGACY_EXT_ID} still runs beside {EXT_ID} (see above)"),
+            ("legacy", ("legacy-only",), f"{{}}: only the legacy companion {LEGACY_EXT_ID} runs there; "
+                                         f"{EXT_ID} is not listed (see above)"),
+            ("unknown", ("unknown",), "{}: its extensions could not be listed after the legacy removal "
+                                      "(see above)"),
+            ("none", ("lost",), "{}: neither companion is listed after the legacy removal (see above)"),
+            ("unchecked", ("unverified",), f"{{}}: its install command succeeded, but its extensions could "
+                                           f"not be listed to verify {EXT_ID}"),
+            ("missing", ("missing",), f"{{}}: {EXT_ID} is not listed after its install command succeeded"),
+            ("failed", ("failed",), "{}: its install command failed")):
+        if names(*kinds):
+            print(f"  {tag:<9}  " + text.format(names(*kinds)))
+    if not installed:
+        print("  companion  none verified (--wrapper-only): the history list may show another account")
     if backup:
         print(f"  backup     {tilde(backup)}")
     for rep in adopted:
@@ -2105,10 +2210,18 @@ def cmd_off(args):
             print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
             rc = 1
     for cli in vscode_clis():
-        if companion_installed(cli):
-            code, out = run_cli(cli, "--uninstall-extension", EXT_ID)
+        extensions = installed_extensions(cli)
+        if extensions is None:
+            print(f"cc-vscode: {cli} could not list installed companions; "
+                  "check the editor CLI and run `cc vscode off` again", file=sys.stderr)
+            rc = 1
+            continue
+        for extension_id in (EXT_ID, LEGACY_EXT_ID):
+            if extension_id not in extensions:
+                continue
+            code, out = run_cli(cli, "--uninstall-extension", extension_id)
             if code != 0:
-                print(f"cc-vscode: {cli} could not remove the companion: {out.strip()[-300:]}",
+                print(f"cc-vscode: {cli} could not remove the companion {extension_id}{said(out)}",
                       file=sys.stderr)
                 rc = 1
     for f in (BINDING, os.path.join(TERMINAL_BIN, "claude")):
@@ -2143,7 +2256,24 @@ def cmd_status():
             wrapper = None
     if vs.get("enabled") and vs.get("mode") == "wrapper":
         state = "set" if ours(wrapper) else "MISSING from settings (run cc vscode on)"
-        comp = "companion installed" if vs.get("companion") else "no companion: history may not match"
+        clis = clis_for(path, vscode_clis())[0] if path else vscode_clis()
+        labels = cli_labels(clis)
+        now = {c: companions_now(c) for c in clis}
+
+        def names(kind):
+            return ", ".join(labels[c] for c in clis if now[c] == kind)
+
+        parts = [text.format(names(kind)) for kind, text in (
+            ("new", "companion installed with {}"),
+            ("both", f"both companions with {{}}: remove {LEGACY_EXT_ID}"),
+            ("legacy", f"only the legacy companion {LEGACY_EXT_ID} with {{}}: run `cc vscode on`"),
+            ("none", "no companion with {}"),
+            (None, "companion unknown with {}: its extensions could not be listed")) if names(kind)]
+        if not clis:
+            parts.append("companion not checked: no VS Code command-line tool found")
+        if not names("new") and not names("both") and any(v is not None for v in now.values()):
+            parts.append("history may not match")
+        comp = " · ".join(parts)
         print(f"  VS Code: windows follow their folder's account · wrapper {state} · {comp}")
     elif vs.get("enabled"):
         print("  VS Code: set up by an older cc · run `cc vscode on` to switch to per-window binding")

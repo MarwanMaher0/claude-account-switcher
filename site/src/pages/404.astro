@@ -1,0 +1,22 @@
+---
+import StarlightPage, { type StarlightPageProps } from '@astrojs/starlight/components/StarlightPage.astro'
+import { base } from '../../site.config.mjs'
+
+const frontmatter: StarlightPageProps['frontmatter'] = {
+  title: 'Page not found',
+  description: 'That address is not part of the cc-switch site.',
+  template: 'splash',
+  editUrl: false,
+  hero: {
+    tagline: 'That address is not part of this site. The docs start at the overview; the landing page explains what cc-switch does.',
+    actions: [
+      { text: 'Docs overview', link: `${base}docs/`, icon: 'right-arrow', variant: 'primary' },
+      { text: 'Landing page', link: base, variant: 'minimal' },
+    ],
+  },
+}
+---
+
+<StarlightPage frontmatter={frontmatter}>
+  <p lang="ar" dir="rtl">هذه الصفحة غير موجودة. <a href={`${base}ar/docs/`}>ابدأ من نظرة عامة على التوثيق</a> أو <a href={`${base}ar/`}>عُد إلى الصفحة الرئيسية</a>.</p>
+</StarlightPage>

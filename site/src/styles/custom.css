@@ -1,0 +1,83 @@
+/* Brand colours from the logo, tuned for contrast in both themes. */
+:root {
+  --sl-color-accent-low: #0c2a1f;
+  --sl-color-accent: #1f9d6f;
+  --sl-color-accent-high: #a6f0cf;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e8eeea;
+  --sl-color-gray-2: #c3cdc6;
+  --sl-color-gray-3: #8d9a91;
+  --sl-color-gray-4: #56625a;
+  --sl-color-gray-5: #36413a;
+  --sl-color-gray-6: #1d2621;
+  --sl-color-black: #121915;
+  --sl-content-width: 48rem;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #d3f3e4;
+  --sl-color-accent: #0b7a55;
+  --sl-color-accent-high: #064a33;
+  --sl-color-white: #121915;
+  --sl-color-gray-1: #1d2621;
+  --sl-color-gray-2: #36413a;
+  --sl-color-gray-3: #56625a;
+  --sl-color-gray-4: #8d9a91;
+  --sl-color-gray-5: #c3cdc6;
+  --sl-color-gray-6: #e8eeea;
+  --sl-color-gray-7: #f4f7f5;
+  --sl-color-black: #ffffff;
+}
+
+/* Home */
+[data-has-hero] .hero {
+  padding-block: clamp(2.5rem, 7vw, 5rem) clamp(1.5rem, 4vw, 3rem);
+}
+
+[data-has-hero] .hero h1 {
+  max-width: 18ch;
+  letter-spacing: -0.02em;
+}
+
+[data-has-hero] .hero .tagline {
+  max-width: 44rem;
+}
+
+[data-has-hero] .sl-markdown-content {
+  max-width: 60rem;
+  margin-inline: auto;
+}
+
+[data-has-hero] .sl-markdown-content > h2 {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--sl-color-hairline);
+}
+
+[data-has-hero] .sl-markdown-content > h2:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.home-excerpt img {
+  border-radius: 0.75rem;
+  border: 1px solid var(--sl-color-hairline);
+  box-shadow: 0 12px 40px -18px rgb(0 0 0 / 0.45);
+}
+
+/* Attribution under generated pages and FAQ answers */
+.source-note,
+.faq-source {
+  display: block;
+  color: var(--sl-color-gray-3);
+}
+
+.faq-source {
+  margin-top: 0.5rem;
+}
+
+/* Tables from the docs are wide; let them scroll instead of squeezing. */
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+}
