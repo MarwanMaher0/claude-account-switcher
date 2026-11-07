@@ -2,6 +2,18 @@
 
 ## Unreleased (after 2.3.1)
 
+### Fixed — `uninstall.sh` could delete a foreign `cc` or a shared `CC_SHARE_DIR`
+- `uninstall.sh` previously deleted `$CC_INSTALL_DIR/cc` unconditionally and ran
+  `rm -rf "$CC_SHARE_DIR"`. If `install.sh` had not been run (or another tool's `cc` was
+  in `CC_INSTALL_DIR`, or `CC_SHARE_DIR` was pointed at a shared directory such as
+  `~/.local/share`), `uninstall.sh` could remove a C compiler or unrelated files, and a
+  missing file in `CC_INSTALL_DIR` made `[ -f ... ] && rm -f ...` return 1 under
+  `set -e` so a second run aborted early. `uninstall.sh` now checks each of the five
+  installed scripts and two companion extension files before removing it (matching either
+  the copy in the checkout or the file's identifying header), removes empty directories
+  with `rmdir` instead of `rm -rf`, and succeeds cleanly when run again. A new suite,
+  `test/test-install.sh`, covers `install.sh` and `uninstall.sh`.
+
 ### Fixed — concurrent writes of config.json and state.json
 - `cc add`, `cc remove`, `cc cloud set` and `cc vscode on|off` rewrote `config.json`
   through one fixed `.tmp` name and without the hooks' lock. Two runs at once could
