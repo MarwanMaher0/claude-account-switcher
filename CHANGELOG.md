@@ -36,6 +36,15 @@
 
 ### Changed
 - Every ShellCheck finding is fixed; the remaining `disable` directives each give a reason.
+- The companion VS Code extension activates on `onStartupFinished` instead of eagerly on `*`;
+  the existing late-activation handling is unchanged, and pre-Claude history/environment
+  initialization is no longer attempted during startup.
+- The companion VS Code extension uses the publisher ID `marwanmaher`. The installer verifies
+  `marwanmaher.cc-switch-binding` in every editor first, then removes the former
+  `cc-switch.cc-switch-binding` identity from each editor and re-checks that only the new
+  identity remains; `cc vscode on` fails without changing settings when any editor still lists
+  the former identity or lost the new one. `cc vscode status` reports the companions each
+  editor lists when it runs, and disabling removes either identity.
 
 ## 2.3.1 — 2026-11-04
 
@@ -139,7 +148,7 @@
   the pin's account is limited, or what `cc` would pick for an unpinned folder. It never sets
   `CLAUDE_CONFIG_DIR` to the default account's own dir, and it fails closed: if the account for
   a pinned folder cannot be decided, Claude does not start there.
-- A companion VS Code extension, `marwanmaher.cc-switch-binding` (plain JavaScript, no
+- A companion VS Code extension, `cc-switch.cc-switch-binding` (plain JavaScript, no
   dependencies; built into a `.vsix` and installed by `cc vscode on`). Per window it binds the
   extension host's `CLAUDE_CONFIG_DIR`, so the panel's history and resume match the account,
   re-binds when a limit is recorded or ends, carries the folder's recent chats before a move,
