@@ -183,7 +183,8 @@ EOF
 bash "$REPO/install.sh" >/dev/null 2>&1
 out="$("$dest/cc" vscode on 2>&1)"; rc=$?
 assert_eq "$rc" "0" "IN-4 installed cc vscode on succeeds"
-assert_eq "$(json_setting "$vs_settings" claudeCode.claudeProcessWrapper)" "$dest/cc-claude-wrapper" \
+# cc-vscode stores the resolved path; on macOS $TMPDIR is under /var -> /private/var.
+assert_eq "$(json_setting "$vs_settings" claudeCode.claudeProcessWrapper)" "$(cd "$dest" && pwd -P)/cc-claude-wrapper" \
     "IN-4 wrapper points to installed cc-claude-wrapper"
 assert_file "$SANDBOX/stub/installed" "IN-4 companion extension is installed in stub editor"
 it "IN-4 cc-vscode enabled reports true before uninstall"
