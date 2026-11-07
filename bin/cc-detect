@@ -107,6 +107,11 @@ try:
 except ImportError:                     # Python < 3.9
     ZoneInfo = None
 
+if sys.version_info < (3, 7):
+    sys.stderr.write("cc-detect: Python 3.7 or newer is required (found %d.%d.%d)\n"
+                     % sys.version_info[:3])
+    sys.exit(1)
+
 HOME = os.path.expanduser("~")
 SWITCH_DIR = os.path.join(HOME, ".claude-switch")
 CONFIG = os.path.join(SWITCH_DIR, "config.json")

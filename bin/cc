@@ -60,6 +60,14 @@ die()  { printf '%s[cc]%s %s\n' "$c_yel" "$c_rst" "$*" >&2; exit 1; }
 
 [ -x "$DETECT" ] || die "missing $DETECT"
 
+# Python 3.7 floor: capture_output/text= and datetime.fromisoformat need it. Stop
+# with one line before any traceback. Hooks never reach this path (they stay silent).
+pyver="$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null)" || pyver=""
+case "$pyver" in
+    3.[0-6]|3.[0-6].*|2.*|[01].*) die "Python 3.7 or newer is required (found $pyver)" ;;
+    "") die "Python 3.7 or newer is required (python3 not found)" ;;
+esac
+
 # ---- helpers ----------------------------------------------------------------
 acct_dir()   { "$DETECT" dir "$1"; }
 is_default() { "$DETECT" is-default "$1"; }

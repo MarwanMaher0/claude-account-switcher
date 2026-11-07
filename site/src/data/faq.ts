@@ -41,7 +41,7 @@ export const faqs: Record<Locale, Faq[]> = {
     },
     {
       question: 'What does it run on?',
-      answer: 'Linux and macOS, with Claude Code signed in to your first account, any bash from 3.2 up (including the one macOS ships) and Python 3.6 or newer. It installs five commands into ~/.local/bin and changes nothing else on your machine.',
+      answer: 'Linux and macOS, with Claude Code signed in to your first account, any bash from 3.2 up (including the one macOS ships) and Python 3.7 or newer. It installs five commands into ~/.local/bin and changes nothing else on your machine.',
     },
     {
       question: 'Is this an official Anthropic tool?',
@@ -83,7 +83,7 @@ export const faqs: Record<Locale, Faq[]> = {
     },
     {
       question: 'على ماذا يعمل؟',
-      answer: 'على لينكس وmacOS، مع Claude Code مسجّل الدخول إلى حسابك الأول، وأي إصدار من bash بدءًا من 3.2 (بما فيه الإصدار المرفق مع macOS)، وPython 3.6 أو أحدث. يثبّت خمسة أوامر في ‎~/.local/bin‎ ولا يغيّر أي شيء آخر على جهازك.',
+      answer: 'على لينكس وmacOS، مع Claude Code مسجّل الدخول إلى حسابك الأول، وأي إصدار من bash بدءًا من 3.2 (بما فيه الإصدار المرفق مع macOS)، وPython 3.7 أو أحدث. يثبّت خمسة أوامر في ‎~/.local/bin‎ ولا يغيّر أي شيء آخر على جهازك.',
     },
     {
       question: 'هل هذه أداة رسمية من Anthropic؟',

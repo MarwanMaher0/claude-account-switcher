@@ -64,6 +64,11 @@ import sys
 import time
 import zipfile
 
+if sys.version_info < (3, 7):
+    sys.stderr.write("cc-vscode: Python 3.7 or newer is required (found %d.%d.%d)\n"
+                     % sys.version_info[:3])
+    sys.exit(1)
+
 HOME = os.path.expanduser("~")
 HERE = os.path.dirname(os.path.realpath(__file__))
 DETECT = os.path.join(HERE, "cc-detect")

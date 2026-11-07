@@ -2,6 +2,23 @@
 
 ## Unreleased (after 2.3.1)
 
+### Changed — Python floor is 3.7, stated and enforced
+- The README claimed Python 3.6+, but `cc-detect` and `cc-vscode` call
+  `subprocess.run(capture_output=…, text=…)` and `datetime.fromisoformat`, which are
+  3.7 features — on an older interpreter they died with a traceback. `cc`, `cc-detect`
+  and `cc-vscode` now stop with one clear line naming the floor
+  (`Python 3.7 or newer is required (found x.y.z)`); the Claude Code hooks stay silent
+  and exit 0 so a session is never disrupted by a version message. README,
+  TROUBLESHOOTING (new `#python-is-too-old` section), CONTRIBUTING and the site copy
+  (en + ar) all say 3.7. A new suite, `test/test-python-floor.sh`, proves the guard and
+  the silent hooks with a stub `python3` that reports 3.6.9, and CI runs the whole
+  suite on Python 3.7 (on `ubuntu-22.04`, since the setup-python manifest has no 3.7
+  for ubuntu-24.04) and the newest stable on `ubuntu-latest` via a SHA-pinned
+  `actions/setup-python`. The floor is justified in README, TROUBLESHOOTING and
+  CONTRIBUTING against the stock interpreters: macOS Command Line Tools 3.9.6,
+  Ubuntu 22.04 LTS 3.10, Ubuntu 24.04 LTS 3.12 — 3.7 is the first version with the
+  APIs `cc` uses and below all of them.
+
 ### Fixed — `uninstall.sh` could delete a foreign `cc` or a shared `CC_SHARE_DIR`
 - `uninstall.sh` previously deleted `$CC_INSTALL_DIR/cc` unconditionally and ran
   `rm -rf "$CC_SHARE_DIR"`. If `install.sh` had not been run (or another tool's `cc` was

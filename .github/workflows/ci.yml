@@ -76,6 +76,38 @@ jobs:
           ln -s /bin/bash "$shim/bash"
           PATH="$shim:$PATH" /bin/bash -c 'bash --version | head -1; /bin/bash test/lint.sh && /bin/bash test/run-all.sh'
 
+  # The floor is Python 3.7 (subprocess capture_output/text=, datetime.fromisoformat).
+  # In actions/python-versions' versions-manifest.json, 3.7.17 exists for linux 20.04/22.04
+  # only — ubuntu-latest is 24.04 and its toolcache starts at 3.11 — so the 3.7 entry runs
+  # on ubuntu-22.04 and 3.x (the newest stable) stays on ubuntu-latest. SHA-pinned like
+  # every other action here.
+  python-floor:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '3.7'
+            runs-on: ubuntu-22.04
+          - python-version: '3.x'
+            runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Show Python
+        run: python3 --version
+
+      # Same suite as the main job, on the floor and on the newest stable: a 3.8+
+      # construct sneaking into bin/ or test/ fails here even if the image python is new.
+      - name: Run test suites on Python ${{ matrix.python-version }}
+        run: bash test/run-all.sh
+
   lint:
     runs-on: ubuntu-latest
     steps:

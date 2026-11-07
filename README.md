@@ -7,7 +7,7 @@
 [![CI](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg)](#step-1-check-what-you-need)
-[![Tests](https://img.shields.io/badge/tests-965%20checks-brightgreen.svg)](CONTRIBUTING.md)
+[![Tests](https://img.shields.io/badge/tests-1138%20checks-brightgreen.svg)](CONTRIBUTING.md)
 [![No telemetry](https://img.shields.io/badge/telemetry-none-success.svg)](#privacy)
 
 [Website](https://marwanmaher0.github.io/claude-account-switcher/) · [Docs](https://marwanmaher0.github.io/claude-account-switcher/docs/) · [Get started](#get-started) · [Everyday use](#everyday-use) · [Separate projects](#separate-projects-one-account-per-folder) · [VS Code](#step-6-vs-code-users-only) · [Troubleshooting](docs/TROUBLESHOOTING.md)
@@ -50,9 +50,14 @@ python3 --version
 ```
 
 Both should print a version. You need Claude Code signed in to your first account, and Python
-3.6 or newer. Any bash from 3.2 up works, including the one macOS ships.
+3.7 or newer — the first version with everything `cc` uses (`subprocess.run(capture_output=…,
+text=…)`, `datetime.fromisoformat`), and deliberately below every stock interpreter you will
+actually meet: macOS Command Line Tools ships 3.9.6, Ubuntu 22.04 LTS ships 3.10, Ubuntu 24.04
+LTS ships 3.12. Any bash from 3.2 up works, including the one macOS ships.
 
-If `claude` does not run, see [Troubleshooting](docs/TROUBLESHOOTING.md#claude-itself-will-not-start).
+If `python3 --version` is older than 3.7, see
+[Troubleshooting](docs/TROUBLESHOOTING.md#python-is-too-old). If `claude` does not run, see
+[Troubleshooting](docs/TROUBLESHOOTING.md#claude-itself-will-not-start).
 
 ### Step 2: Install
 

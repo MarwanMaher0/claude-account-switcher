@@ -99,7 +99,7 @@ export const landingCopy: Record<Locale, LandingCopy> = {
     },
     trust: {
       intro: 'Open source and local',
-      items: ['MIT licence', 'No telemetry', 'Never reads credentials', 'bash 3.2+ · Python 3.6+', '{tests} checks in CI', 'v{version}'],
+      items: ['MIT licence', 'No telemetry', 'Never reads credentials', 'bash 3.2+ · Python 3.7+', '{tests} checks in CI', 'v{version}'],
     },
     problem: {
       label: '01 — The problem',
@@ -137,7 +137,7 @@ export const landingCopy: Record<Locale, LandingCopy> = {
     start: {
       label: '03 — Quick start',
       title: 'Five minutes,\nyour own accounts.',
-      text: 'You need Claude Code signed in to your first account, Python 3.6 or newer, and any bash from 3.2 up. Each account you add is one you own and sign in to yourself.',
+      text: 'You need Claude Code signed in to your first account, Python 3.7 or newer, and any bash from 3.2 up. Each account you add is one you own and sign in to yourself.',
       fullGuide: 'Full setup guide, including VS Code',
       copy: 'Copy',
       copied: 'Copied',
@@ -216,7 +216,7 @@ export const landingCopy: Record<Locale, LandingCopy> = {
     },
     trust: {
       intro: 'مفتوح المصدر ومحلي',
-      items: ['رخصة MIT', 'بلا قياس عن بُعد', 'لا يقرأ بيانات الاعتماد أبدًا', 'bash 3.2+ · Python 3.6+', '{tests} فحصًا في CI', 'الإصدار {version}'],
+      items: ['رخصة MIT', 'بلا قياس عن بُعد', 'لا يقرأ بيانات الاعتماد أبدًا', 'bash 3.2+ · Python 3.7+', '{tests} فحصًا في CI', 'الإصدار {version}'],
     },
     problem: {
       label: '01 — المشكلة',
@@ -254,7 +254,7 @@ export const landingCopy: Record<Locale, LandingCopy> = {
     start: {
       label: '03 — البداية السريعة',
       title: 'خمس دقائق،\nوحساباتك أنت.',
-      text: 'تحتاج إلى Claude Code مسجّل الدخول إلى حسابك الأول، وPython 3.6 أو أحدث، وأي bash بدءًا من 3.2. كل حساب تضيفه هو حساب تملكه وتسجّل الدخول إليه بنفسك.',
+      text: 'تحتاج إلى Claude Code مسجّل الدخول إلى حسابك الأول، وPython 3.7 أو أحدث، وأي bash بدءًا من 3.2. كل حساب تضيفه هو حساب تملكه وتسجّل الدخول إليه بنفسك.',
       fullGuide: 'دليل الإعداد الكامل، بما فيه VS Code',
       copy: 'نسخ',
       copied: 'تم النسخ',

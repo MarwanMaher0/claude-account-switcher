@@ -42,6 +42,39 @@ claude --version
 If the shim is broken, reinstall Claude Code, or put a working binary earlier on your `PATH`.
 `cc` calls whatever `claude` resolves to; it cannot repair a broken install.
 
+## Python is too old
+
+`cc`, `cc-detect` and `cc-vscode` need Python 3.7 or newer (`subprocess.run(capture_output=…, text=…)`
+and `datetime.fromisoformat` are 3.7 features). The floor sits below every stock interpreter you
+are likely to have, so this error almost always means something old is shadowing a newer Python:
+macOS Command Line Tools ships 3.9.6, Ubuntu 22.04 LTS ships 3.10, and Ubuntu 24.04 LTS ships
+3.12. On an older interpreter `cc` stops with one line and no traceback:
+
+```
+cc-detect: Python 3.7 or newer is required (found 3.6.9)
+```
+
+`cc` says the same thing with its own `[cc] ` prefix. Check what you have:
+
+```bash
+python3 --version
+```
+
+Then install 3.7+ and make sure that `python3` is the one on your `PATH` before you retry `cc`:
+
+- **Debian / Ubuntu:** `sudo apt install python3` (every supported release ships 3.8 or newer)
+- **Fedora:** `sudo dnf install python3`
+- **macOS:** `brew install python` (or `brew install python@3.12`), and keep Homebrew's `bin`
+  directory on your `PATH`
+- **pyenv:** `pyenv install 3.12 && pyenv global 3.12`
+
+If `python3 --version` still prints 3.6 after installing, something earlier on your `PATH` (a
+system package, a conda env, a leftover alias) is shadowing the new one — run `command -v python3`
+to see which one `cc` will find.
+
+The Claude Code hooks never print a version error into a session: on an old Python they exit
+quietly, so the only symptom is `cc` / `cc status` failing with the line above.
+
 ## It did not switch when I hit the limit
 
 Three common reasons:

@@ -6,10 +6,13 @@
 bash test/run-all.sh
 ```
 
-965 checks across the fifteen suites run with `CC_TEST_SKIP=test-live.sh` (`test-live.sh` is
-the sixteenth suite in `run-all.sh`). There is no framework to install. `claude` is replaced with a
-stub and every test runs against a throwaway `HOME`, so the suite cannot touch a real account and
-uses no API quota. CI runs it on Linux and macOS.
+1138 checks across the eighteen suites run with `CC_TEST_SKIP=test-live.sh bash test/run-all.sh`
+(`test-live.sh` is the eighteenth suite of nineteen in `run-all.sh` and needs a signed-in
+`claude`). There is no framework to install. `claude` is replaced with a stub and every test runs
+against a throwaway `HOME`, so the suite cannot touch a real account and uses no API quota. CI
+runs it on Linux and macOS, and again on Python 3.7 (on `ubuntu-22.04`, the newest runner image
+whose setup-python manifest still ships 3.7) and the newest stable on `ubuntu-latest` via
+`actions/setup-python`.
 
 To see a switch happen end to end, without installing anything:
 
@@ -69,6 +72,12 @@ arrays, no `mapfile`/`readarray`, no `${var,,}`, and guard empty arrays under `s
 counts down; use a counted `while` loop). `test/test-portability.sh` scans for these and more,
 and runs the hooks against BSD-style stand-ins; CI
 also runs the whole suite on macOS under `/bin/bash`. To try bash 3.2 locally, put it first on
-`PATH` and run `bash test/run-all.sh`. Comments explain *why*, especially where the reason is a
-trap that is not obvious from the code. User-facing messages are short, and every failure ends
-with the command to run next.
+`PATH` and run `bash test/run-all.sh`.
+
+Python must run on 3.7, the floor CI tests — chosen because those are the first versions with
+`capture_output`/`text` and `fromisoformat`, and because it sits below every stock interpreter
+(macOS Command Line Tools ships 3.9.6, Ubuntu 22.04 LTS 3.10, Ubuntu 24.04 LTS 3.12): no walrus
+`:=`, no `str.removeprefix`/`removesuffix`,
+no PEP 585 built-in generics (`list[int]`), no PEP 604 unions (`int | None`). Comments explain
+*why*, especially where the reason is a trap that is not obvious from the code. User-facing
+messages are short, and every failure ends with the command to run next.
