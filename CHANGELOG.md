@@ -2,6 +2,21 @@
 
 ## Unreleased (after 2.3.1)
 
+### Fixed — concurrent writes of config.json and state.json
+- `cc add`, `cc remove`, `cc cloud set` and `cc vscode on|off` rewrote `config.json`
+  through one fixed `.tmp` name and without the hooks' lock. Two runs at once could
+  lose an account, and an add could overwrite a limit that a `StopFailure` hook was
+  recording in `state.json` at the same moment. Those writes now go through
+  `cc-detect` (`account-add`, `account-remove`, `config-set`, `config-set-json`),
+  which reads, changes and writes under the same lock the hooks use and replaces the
+  file atomically. The temporary file is created mode `600` and fsynced before the
+  rename, so an interrupted write leaves the old file intact. The first-run migration
+  that builds `config.json` now takes the same lock and re-checks after acquiring it,
+  so two simultaneous first runs cannot rewrite `state.json` over a limit one of them
+  just recorded. A new suite, `test/test-concurrency.sh`, runs adds and removes
+  alongside the `StopFailure` hook and checks that no account or limit is lost and
+  both files stay mode `600`.
+
 ### Fixed — macOS and bash 3.2 portability
 - `CC_WATCH_GRACE=0` gave a running session 2 s to shut down on macOS instead of none: the
   wait was `for _ in $(seq 1 "$GRACE")`, and BSD `seq 1 0` counts down (`1 0`) where GNU prints

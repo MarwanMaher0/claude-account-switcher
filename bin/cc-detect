@@ -37,6 +37,10 @@ Subcommands
   mark <id> <resets-at> [type]      set an account's limit window (0 clears)
   raise <id> <resets-at> [type]     extend an account's limit window, never shorten it
   record-run <id> <session>         note that a session has just started on an account
+  account-add <id> <dir>            register an account and clear a stale limit for it
+  account-remove <id>               deregister an account
+  config-set <key> <value>          set a config string value, e.g. cloud.account
+  config-set-json <key> <json>      set a config value from JSON
   slug <cwd>                        the project-dir slug for a path
   fallback <name> <field>           read a fallbacks.<name>.<field> value
   get <dotted.key> [default]        read any config value, e.g. autoContinue.message
@@ -178,61 +182,109 @@ def _write_private(path, data):
     os.chmod(os.path.dirname(path), 0o700)
     # per-process temp name: a hook and a launcher can write at the same moment
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w") as fh:
-        json.dump(data, fh, indent=2)
-    os.chmod(tmp, 0o600)
+    # Created 0600 from the start, so the content is never readable by others, and
+    # fsynced before the rename: a crash leaves either the old file or the whole new one.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fd = None
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+    finally:
+        if fd is not None:
+            os.close(fd)
     os.replace(tmp, path)
+
+
+_lock_fd = None
+_lock_depth = 0
 
 
 @contextmanager
 def state_lock():
-    """Serialise read-modify-write of state.json. Hooks in several sessions and the
-    launcher all record limits, and a lost update is a forgotten limit."""
-    os.makedirs(SWITCH_DIR, exist_ok=True)
-    fd = os.open(LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    """Serialise read-modify-write of state.json and config migration. Hooks in
+    several sessions, the launcher and first-run commands all record limits, and a
+    lost update is a forgotten limit.
+
+    Re-entrant: `migrate()` is reached through `load_config()` from inside callers
+    that already hold the lock (account_add, account_remove, config_set). Taking
+    the lock again on a second open file description would block forever, so the
+    depth is tracked and the outer `with` owns the real lock.
+    """
+    global _lock_fd, _lock_depth
+    if _lock_depth == 0:
+        os.makedirs(SWITCH_DIR, exist_ok=True)
+        fd = os.open(LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(fd)
+            raise
+        _lock_fd = fd
+    _lock_depth += 1
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        _lock_depth -= 1
+        if _lock_depth == 0:
+            fd, _lock_fd = _lock_fd, None
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 # ---------------------------------------------------------------- config ----
 def migrate():
     """Build config.json from the historical hardcoded two-account layout.
 
-    Only ever runs when config.json is absent. Never touches account directories
-    or credentials.
+    Only ever runs when config.json is absent, and under state_lock, with a
+    re-check after taking it: several commands may see no config on a first run at
+    the same moment, and the loser must read the winner's file rather than rewrite
+    state over a limit that `mark` or a hook has just recorded. Never touches
+    account directories or credentials.
     """
-    accounts = [{"id": "personal", "dir": "~/.claude", "isDefault": True}]
-    second = os.path.join(HOME, ".claude-2")
-    if os.path.isdir(second):
-        accounts.append({"id": "account2", "dir": "~/.claude-2"})
+    with state_lock():
+        if os.path.exists(CONFIG):
+            return _read_config()
 
-    cfg = {
-        "version": 2,
-        "accounts": accounts,
-        "fallbacks": {
-            "apiKey": {"enabled": False, "keyCommand": None, "confirmEachUse": True},
-            "externalCli": {"enabled": False, "command": None},
-        },
-    }
-    _write_private(CONFIG, cfg)
+        accounts = [{"id": "personal", "dir": "~/.claude", "isDefault": True}]
+        second = os.path.join(HOME, ".claude-2")
+        if os.path.isdir(second):
+            accounts.append({"id": "account2", "dir": "~/.claude-2"})
 
-    # Carry limit windows over from numeric keys.
-    old = _load_json(STATE, {})
-    old_accounts = old.get("accounts", {})
-    if any(k.isdigit() for k in old_accounts):
-        mapping = {"1": accounts[0]["id"]}
-        if len(accounts) > 1:
-            mapping["2"] = accounts[1]["id"]
-        migrated = {}
-        for num, new_id in mapping.items():
-            if num in old_accounts:
-                migrated[new_id] = {"limitedUntil": old_accounts[num].get("limitedUntil", 0)}
-        save_state({"version": 2, "accounts": migrated})
-    return cfg
+        cfg = {
+            "version": 2,
+            "accounts": accounts,
+            "fallbacks": {
+                "apiKey": {"enabled": False, "keyCommand": None, "confirmEachUse": True},
+                "externalCli": {"enabled": False, "command": None},
+            },
+        }
+        _write_private(CONFIG, cfg)
+
+        # Carry limit windows over from numeric keys, keeping everything else that
+        # is already in state.json (preferred, runs, named limits).
+        old = _load_json(STATE, {})
+        old_accounts = old.get("accounts") if isinstance(old, dict) else None
+        if isinstance(old_accounts, dict) and any(k.isdigit() for k in old_accounts):
+            mapping = {"1": accounts[0]["id"]}
+            if len(accounts) > 1:
+                mapping["2"] = accounts[1]["id"]
+            state = old
+            accts = old_accounts
+            for num, new_id in mapping.items():
+                if num in accts:
+                    entry = accts[num] if isinstance(accts[num], dict) else {}
+                    if new_id not in accts:
+                        accts[new_id] = {"limitedUntil": entry.get("limitedUntil", 0)}
+                    del accts[num]
+            state["version"] = 2
+            state["accounts"] = accts
+            save_state(state)
+        return cfg
 
 
 def validate(cfg):
@@ -274,17 +326,20 @@ def validate(cfg):
     return cfg
 
 
-def load_config():
-    if not os.path.exists(CONFIG):
-        return validate(migrate())
+def _read_config():
     try:
         with open(CONFIG) as fh:
-            cfg = json.load(fh)
+            return json.load(fh)
     except OSError as exc:
         raise ConfigError(f"cannot read {CONFIG}: {exc}")
     except ValueError as exc:
         raise ConfigError(f"{CONFIG} is not valid JSON: {exc}")
-    return validate(cfg)
+
+
+def load_config():
+    if not os.path.exists(CONFIG):
+        return validate(migrate())
+    return validate(_read_config())
 
 
 def accounts():
@@ -347,6 +402,58 @@ def load_state():
 
 def save_state(state):
     _write_private(STATE, state)
+
+
+def account_add(aid, adir):
+    """Register an account and clear any stale limit for it, atomically.
+
+    The read-modify-write of both files runs under state_lock, the same lock the
+    hooks use, so a limit recorded while an account is added is never lost and two
+    writers can never clobber one another. The dir is stored expanded, as before.
+    """
+    adir = expand(adir)
+    with state_lock():
+        cfg = load_config()
+        for acct in cfg["accounts"]:
+            if acct["id"] == aid:
+                raise ConfigError(f"account {aid} already exists")
+            if expand(acct["dir"]) == adir:
+                raise ConfigError(f"{adir} is already registered as {acct['id']}")
+        cfg["accounts"].append({"id": aid, "dir": adir})
+        _write_private(CONFIG, cfg)
+        state = load_state()
+        if state.get("accounts", {}).pop(aid, None) is not None:
+            save_state(state)
+
+
+def account_remove(aid):
+    """Deregister an account under state_lock, keeping concurrent writes intact."""
+    with state_lock():
+        cfg = load_config()
+        cfg["accounts"] = [a for a in cfg["accounts"] if a["id"] != aid]
+        _write_private(CONFIG, cfg)
+
+
+def config_set(dotted, value, as_json=False):
+    """Set a config value under state_lock. With as_json, the value is parsed as JSON,
+    so objects and booleans can be stored without touching the rest of the config."""
+    if as_json:
+        try:
+            value = json.loads(value)
+        except ValueError as exc:
+            raise ConfigError(f"not valid JSON for {dotted}: {exc}")
+    with state_lock():
+        cfg = load_config()
+        node = cfg
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            child = node.get(part)
+            if not isinstance(child, dict):
+                child = {}
+                node[part] = child
+            node = child
+        node[parts[-1]] = value
+        _write_private(CONFIG, cfg)
 
 
 def limited_until(state, aid):
@@ -1699,6 +1806,18 @@ def main(argv):
     elif cmd == "record-run":
         account_by_id(args[0])
         record_run(args[0], args[1])
+
+    elif cmd == "account-add":
+        account_add(args[0], args[1])
+
+    elif cmd == "account-remove":
+        account_remove(args[0])
+
+    elif cmd == "config-set":
+        config_set(args[0], args[1])
+
+    elif cmd == "config-set-json":
+        config_set(args[0], args[1], as_json=True)
 
     elif cmd == "get":
         value = config_get(args[0], args[1] if len(args) > 1 else None)

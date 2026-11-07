@@ -144,12 +144,14 @@ def load_config():
         return json.load(fh)
 
 
-def save_config(cfg):
-    tmp = f"{CONFIG}.{os.getpid()}.tmp"
-    with open(tmp, "w") as fh:
-        json.dump(cfg, fh, indent=2)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, CONFIG)
+def set_config_json(dotted, value):
+    """Write one config value through cc-detect, which updates it under the lock and
+    with an atomic rename: a concurrent cc add/remove is never clobbered."""
+    res = subprocess.run([DETECT, "config-set-json", dotted, json.dumps(value)],
+                         capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if res.returncode != 0:
+        sys.stderr.write(res.stderr or f"cc-vscode: could not update {dotted} in config.json\n")
+        sys.exit(3 if res.returncode == 3 else 1)
 
 
 def settings_path(cfg):
@@ -2153,9 +2155,8 @@ def cmd_on(args):
         print(f"cc-vscode: VS Code settings left untouched: {exc}", file=sys.stderr)
         return 1
 
-    cfg["vscode"] = {"enabled": True, "mode": "wrapper", "settingsPath": path,
-                     "wrapper": wrapper, "companion": bool(installed)}
-    save_config(cfg)
+    set_config_json("vscode", {"enabled": True, "mode": "wrapper", "settingsPath": path,
+                               "wrapper": wrapper, "companion": bool(installed)})
     touch_epoch()
     print(f"VS Code: each window now runs Claude on its folder's account · {tilde(path)}")
     print(f"  wrapper    {tilde(wrapper)}")
@@ -2233,8 +2234,7 @@ def cmd_off(args):
         os.rmdir(TERMINAL_BIN)
     except OSError:
         pass
-    cfg["vscode"] = dict(cfg.get("vscode") or {}, enabled=False)
-    save_config(cfg)
+    set_config_json("vscode.enabled", False)
     if "--quiet" not in args:
         print("VS Code: cc no longer binds windows · the panel runs on the default account")
         print("  Reload open windows to drop the account they were bound to.")

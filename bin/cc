@@ -504,25 +504,9 @@ PY
     fi
 
     # Register before login so the dir is discoverable, then roll back if login fails.
-    python3 - "$id" "$dir" <<'PY'
-import json, os, sys
-HOME = os.path.expanduser("~")
-CONFIG = os.path.join(HOME, ".claude-switch", "config.json")
-STATE = os.path.join(HOME, ".claude-switch", "state.json")
-aid, adir = sys.argv[1], sys.argv[2]
-cfg = json.load(open(CONFIG))
-cfg["accounts"].append({"id": aid, "dir": adir})
-tmp = CONFIG + ".tmp"
-json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, CONFIG)
-# a re-added id must not inherit a stale limit window
-try:
-    st = json.load(open(STATE))
-    if st.get("accounts", {}).pop(aid, None) is not None:
-        t = STATE + ".tmp"
-        json.dump(st, open(t, "w"), indent=2); os.chmod(t, 0o600); os.replace(t, STATE)
-except Exception:
-    pass
-PY
+    # cc-detect does the read-modify-write under the same lock the hooks use, so a
+    # limit recorded now is kept and a parallel add/remove is never lost.
+    "$DETECT" account-add "$id" "$dir" || exit 1
 
     note "adding '$id' ($(tilde "$dir"))"
     if [ "$need_login" = "1" ]; then
@@ -591,14 +575,7 @@ login_account() {
 # Undo a registration whose login did not produce a usable, distinct account.
 rollback_add() {
     local id="$1" created="$2" dir="$3"
-    python3 - "$id" <<'PY'
-import json, os, sys
-CONFIG = os.path.join(os.path.expanduser("~"), ".claude-switch", "config.json")
-cfg = json.load(open(CONFIG))
-cfg["accounts"] = [a for a in cfg["accounts"] if a["id"] != sys.argv[1]]
-tmp = CONFIG + ".tmp"
-json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, CONFIG)
-PY
+    "$DETECT" account-remove "$id" >/dev/null 2>&1 || true
     [ "$created" = "1" ] && rm -rf "$dir" && note "removed $dir"
 }
 
@@ -622,14 +599,7 @@ cmd_remove() {
         [ "$typed" = "$id" ] || die "cc remove: confirmation did not match — nothing removed"
     fi
 
-    python3 - "$id" <<'PY'
-import json, os, sys
-CONFIG = os.path.join(os.path.expanduser("~"), ".claude-switch", "config.json")
-cfg = json.load(open(CONFIG))
-cfg["accounts"] = [a for a in cfg["accounts"] if a["id"] != sys.argv[1]]
-tmp = CONFIG + ".tmp"
-json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, CONFIG)
-PY
+    "$DETECT" account-remove "$id" || exit 1
     good "deregistered '$id'"
     if [ "$purge" = "1" ]; then
         rm -rf "$dir" && good "deleted $dir"
@@ -733,14 +703,7 @@ cmd_cloud() {
         id="${2:-}"
         [ -n "$id" ] || die "usage: cc cloud set <id>"
         acct_dir "$id" >/dev/null || die "no account '$id' — see \`cc status\`"
-        python3 - "$id" <<'PY' || exit 1
-import json, os, sys
-CONFIG = os.path.expanduser("~/.claude-switch/config.json")
-cfg = json.load(open(CONFIG))
-cfg.setdefault("cloud", {})["account"] = sys.argv[1]
-tmp = CONFIG + ".tmp"
-json.dump(cfg, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, CONFIG)
-PY
+        "$DETECT" config-set cloud.account "$id" || exit 1
         good "cloud sessions now start on $(acct_label "$id")"
         return 0
     fi
