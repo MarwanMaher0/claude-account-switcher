@@ -2,6 +2,16 @@
 
 ## Unreleased (after 2.3.1)
 
+### Fixed — `cc-watch` found claude only in the VS Code bundle layout
+- The watcher located the claude process with `pgrep -P <cc-pid> -f native-binary/claude`,
+  matching a command line that only the VS Code bundle actually has. On the official
+  installer (`~/.local/bin/claude` execing `versions/…`) and on npm (`node cli.js`) no
+  child matched: the watcher exited without signalling anything, so the run never ended
+  and `cc` never handed the conversation to the other account. It now takes the children
+  of `<cc-pid>` by process relationship alone — skipping itself and the shell that started
+  it — with no path in the match, and never signals a different run's claude. The new
+  `CW` checks in `test/test-launch.sh` cover all three layouts and the other-run case.
+
 ### Added — a `vX.Y.Z` tag publishes the GitHub release
 - Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`. It refuses to publish unless
   the tag matches `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` and

@@ -10,8 +10,10 @@
 #
 #   cc-watch <config-dir> <session-id> <cwd> <offset> <cc-pid> [account-id]
 #
-# The claude process is found as a child of <cc-pid>. ~/.local/bin/claude execs
-# the native binary, so that child's command line is the binary path itself.
+# The claude process is a child of <cc-pid> — a sibling of this watcher, since
+# `cc` starts both. Found by that relationship alone, never by a command-line
+# path: the official installer, npm's `node cli.js` and the VS Code bundle all
+# put different text under `/proc/…/cmdline`.
 #
 # With CC_EARLY_SWITCH=1 and an account id, it also ends the run BETWEEN turns once
 # the account's recorded usage passes the early-switch threshold, and leaves
@@ -30,7 +32,14 @@ c_yel=$'\033[33m'; c_bold=$'\033[1m'; c_rst=$'\033[0m'
 
 claude_pid() {
     # children of cc that are the claude binary (not this watcher)
-    pgrep -P "$CCPID" -f 'native-binary/claude' 2>/dev/null | head -1
+    # shellcheck disable=SC2046  # pgrep prints one pid per line; splitting is intended
+    for pid in $(pgrep -P "$CCPID" 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        [ "$pid" = "${PPID:-}" ] && continue
+        printf '%s\n' "$pid"
+        return 0
+    done
+    return 1
 }
 
 while :; do

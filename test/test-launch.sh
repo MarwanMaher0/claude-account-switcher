@@ -109,6 +109,111 @@ assert_not_contains "$(printf '%s' "$out" | grep -v 'STUB:APIKEY' || true)" "sk-
     "AC-3 cc never prints the key"
 cleanup_home
 
+# ---- CW : the watcher finds claude by process relationship, not by path ----------
+# `cc` starts the watcher and claude as sibling children. The watcher must end
+# the run for every install layout — the official installer's versions/ symlink,
+# npm's cli.js, and the VS Code native-binary bundle — and must never signal
+# itself or a different run's claude.
+new_home >/dev/null; three_accounts
+FUTURE=$(( $(date +%s) + 3600 ))
+BASH_BIN="$(command -v bash)"
+
+limit_line() {   # limit_line <uuid> <resetsAt>
+    python3 - "$@" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+print(json.dumps({"type": "assistant", "uuid": sys.argv[1], "isApiErrorMessage": True,
+                  "apiErrorStatus": 429, "error": "rate_limit",
+                  "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                  "quotaLimits": {"status": "rejected", "resetsAt": int(sys.argv[2]),
+                                  "rateLimitType": "five_hour"}}))
+PY
+}
+
+# An idler that exits on SIGTERM, as claude does on a clean shutdown.
+make_idler() {
+    mkdir -p "$(dirname "$1")"
+    cat > "$1" <<'EOF'
+#!/usr/bin/env bash
+while :; do sleep 1; done
+EOF
+    chmod 755 "$1"
+}
+
+# A stand-in `cc`: the watcher first, then claude, both children of this shell —
+# the order and tree the real launcher builds (bin/cc starts $WATCH before run_acct).
+# The watcher is then the lower-pid child, so a claude_pid that does not skip
+# itself signals the watcher: exit non-zero, claude still alive. Reports
+# "<watcher exit> <claude alive|dead>".
+cw_run() {   # cw_run <label> <claude-exe>
+    local label="$1" claude="$2"
+    local sid="cw-$label" cwd="$HOME/work" cfg="$HOME/.claude-2"
+    local d result
+    d="$cfg/projects/$("$BIN/cc-detect" slug "$cwd")"
+    mkdir -p "$d" "$cwd"
+    : > "$d/$sid.jsonl"
+    limit_line cw "$FUTURE" >> "$d/$sid.jsonl"
+    result="$SANDBOX/$label.state"
+    # shellcheck disable=SC2016  # $1/$$ are for the inner shell: the stand-in cc
+    "$BASH_BIN" -c '
+        watch="$1"; claude="$2"; result="$3"; shift 3
+        "$watch" "$1" "$2" "$3" "$4" "$$" "$5" >"$result.out" 2>&1 &
+        w=$!
+        "$claude" &
+        c=$!
+        wait "$w"
+        wrc=$?
+        if kill -0 "$c" 2>/dev/null; then cstate=alive; kill -KILL "$c" 2>/dev/null
+        else cstate=dead; fi
+        printf "%s %s\n" "$wrc" "$cstate" > "$result"
+        wait "$c" 2>/dev/null
+    ' _ "$BIN/cc-watch" "$claude" "$result" "$cfg" "$sid" "$cwd" 0 two
+}
+
+# Official installer: ~/.local/bin/claude is a symlink into versions/.
+make_idler "$HOME/.local/share/claude/versions/2.1.0"
+mkdir -p "$HOME/.local/bin"
+ln -sf "$HOME/.local/share/claude/versions/2.1.0" "$HOME/.local/bin/claude"
+cw_run versions "$HOME/.local/bin/claude"
+read -r wrc cstate < "$SANDBOX/versions.state"
+assert_eq "$cstate" "dead" "CW-1 versions/ symlink layout: claude is ended"
+assert_eq "$wrc" "0" "CW-1 ...and the watcher exits cleanly (never signals itself)"
+
+# npm install: the child is a script under cli.js, not a path named claude.
+make_idler "$SANDBOX/npm/cli.js"
+cw_run npm "$SANDBOX/npm/cli.js"
+read -r wrc cstate < "$SANDBOX/npm.state"
+assert_eq "$cstate" "dead" "CW-2 npm cli.js layout: claude is ended"
+assert_eq "$wrc" "0" "CW-2 ...and the watcher exits cleanly (never signals itself)"
+
+# VS Code bundle: the layout the old path match happened to cover.
+make_idler "$SANDBOX/stub/native-binary/claude"
+cw_run bundled "$SANDBOX/stub/native-binary/claude"
+read -r wrc cstate < "$SANDBOX/bundled.state"
+assert_eq "$cstate" "dead" "CW-3 native-binary layout: claude is ended"
+assert_eq "$wrc" "0" "CW-3 ...and the watcher exits cleanly (never signals itself)"
+
+# A second run's claude, still under its own parent, must survive this watcher.
+make_idler "$SANDBOX/other-claude"
+# shellcheck disable=SC2016  # $1 is for the inner bash, which runs the idler as its child
+"$BASH_BIN" -c '"$1" & wait' _ "$SANDBOX/other-claude" &
+other_parent=$!
+other_pid=""
+i=0
+while [ -z "$other_pid" ] && [ "$i" -lt 50 ]; do
+    other_pid="$(pgrep -P "$other_parent" 2>/dev/null | head -1)"
+    i=$((i + 1)); [ -n "$other_pid" ] || sleep 0.1
+done
+cw_run versions "$HOME/.local/bin/claude"
+if kill -0 "$other_pid" 2>/dev/null; then
+    ok "CW-4 another run's claude is never signalled"
+else
+    no "CW-4 another run's claude is never signalled"
+fi
+kill -KILL "$other_pid" "$other_parent" 2>/dev/null
+wait "$other_parent" 2>/dev/null
+cleanup_home
+
 # ---- SPEC-03 AC-6/AC-7 : tier 3 --------------------------------------------
 new_home >/dev/null; stub_claude; three_accounts
 python3 - <<'PY'
