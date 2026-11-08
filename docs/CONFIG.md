@@ -91,6 +91,25 @@ start. The transcript path is printed so you can carry anything across by hand.
 
 Skipped without complaint when unset or when the binary is not installed.
 
+## Cloud sessions
+
+```json
+"cloud": { "account": "work" }
+```
+
+`cc cloud "<task>"` starts a Claude Code cloud session (`claude --cloud`), which runs on
+Anthropic's servers against a GitHub repo. Cloud sessions draw on one account's cloud session
+credit first, so `cc cloud` always sends them to the account named here — even while that
+account's local 5-hour or weekly window is exhausted.
+
+| Field | Meaning |
+|---|---|
+| `account` | The account that holds the cloud credit. Must be a string (`""` means "not set"). A name that matches no configured account is not a config error: `cc` and `cc status` keep working, `cc status` warns, `cc cloud set <id>` repairs it, and `cc cloud` refuses to launch until it is fixed. |
+
+Set it with `cc cloud set <id>`; prefer that over hand-editing. `cc cloud --acct <id>` uses
+another account for one run without changing the file. `cc remove` refuses to remove the account
+named here, so point `cc cloud set` at another account first.
+
 ## Pinned folders
 
 `~/.claude-switch/pins.json`, mode `600`. Written by `cc pin` and `cc unpin`; prefer those over

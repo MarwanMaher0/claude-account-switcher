@@ -414,6 +414,11 @@ cmd_pins() {
 cmd_status() {
     echo
     "$DETECT" status || return $?
+    # A cloud.account left behind by a remove from before cc remove guarded it is
+    # reported here but never blocks another command: only `cc cloud` needs it.
+    local cloud_id; cloud_id="$(cloud_account)"
+    [ -z "$cloud_id" ] || acct_dir "$cloud_id" >/dev/null 2>&1 \
+        || warn "cloud.account names no account: '$cloud_id' — run: cc cloud set <id>"
     [ -x "$VSCODE" ] && "$VSCODE" status
     echo
 }
@@ -597,6 +602,9 @@ cmd_remove() {
     if "$DETECT" pins | awk -F'\t' -v id="$id" '$2 == id || $4 == id { found = 1 } END { exit !found }'; then
         die "cc remove: '$id' is used by a pinned folder — see cc pins, then cc unpin it first"
     fi
+    if [ "$id" = "$(cloud_account)" ]; then
+        die "cc remove: refusing — '$id' is the cloud account — run \`cc cloud set <id>\` with another account first"
+    fi
     local dir; dir="$(acct_dir "$id")" || die "no such account: $id"
 
     if [ "$purge" = "1" ]; then
@@ -707,6 +715,7 @@ PY
 
 cmd_cloud() {
     local id=""
+    "$DETECT" accounts >/dev/null || exit $?
     if [ "${1:-}" = "set" ]; then
         id="${2:-}"
         [ -n "$id" ] || die "usage: cc cloud set <id>"
@@ -718,10 +727,15 @@ cmd_cloud() {
     if [ "${1:-}" = "--acct" ]; then
         { [ $# -ge 2 ] && [ -n "$2" ]; } || die "cc cloud: --acct needs a value"
         id="$2"; shift 2
+        acct_dir "$id" >/dev/null || die "no account '$id' — see \`cc status\`"
+    else
+        id="$(cloud_account)"
+        [ -n "$id" ] || die "no cloud account set — run: cc cloud set <id>   (the account holding the cloud credit)"
+        # A stale pointer (left behind before cc remove guarded it) is not fatal to
+        # anything else, but a cloud session cannot run without a real account.
+        acct_dir "$id" >/dev/null 2>&1 \
+            || die "cloud.account names no account: '$id' — run: cc cloud set <id>"
     fi
-    [ -n "$id" ] || id="$(cloud_account)"
-    [ -n "$id" ] || die "no cloud account set — run: cc cloud set <id>   (the account holding the cloud credit)"
-    acct_dir "$id" >/dev/null || die "no account '$id' — see \`cc status\`"
     git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
         || warn "$PWD is not a git repo — a cloud session needs a GitHub repo to work on"
     note "cloud session on $(acct_label "$id")"

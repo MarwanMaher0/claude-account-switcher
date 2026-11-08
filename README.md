@@ -7,7 +7,7 @@
 [![CI](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg)](#step-1-check-what-you-need)
-[![Tests](https://img.shields.io/badge/tests-1138%20checks-brightgreen.svg)](CONTRIBUTING.md)
+[![Tests](https://img.shields.io/badge/tests-1198%20checks-brightgreen.svg)](CONTRIBUTING.md)
 [![No telemetry](https://img.shields.io/badge/telemetry-none-success.svg)](#privacy)
 
 [Website](https://marwanmaher0.github.io/claude-account-switcher/) · [Docs](https://marwanmaher0.github.io/claude-account-switcher/docs/) · [Get started](#get-started) · [Everyday use](#everyday-use) · [Separate projects](#separate-projects-one-account-per-folder) · [VS Code](#step-6-vs-code-users-only) · [Troubleshooting](docs/TROUBLESHOOTING.md)
@@ -392,6 +392,8 @@ Claude Code reports usage. It is off by default. See
 | Stop binding VS Code windows | `cc vscode off` |
 | Clean up after upgrading from 2.2 | `cc vscode migrate` (then `--apply`) |
 | Keep a folder on one account | `cc pin` (inside the folder) |
+| Start a cloud session on the account holding the cloud credit | `cc cloud "<task>"` |
+| Point cloud sessions at another account, once or for good | `cc cloud --acct <id>` / `cc cloud set <id>` |
 | List or remove pinned folders | `cc pins`, `cc unpin` |
 | Bring a pinned folder's older chats into its account | `cc adopt` (runs by itself on `cc pin`) |
 | After a switch, wait for me instead of carrying on | `cc --no-auto-continue` |

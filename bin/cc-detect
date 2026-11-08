@@ -328,6 +328,18 @@ def validate(cfg):
                     f"account {aid} is marked isDefault but its dir is {real}, "
                     f"not {DEFAULT_DIR}")
 
+    # `cc cloud` only needs this key when it runs. A stale account (left behind by a
+    # remove from before cc-remove checked it) must not brick every other command, and
+    # `cc cloud set` is the repair — so only the type is checked here. A name that
+    # matches no account is reported by `cc status` and refused by `cc cloud`, never
+    # by validate(). "" means "not set", as in cmd_cloud.
+    cloud = cfg.get("cloud")
+    if isinstance(cloud, dict):
+        cloud_acct = cloud.get("account")
+        if cloud_acct is not None and not isinstance(cloud_acct, str):
+            raise ConfigError(
+                f"cloud.account must be a string, got {type(cloud_acct).__name__}")
+
     return cfg
 
 

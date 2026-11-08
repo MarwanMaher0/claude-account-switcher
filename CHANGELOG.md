@@ -2,6 +2,21 @@
 
 ## Unreleased (after 2.3.1)
 
+### Added — `cc cloud` sends cloud sessions to the account holding the cloud credit
+- Cloud sessions bill against one account's cloud session credit, not whichever account
+  `cc` would start locally. `cc cloud "<task>"` runs `claude --cloud` on the account named
+  by `cloud.account` in `config.json`; `cc cloud set <id>` chooses it and `cc cloud --acct
+  <id>` overrides it for one run. Only the `--acct` form bypasses the stored value; the
+  file is written by the same locked `config-set` path as before. `cc remove` now refuses
+  to remove the cloud account, so a name cannot go stale from that path, and `cc-detect`
+  rejects a non-string `cloud.account` (`""` still means "not set"). A pointer that no
+  longer names an account is never fatal to the other commands: `cc` and `cc status` keep
+  working, `cc status` warns about it, `cc cloud set <id>` repairs it, and `cc cloud`
+  refuses with the repair command instead of launching. Documented in README and
+  `docs/CONFIG.md`; the new suite `test/test-cloud.sh` covers the set/override/error
+  paths, a stale pointer and a non-string value, and asserts the stub `claude` receives
+  `--cloud` plus the task args.
+
 ### Changed — Python floor is 3.7, stated and enforced
 - The README claimed Python 3.6+, but `cc-detect` and `cc-vscode` call
   `subprocess.run(capture_output=…, text=…)` and `datetime.fromisoformat`, which are

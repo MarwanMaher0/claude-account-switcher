@@ -7,7 +7,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rc=0
 
-for suite in test-config.sh test-launch.sh test-accounts.sh test-concurrency.sh test-install.sh test-plugin.sh test-vscode.sh test-pins.sh \
+for suite in test-config.sh test-cloud.sh test-launch.sh test-accounts.sh test-concurrency.sh test-install.sh test-plugin.sh test-vscode.sh test-pins.sh \
              test-bind.sh test-wrapper.sh test-companion.sh test-migrate.sh test-adopt.sh test-extension-contract.sh \
              test-hooks-offline.sh test-python-floor.sh test-portability.sh test-live.sh test-security.sh; do
     case " ${CC_TEST_SKIP:-} " in *" $suite "*) echo; echo "$suite: skipped (CC_TEST_SKIP)"; continue ;; esac
