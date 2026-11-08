@@ -116,7 +116,8 @@ PY
 
 write_fix "$FIX" 9.9.9 9.9.9 9.9.9 dated
 
-assert_eq "$(file_mode "$CHECK")" "755" "check-release.sh mode is 755"
+# The exact mode depends on the umask of the checkout (755 under 022, 775 under 002).
+assert_eq "$([ -x "$CHECK" ] && echo executable || echo not-executable)" "executable" "check-release.sh is executable"
 
 write_fix "$WORK/plugin" 1.2.3 9.9.9 9.9.9 dated
 expect_fail "plugin.json mismatch" "plugin.json version is 1.2.3, tag is v9.9.9" \
