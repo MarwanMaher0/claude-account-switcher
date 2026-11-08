@@ -2,6 +2,14 @@
 
 ## Unreleased (after 2.3.1)
 
+### Added — a `vX.Y.Z` tag publishes the GitHub release
+- Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`. It refuses to publish unless
+  the tag matches `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` and
+  `vscode/cc-switch-binding/package.json`, and the root `CHANGELOG.md` has one dated
+  `## X.Y.Z — YYYY-MM-DD` section. That section is the release notes, and the companion
+  `.vsix` is attached. `test/check-release.sh` is the gate; `test/test-release.sh` fails
+  each gate on its own. Cutting a release is documented in CONTRIBUTING.
+
 ### Added — `cc cloud` sends cloud sessions to the account holding the cloud credit
 - Cloud sessions bill against one account's cloud session credit, not whichever account
   `cc` would start locally. `cc cloud "<task>"` runs `claude --cloud` on the account named

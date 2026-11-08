@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare the release directory
+        run: mkdir -p "$RUNNER_TEMP/release"
+
+      - name: Check the tag against the manifests and changelog
+        run: bash test/check-release.sh --notes-out "$RUNNER_TEMP/release/notes.md"
+
+      - name: Install shellcheck v0.11.0
+        run: |
+          sum=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          dir="$RUNNER_TEMP/shellcheck"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/sc.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz"
+          python3 - "$dir/sc.tar.xz" "$sum" <<'PY'
+          import hashlib, sys
+          got = hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()
+          if got != sys.argv[2]:
+              sys.exit("shellcheck download sha256 mismatch: " + got)
+          PY
+          tar -xJf "$dir/sc.tar.xz" -C "$dir"
+          echo "$dir/shellcheck-v0.11.0" >> "$GITHUB_PATH"
+
+      - name: Lint shell scripts
+        run: bash test/lint.sh
+
+      - name: Run test suites
+        run: bash test/run-all.sh
+
+      - name: Build the companion extension
+        run: bin/cc-vscode build "$RUNNER_TEMP/release/cc-switch-binding.vsix"
+
+      - name: Upload release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          vsix="$(find release -name '*.vsix' -print -quit)"
+          notes="$(find release -name 'notes.md' -print -quit)"
+          test -n "$vsix"
+          test -n "$notes"
+          gh release create "$GITHUB_REF_NAME" "$vsix" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file "$notes"

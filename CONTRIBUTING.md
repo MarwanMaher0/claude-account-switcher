@@ -6,8 +6,8 @@
 bash test/run-all.sh
 ```
 
-1198 checks across the nineteen suites run with `CC_TEST_SKIP=test-live.sh bash test/run-all.sh`
-(`test-live.sh` is the nineteenth suite of twenty in `run-all.sh` and needs a signed-in
+1315 checks across the twenty suites run with `CC_TEST_SKIP=test-live.sh bash test/run-all.sh`
+(`test-live.sh` is the nineteenth suite of twenty-one in `run-all.sh` and needs a signed-in
 `claude`). There is no framework to install. `claude` is replaced with a stub and every test runs
 against a throwaway `HOME`, so the suite cannot touch a real account and uses no API quota. CI
 runs it on Linux and macOS, and again on Python 3.7 (on `ubuntu-22.04`, the newest runner image
@@ -81,3 +81,22 @@ Python must run on 3.7, the floor CI tests — chosen because those are the firs
 no PEP 585 built-in generics (`list[int]`), no PEP 604 unions (`int | None`). Comments explain
 *why*, especially where the reason is a trap that is not obvious from the code. User-facing
 messages are short, and every failure ends with the command to run next.
+
+## Releasing
+
+A release is a `vX.Y.Z` tag. The tag, the three version fields, and one dated changelog
+section must name the same version before anything is published:
+
+1. Set the same `X.Y.Z` in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`
+   (`plugins[0].version`), and `vscode/cc-switch-binding/package.json`.
+2. Add one `## X.Y.Z — YYYY-MM-DD` heading to the root `CHANGELOG.md`. The dash is an em
+   dash, the date is `YYYY-MM-DD`, and the section ends at the next `## ` heading. That
+   section is the GitHub release notes. Do not use the extension changelog.
+3. Check it before tagging: `bash test/check-release.sh vX.Y.Z`. `--notes-out notes.md`
+   writes the notes only when the check passes. A failure prints `check-release: …` on
+   stderr and nothing on stdout. `bash test/test-release.sh` fails each gate on its own.
+4. Tag that commit `vX.Y.Z` and push the tag. `.github/workflows/release.yml` runs only on
+   a `v*.*.*` tag push. It runs the check, lints, runs the suites, builds
+   `cc-switch-binding.vsix`, and publishes a GitHub release titled with the tag, with the
+   changelog section as the notes and the vsix attached. It does not run on branch pushes
+   or `workflow_dispatch`.
