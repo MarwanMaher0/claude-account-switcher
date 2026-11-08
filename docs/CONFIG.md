@@ -222,7 +222,16 @@ status line of your own, it still runs and shows as before.
 
 | Variable | Effect |
 |---|---|
-| `CC_INSTALL_DIR` | Where `install.sh` puts the commands. Default `~/.local/bin`. |
+| `CC_BIND_TIMEOUT` | Seconds before `cc-detect bind` stops waiting for state and config reads. Default `5`; an empty value also means `5`. |
+| `CC_HOOK_TRIES` | How many times the `StopFailure` hook looks for the limit event, sleeping 0.5 seconds between tries. Default `6`, also used for an empty or non-numeric value; `0` skips the search. |
+| `CC_INSTALL_DIR` | Where `install.sh` puts the commands and `uninstall.sh` removes them; `cc-vscode` also uses it to find an installed tool. Default `~/.local/bin`. |
+| `CC_LIVE_CHECK` | Automatic live usage checks. Default `1`; `0`, `false`, `no` or `off` disables them, as does `"liveCheck": false` in `config.json`. Hooks always disable them. |
+| `CC_NUMBERED_MENUS` | Default unset. Set to a non-empty value to use numbered menus instead of arrow keys, even on a terminal. It also lets a pin set to `ask` ask before switching when standard input is not a terminal. |
+| `CC_PROMPT` | Default unset: `cc add` asks for the account email only at a terminal. Set to a non-empty value to ask even when standard input is not a terminal. |
+| `CC_SHARE_DIR` | Where `install.sh` puts the companion extension and `uninstall.sh` removes it, and where `cc-vscode` looks for it when it is not beside the command. Default `~/.local/share/cc-switch`. |
+| `CC_VSCODE_CLI` | Default unset: `cc-vscode` searches the usual VS Code, Insiders and VSCodium commands and application paths. Set to a colon-separated list of commands or paths to replace that search; an empty value finds no editor CLI. |
 | `CC_WATCH_POLL` | Watcher poll interval, seconds. Default `2`. |
 | `CC_WATCH_GRACE` | Seconds between `SIGTERM` and `SIGKILL`, a whole number; `0` sends `SIGKILL` right after `SIGTERM`. Default `8`, also used for anything that is not a whole number. |
-| `CC_NUMBERED_MENUS` | Set to use numbered menus instead of arrow keys, even on a terminal. |
+
+For `uninstall.sh`, set `CC_INSTALL_DIR` and `CC_SHARE_DIR` to the same values used at install
+time; otherwise it looks in the default locations.

@@ -6,8 +6,8 @@
 bash test/run-all.sh
 ```
 
-1315 checks across the twenty suites run with `CC_TEST_SKIP=test-live.sh bash test/run-all.sh`
-(`test-live.sh` is the nineteenth suite of twenty-one in `run-all.sh` and needs a signed-in
+1321 checks across the twenty-one suites run with `CC_TEST_SKIP=test-live.sh bash test/run-all.sh`
+(`test-live.sh` is the nineteenth suite of twenty-two in `run-all.sh` and needs a signed-in
 `claude`). There is no framework to install. `claude` is replaced with a stub and every test runs
 against a throwaway `HOME`, so the suite cannot touch a real account and uses no API quota. CI
 runs it on Linux and macOS, and again on Python 3.7 (on `ubuntu-22.04`, the newest runner image

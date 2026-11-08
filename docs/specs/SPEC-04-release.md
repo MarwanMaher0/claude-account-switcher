@@ -36,8 +36,8 @@ unlimited usage in the README, marketplace entry, or post.
 
 ## Test matrix
 
-`bats`, GitHub Actions, ubuntu-latest + macos-latest. Built on the stub-`claude`-on-PATH
-harness, which costs no quota and already caught two real bugs.
+Bash and Python suites run by `test/run-all.sh`, GitHub Actions, ubuntu-latest + macos-latest.
+Built on the stub-`claude`-on-PATH harness, which costs no quota and already caught two real bugs.
 
 | # | Test | Guards |
 |---|---|---|
@@ -50,7 +50,7 @@ harness, which costs no quota and already caught two real bugs.
 | T-7 | `cc add` success and rollback; no credential/history/project copied | SPEC-02 AC-1..3, AC-6 |
 | T-8 | `cc add` / `cc remove` guards | SPEC-02 AC-4,5,7,8 |
 | T-9 | Regression: live-limit handoff still carries the conversation | existing behaviour |
-| T-10 | Plugin hooks: `SessionStart` names the right id; `Stop` fires once per limit window | plugin |
+| T-10 | Plugin hooks: `SessionStart` names the right id; `StopFailure` records the limit; `UserPromptSubmit` blocks prompts after this run's limit | plugin |
 | T-11 | Security greps: no credential reads, no personal strings, no network calls | S-1, S-2, S-4 |
 
 T-2 is the one that matters most — it is the regression that logged a real user out.
@@ -63,7 +63,7 @@ T-2 is the one that matters most — it is the regression that logged a real use
 | `docs/HOW-IT-WORKS.md` | 429 detection shape, offset logic, both false-positive traps, why a live session cannot switch |
 | `docs/CONFIG.md` | every field, the tier chain, tier-2 cost warning |
 | `docs/TROUBLESHOOTING.md` | logged-out recovery, stale npm shim, node >= 22, "cc only governs what it launched" |
-| `CONTRIBUTING.md` | run the bats suite; never weaken the `isDefault` rule |
+| `CONTRIBUTING.md` | run `test/run-all.sh` and `test/lint.sh`; never weaken the `isDefault` rule |
 | `SECURITY.md` | reporting, and the explicit "never reads credentials" statement |
 | `LICENSE` | MIT |
 | `CHANGELOG.md` | starts at 2.0.0 |
@@ -72,11 +72,13 @@ T-2 is the one that matters most — it is the regression that logged a real use
 
 ```
 claude-account-switcher/
-  bin/       cc, cc-detect, cc-watch
+  bin/       cc, cc-detect, cc-watch, cc-vscode, cc-claude-wrapper
   .claude-plugin/plugin.json + marketplace.json   <- the repo is both the plugin and its marketplace
   hooks/  commands/  skills/cc-accounts/SKILL.md   <- plugin parts; bin/ ships inside the plugin too
-  test/      bats suites + stub claude
-  docs/  .github/workflows/ci.yml
+  vscode/cc-switch-binding/                        <- companion extension
+  test/      Bash suites + Python helpers + stub claude
+  test/check-release.sh                            <- release tag, manifest and changelog gate
+  docs/  .github/workflows/ci.yml  .github/workflows/release.yml
   install.sh  uninstall.sh
 ```
 
