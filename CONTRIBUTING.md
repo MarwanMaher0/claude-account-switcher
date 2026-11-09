@@ -6,7 +6,7 @@
 bash test/run-all.sh
 ```
 
-1352 checks across the twenty-one suites run with `CC_TEST_SKIP=test-live.sh bash test/run-all.sh`
+1382 checks across the twenty-one suites run with `CC_TEST_SKIP=test-live.sh bash test/run-all.sh`
 (`test-live.sh` is the nineteenth suite of twenty-two in `run-all.sh` and needs a signed-in
 `claude`). There is no framework to install. `claude` is replaced with a stub and every test runs
 against a throwaway `HOME`, so the suite cannot touch a real account and uses no API quota. CI

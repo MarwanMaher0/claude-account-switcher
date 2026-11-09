@@ -211,6 +211,65 @@ assert_no_file "$(first_file "$HOME/.claude-2/projects/$slug/"*/subagents/agent-
     "HX-3 no session files are invented"
 cleanup_home
 
+# ---- AV : a bad command line is refused before claude starts -------------------
+# `cc --acct` with no value ran `shift 2` on one argument: that shifts nothing, the
+# loop saw --acct again, and cc never returned. `--acct ""` quietly dropped the flag
+# and `--acct=two` went to claude as an unknown option.
+new_home >/dev/null; stub_claude; three_accounts
+
+# A portable watchdog: macOS has no `timeout`. Takes the files for the command's
+# stdout and stderr (a >file on bounded itself would be swallowed by the command
+# substitution that reads the status back). Only the exit status comes back on
+# stdout: a hang is 137 and fails the check instead of blocking the suite.
+bounded() {   # bounded <seconds> <outfile> <errfile> <command...>
+    local secs="$1" out="$2" err="$3"; shift 3
+    "$@" >"$out" 2>"$err" &
+    local pid=$!
+    local dog
+    # Redirected: killing $dog leaves its sleep orphaned, and an orphan that still
+    # holds this command substitution's stdout pipe would keep rc="$(…)" waiting
+    # until the sleep ends even after cc has exited.
+    ( sleep "$secs"; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+    dog=$!
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    kill "$dog" 2>/dev/null
+    wait "$dog" 2>/dev/null
+    echo "$rc"
+}
+
+check_no_launch() {   # check_no_launch <label> <args...>
+    local label="$1"; shift
+    local out="$SANDBOX/av.out" err="$SANDBOX/av.err" rc
+    : > "$STUB_LOG"; : > "$out"; : > "$err"
+    rc="$(bounded 6 "$out" "$err" "$BIN/cc" "$@")"
+    if [ "$rc" = "137" ] || [ "$rc" = "124" ]; then
+        no "$label" "hung — the watchdog killed it"
+    else
+        assert_eq "$rc" "1" "$label"
+    fi
+    assert_eq "$(wc -l < "$err" | tr -d ' ')" "1" "$label: exactly one line, on stderr"
+    assert_eq "$(cat "$out")" "" "$label: stdout is empty"
+    assert_eq "$(cat "$STUB_LOG")" "" "$label: claude never started"
+}
+
+check_no_launch "AV-1 a bare --acct is refused, not looped" --acct
+check_no_launch "AV-2 an empty --acct value is refused" --acct ""
+check_no_launch "AV-3 --acct= with an empty value is refused" --acct=
+check_no_launch "AV-4 pins takes no arguments" pins extra
+check_no_launch "AV-5 use takes one account" use one two
+check_no_launch "AV-6 clear takes one account" clear one two
+
+rc="$(bounded 6 "$SANDBOX/av.log" /dev/null "$BIN/cc" --acct=two)"
+assert_eq "$rc" "0" "AV-7 --acct=<id> exits normally"
+assert_contains "$(cat "$SANDBOX/av.log")" "STUB:SET=$HOME/.claude-2" "AV-7 --acct=<id> launches that account"
+rc="$(bounded 6 "$SANDBOX/av.log" /dev/null "$BIN/cc" --acct two)"
+assert_contains "$(cat "$SANDBOX/av.log")" "STUB:SET=$HOME/.claude-2" "AV-8 --acct <id> still launches that account"
+"$BIN/cc" pins >/dev/null 2>&1; assert_eq "$?" "0" "AV-9 pins with no arguments still lists pins"
+"$BIN/cc" clear one >/dev/null 2>&1; assert_eq "$?" "0" "AV-10 clear <id> still clears a limit"
+"$BIN/cc" use one >/dev/null 2>&1; assert_eq "$?" "0" "AV-11 use <id> still sets the preferred account"
+cleanup_home
+
 # ---- SPEC-03 AC-2 : tier 2 skipped while disabled ---------------------------
 new_home >/dev/null; stub_claude; three_accounts
 future=$(( $(date +%s) + 3600 ))

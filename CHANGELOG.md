@@ -2,6 +2,17 @@
 
 ## Unreleased (after 2.3.1)
 
+### Fixed — `cc --acct` with no value looped forever instead of refusing the command
+- A bare `cc --acct` reached the flag loop's `shift 2` with one argument left, which
+  shifts nothing: the loop saw `--acct` again and never returned. `cc --acct ""` dropped
+  the flag and ran on whichever account was free, and `--acct=two` went to claude as an
+  unknown option. A missing or empty `--acct` value now exits 1 with one line before
+  anything launches (`cc: --acct needs a value`, as `cc add`, `cc pin` and `cc cloud`
+  already did), and `--acct=<id>` works. `cc pins`, `cc use <id>` and `cc clear <id>`
+  now refuse extra arguments instead of ignoring them. `test/test-launch.sh` runs each
+  under a portable watchdog (macOS has no `timeout`) so a hang fails the check, and
+  asserts claude never started; valid invocations are unchanged.
+
 ### Fixed — a terminal handoff left `/rewind` and subagent history behind
 - A handoff copied only `<slug>/<session>.jsonl`. Claude Code keeps more beside it: the
   session folder `<slug>/<session>/` (subagents, tool results), the rewind checkpoints

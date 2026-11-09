@@ -27,7 +27,7 @@
 #   cc adopt [folder] --dry-run | --from <id> | --all
 #   cc cloud "<task>"      start a cloud session on the account holding the cloud credit
 #   cc cloud set <id>      choose that account  (cc cloud --acct <id> overrides once)
-#   cc --acct <id>         force a specific account for this run
+#   cc --acct <id>         force a specific account for this run (also --acct=<id>)
 #   cc --manual            never end a run automatically on a limit
 #   cc --no-auto-continue  after a switch, wait for you instead of carrying on by itself
 #   cc -- <claude args>    hand anything else straight to claude
@@ -392,6 +392,7 @@ cmd_unpin() {
 
 cmd_pins() {
     local rows
+    [ $# -eq 0 ] || die "cc pins takes no arguments"
     "$DETECT" accounts >/dev/null || exit 3
     rows="$("$DETECT" pins)"
     if [ -z "$rows" ]; then
@@ -687,6 +688,7 @@ exhausted() {
 cmd_use() {
     local id="${1:-}"
     [ -n "$id" ] || die "usage: cc use <id>   (accounts: $("$DETECT" accounts | cut -f1 | tr '\n' ' '))"
+    [ $# -le 1 ] || die "cc use: too many arguments — one account id at a time"
     "$DETECT" use "$id" || exit $?
     good "new sessions start on '$id' while it has quota, and fail over as usual after that"
     [ -x "$VSCODE" ] && "$VSCODE" sync
@@ -696,6 +698,7 @@ cmd_use() {
 cmd_clear() {
     local id="${1:-}"
     [ -n "$id" ] || die "usage: cc clear <id>"
+    [ $# -le 1 ] || die "cc clear: too many arguments — one account id at a time"
     "$DETECT" mark "$id" 0 || exit $?
     good "cleared the limit recorded for '$id'"
     sync_vscode
@@ -754,7 +757,7 @@ case "${1:-}" in
     clear)  shift; cmd_clear "$@"; exit $? ;;
     pin)    shift; cmd_pin "$@"; exit $? ;;
     unpin)  shift; cmd_unpin "$@"; exit $? ;;
-    pins)   shift; cmd_pins; exit $? ;;
+    pins)   shift; cmd_pins "$@"; exit $? ;;
     adopt)  shift; cmd_adopt "$@"; exit $? ;;
     cloud)  shift; cmd_cloud "$@"; exit $? ;;
     vscode)
@@ -773,7 +776,11 @@ esac
 FORCED=""
 while :; do
     case "${1:-}" in
-        --acct)   FORCED="${2:-}"; shift 2 ;;
+        --acct)   { [ $# -ge 2 ] && [ -n "$2" ]; } || die "cc: --acct needs a value"
+                  FORCED="$2"; shift 2 ;;
+        --acct=*) FORCED="${1#--acct=}"
+                  [ -n "$FORCED" ] || die "cc: --acct needs a value"
+                  shift ;;
         --manual) AUTOKILL=0; shift ;;
         --no-auto-continue) AUTO_CONTINUE=0; shift ;;
         --)       shift; break ;;
