@@ -42,7 +42,22 @@ limit_stub() {
 #!/usr/bin/env bash
 cfgdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 printf '%s|%s\n' "$cfgdir" "$*" >> "$STUB_LOG"
-slug=$(python3 -c "import re,os;print(re.sub(r'[^A-Za-z0-9]','-',os.path.abspath('$PWD')))")
+slug=$(python3 - "$PWD" <<'PY'
+# Claude Code's project slug: each non-alphanumeric UTF-16 unit -> '-', and past 200
+# chars the first 200 + '-' + base36(|int32 hash of the path|). Kept apart from
+# cc-detect on purpose, so the two can disagree.
+import os, sys
+u = [x for c in os.path.abspath(sys.argv[1]) for x in
+     ((0xD800 + (ord(c) - 0x10000 >> 10), 0xDC00 + (ord(c) - 0x10000 & 0x3FF)) if ord(c) > 0xFFFF else (ord(c),))]
+s = "".join(chr(x) if 48 <= x <= 57 or 65 <= x <= 90 or 97 <= x <= 122 else "-" for x in u)
+h = 0
+for x in u: h = (31 * h + x) & 0xFFFFFFFF
+h = abs(h - 0x100000000 if h >> 31 else h)
+b = ""
+while h: b = "0123456789abcdefghijklmnopqrstuvwxyz"[h % 36] + b; h //= 36
+print(s if len(s) <= 200 else s[:200] + "-" + (b or "0"))
+PY
+)
 sid=""
 while [ $# -gt 0 ]; do case "$1" in --session-id|--resume) sid="$2"; shift 2 ;; *) shift ;; esac; done
 d="$cfgdir/projects/$slug"; mkdir -p "$d"
@@ -405,7 +420,22 @@ cat > "$SANDBOX/stub/native-binary/claude" <<'STUB'
 #!/usr/bin/env bash
 cfgdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 printf '%s|%s\n' "$cfgdir" "$*" >> "$STUB_LOG"
-slug=$(python3 -c "import re,os;print(re.sub(r'[^A-Za-z0-9]','-',os.path.abspath('$PWD')))")
+slug=$(python3 - "$PWD" <<'PY'
+# Claude Code's project slug: each non-alphanumeric UTF-16 unit -> '-', and past 200
+# chars the first 200 + '-' + base36(|int32 hash of the path|). Kept apart from
+# cc-detect on purpose, so the two can disagree.
+import os, sys
+u = [x for c in os.path.abspath(sys.argv[1]) for x in
+     ((0xD800 + (ord(c) - 0x10000 >> 10), 0xDC00 + (ord(c) - 0x10000 & 0x3FF)) if ord(c) > 0xFFFF else (ord(c),))]
+s = "".join(chr(x) if 48 <= x <= 57 or 65 <= x <= 90 or 97 <= x <= 122 else "-" for x in u)
+h = 0
+for x in u: h = (31 * h + x) & 0xFFFFFFFF
+h = abs(h - 0x100000000 if h >> 31 else h)
+b = ""
+while h: b = "0123456789abcdefghijklmnopqrstuvwxyz"[h % 36] + b; h //= 36
+print(s if len(s) <= 200 else s[:200] + "-" + (b or "0"))
+PY
+)
 sid=""; settings=""
 while [ $# -gt 0 ]; do case "$1" in --session-id|--resume) sid="$2"; shift 2 ;; --settings) settings="$2"; shift 2 ;; *) shift ;; esac; done
 d="$cfgdir/projects/$slug"; mkdir -p "$d"; t="$d/$sid.jsonl"

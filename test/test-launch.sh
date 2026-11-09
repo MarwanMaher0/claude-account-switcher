@@ -37,11 +37,26 @@ assert_not_contains "$out" "STUB:SET=$HOME/.claude " "AC-7 never sets the var to
 cleanup_home
 
 # ---- handoff across three accounts ------------------------------------------
-new_home >/dev/null; stub_claude; three_accounts
 # 'one' hits a limit and exits immediately; the rest answer normally.
+handoff_stub() {
 cat > "$SANDBOX/stub/native-binary/claude" <<'STUB'
 #!/usr/bin/env bash
-slug=$(python3 -c "import re,os;print(re.sub(r'[^A-Za-z0-9]','-',os.path.abspath('$PWD')))")
+slug=$(python3 - "$PWD" <<'PY'
+# Claude Code's project slug: each non-alphanumeric UTF-16 unit -> '-', and past 200
+# chars the first 200 + '-' + base36(|int32 hash of the path|). Kept apart from
+# cc-detect on purpose, so the two can disagree.
+import os, sys
+u = [x for c in os.path.abspath(sys.argv[1]) for x in
+     ((0xD800 + (ord(c) - 0x10000 >> 10), 0xDC00 + (ord(c) - 0x10000 & 0x3FF)) if ord(c) > 0xFFFF else (ord(c),))]
+s = "".join(chr(x) if 48 <= x <= 57 or 65 <= x <= 90 or 97 <= x <= 122 else "-" for x in u)
+h = 0
+for x in u: h = (31 * h + x) & 0xFFFFFFFF
+h = abs(h - 0x100000000 if h >> 31 else h)
+b = ""
+while h: b = "0123456789abcdefghijklmnopqrstuvwxyz"[h % 36] + b; h //= 36
+print(s if len(s) <= 200 else s[:200] + "-" + (b or "0"))
+PY
+)
 sid=""
 while [ $# -gt 0 ]; do case "$1" in --session-id|--resume) sid="$2"; shift 2 ;; *) shift ;; esac; done
 cfgdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -56,7 +71,9 @@ fi
 exit 0
 STUB
 chmod 755 "$SANDBOX/stub/native-binary/claude"
+}
 
+new_home >/dev/null; stub_claude; three_accounts; handoff_stub
 out="$("$BIN/cc" --manual 2>&1)"
 assert_contains "$out" "one hit its limit" "handoff detects the limit"
 assert_contains "$out" "switching to two" "handoff moves to the next account in order"
@@ -66,6 +83,65 @@ carried="$(cat "$HOME/.claude-2/projects/$slug/"*.jsonl 2>/dev/null)"
 assert_contains "$carried" "before limit" "conversation carries: pre-limit turn present"
 assert_contains "$carried" "resumed"      "conversation carries: post-handoff turn present"
 assert_eq "$("$BIN/cc-detect" pick)" "two" "limited account is recorded, pick moves on"
+cleanup_home
+
+# ---- SL : the transcript is looked for where Claude Code writes it -------------
+# Claude Code names a project dir by replacing every non-alphanumeric UTF-16 code
+# unit of the cwd with '-' and, past 200 characters, keeping the first 200 plus
+# '-' and base 36 of |h|, h the int32 string hash of the path. A plain dash
+# substitution agrees only for short ASCII paths: an emoji is two units ('--') and a
+# long path gets a hash tail, so scan found no transcript — no limit, no handoff.
+# Expected values below were produced by node from Claude Code's own function.
+x199="$(python3 -c 'print("x" * 199)')"
+assert_eq "$("$BIN/cc-detect" slug "/$x199")" "-$x199" \
+    "SL-1 a 200-character slug is unchanged"
+assert_eq "$("$BIN/cc-detect" slug "/${x199}x")" "-$x199-d0i18x" \
+    "SL-2 at 201 the first 200 keep a base-36 hash tail"
+long_cwd="/home/dev/clients/northwind-traders/engineering/platform-services/billing-and-invoicing/quarterly-statements/generator/src/main/java/com/northwind/billing/statements/quarterly/generator/internal/rendering/templates"
+assert_eq "$("$BIN/cc-detect" slug "$long_cwd")" \
+    "$(printf '%s' "$long_cwd" | tr -c 'A-Za-z0-9' '-' | cut -c1-200)-4ssf7w" \
+    "SL-3 a long real-world path: 200 characters, dash, hash"
+assert_eq "$("$BIN/cc-detect" slug "/home/dev/proj-📁/app")" "-home-dev-proj----app" \
+    "SL-4 an emoji is two code units, so two dashes"
+assert_eq "$("$BIN/cc-detect" slug "/home/dev/مشروع/app")" "-home-dev-------app" \
+    "SL-5 Arabic letters are one dash each"
+a190="$(python3 -c 'print("a" * 190)')"
+assert_eq "$("$BIN/cc-detect" slug "/home/dev/📁-$a190/app")" "-home-dev----${a190%aaa}-c161vk" \
+    "SL-6 the hash runs over code units: an emoji counts twice"
+arabic_long="$(python3 -c 'print("/home/dev/" + "مشروع-" * 35 + "app")')"
+assert_eq "$("$BIN/cc-detect" slug "$arabic_long")" \
+    "-home-dev-$(python3 -c 'print("-" * 190)')-ua21p4" \
+    "SL-7 a long Arabic path hashes its code units, not its bytes"
+agree="$(python3 - "$BIN" "/$x199" "/${x199}x" "$long_cwd" "/home/dev/proj-📁/app" \
+                    "/home/dev/مشروع/app" "/home/dev/📁-$a190/app" "$arabic_long" <<'PY'
+import importlib.machinery, importlib.util, os, sys
+def load(name):
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), os.path.join(sys.argv[1], name))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(mod)
+    return mod
+detect, vscode = load("cc-detect"), load("cc-vscode")
+print("same" if all(detect.slugify(p) == vscode.slugify(p) for p in sys.argv[2:]) else "differ")
+PY
+)"
+assert_eq "$agree" "same" "SL-8 cc-vscode names projects exactly as cc-detect does"
+
+# A handoff from a folder whose slug passes 200 characters: the stub writes the
+# transcript under Claude Code's name, cc must read it from the same place.
+new_home >/dev/null; stub_claude; three_accounts; handoff_stub
+deep="$SANDBOX/clients/northwind-traders/engineering/platform-services/billing-and-invoicing/quarterly-statements/generator/src/main/java/com/northwind/billing/statements/quarterly/generator/internal/rendering/templates"
+mkdir -p "$deep"
+out="$(cd "$deep" && "$BIN/cc" --manual 2>&1)"
+assert_contains "$out" "one hit its limit" "SL-9 long path: the limit is detected"
+assert_contains "$out" "switching to two" "SL-9 long path: the run hands off"
+slug="$("$BIN/cc-detect" slug "$deep")"
+plain="$(printf '%s' "$deep" | tr -c 'A-Za-z0-9' '-')"
+case "$slug" in
+    "$(printf '%s' "$plain" | cut -c1-200)"-[0-9a-z]*) ok "SL-9 long path: the project name is 200 characters plus a hash" ;;
+    *) no "SL-9 long path: the project name is 200 characters plus a hash" "got $slug" ;;
+esac
+carried="$(cat "$HOME/.claude-2/projects/$slug/"*.jsonl 2>/dev/null)"
+assert_contains "$carried" "resumed" "SL-9 long path: the conversation carries under that name"
 cleanup_home
 
 # ---- SPEC-03 AC-2 : tier 2 skipped while disabled ---------------------------

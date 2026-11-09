@@ -164,9 +164,44 @@ def tilde(path):
     return path
 
 
+def _utf16_units(text):
+    """The UTF-16 code units of a string, as JavaScript sees it: one per character
+    up to U+FFFF, a surrogate pair above (an emoji is two)."""
+    for ch in text:
+        cp = ord(ch)
+        if cp > 0xFFFF:
+            cp -= 0x10000
+            yield 0xD800 + (cp >> 10)
+            yield 0xDC00 + (cp & 0x3FF)
+        else:
+            yield cp
+
+
+def _base36(n):
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = ""
+    while n:
+        out = digits[n % 36] + out
+        n //= 36
+    return out or "0"
+
+
 def slugify(path):
-    """Claude Code's project-dir naming: non-alphanumerics become dashes."""
-    return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(path))
+    """Claude Code's project-dir naming, exactly. Every UTF-16 code unit of the path
+    that is not [A-Za-z0-9] becomes a dash (so an emoji, two units, becomes `--`).
+    Past 200 characters the slug is the first 200, a dash, and base 36 of the
+    absolute value of the path's int32 string hash, h = (h << 5) - h + unit."""
+    units = list(_utf16_units(os.path.abspath(path)))
+    slug = "".join(chr(u) if 48 <= u <= 57 or 65 <= u <= 90 or 97 <= u <= 122 else "-"
+                   for u in units)
+    if len(slug) <= 200:
+        return slug
+    h = 0
+    for u in units:
+        h = ((h << 5) - h + u) & 0xFFFFFFFF
+    if h >= 0x80000000:
+        h -= 0x100000000
+    return slug[:200] + "-" + _base36(abs(h))
 
 
 class BindTimeout(BaseException):

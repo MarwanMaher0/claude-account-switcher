@@ -2,6 +2,20 @@
 
 ## Unreleased (after 2.3.1)
 
+### Fixed — long or non-ASCII folder paths put the transcript where `cc` did not look
+- `cc-detect` and `cc-vscode` named a project directory by replacing every
+  non-alphanumeric character with `-`. Claude Code (the CLI and the VS Code bundle
+  alike) does that per UTF-16 code unit and, once the name passes 200 characters, keeps
+  the first 200 plus `-` and base 36 of the absolute value of the path's int32 string
+  hash (`h = (h << 5) - h + unit`). So from a folder with an emoji in its path (two code
+  units, two dashes) or a path long enough to be hashed, `scan` found no transcript: a
+  limit went unnoticed, no handoff happened, and `cc adopt` missed the folder's chats.
+  Both tools now apply Claude Code's rule exactly; short ASCII paths get the same name
+  as before. `test/test-launch.sh` checks fixed vectors produced by node from Claude
+  Code's own function (200 and 201 characters, a long path, an emoji, Arabic, and long
+  non-ASCII paths), that `cc-vscode` agrees with `cc-detect`, and a handoff from a folder
+  whose name is hashed. The stub `claude` in the suite names its project the same way.
+
 ### Fixed — `cc-watch` found claude only in the VS Code bundle layout
 - The watcher located the claude process with `pgrep -P <cc-pid> -f native-binary/claude`,
   matching a command line that only the VS Code bundle actually has. On the official
