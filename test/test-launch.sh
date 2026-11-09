@@ -270,6 +270,206 @@ assert_contains "$(cat "$SANDBOX/av.log")" "STUB:SET=$HOME/.claude-2" "AV-8 --ac
 "$BIN/cc" use one >/dev/null 2>&1; assert_eq "$?" "0" "AV-11 use <id> still sets the preferred account"
 cleanup_home
 
+# ---- JS : cc status --json — the table as data ----------------------------------
+# One JSON object on stdout and nothing else: absolute paths, epoch seconds, cc's
+# display names for the limit windows — nothing a script has to parse out of the
+# human table. Asserted here through python's json, the way a consumer would: no jq.
+new_home >/dev/null; stub_claude; three_accounts
+mkdir -p "$HOME/work/acme"
+js="$SANDBOX/js.json"
+
+out="$(cd "$HOME" && "$BIN/cc" status --json)"; rc=$?
+printf '%s' "$out" > "$js"
+assert_eq "$rc" "0" "JS-1 cc status --json succeeds"
+facts="$(python3 - "$js" "$("$BIN/cc-detect" canon "$HOME")" "$HOME" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1]))
+canon_home, home = sys.argv[2], sys.argv[3]
+a = {x["id"]: x for x in o["accounts"]}
+print(o["schema"], len(o["accounts"]),
+      a["one"]["isDefault"], a["one"]["email"], a["two"]["email"], a["three"]["email"],
+      a["one"]["dir"] == home + "/.claude",
+      a["one"]["limited"], a["one"]["limitedUntil"], a["one"]["window"],
+      a["one"]["preferred"], a["one"]["pinned"],
+      o["nextLaunch"]["account"], o["nextLaunch"]["verb"],
+      o["allLimited"], o["soonestReset"],
+      o["cloud"]["account"], o["cloud"]["stale"], len(o["pins"]),
+      o["folder"] == canon_home)
+PY
+)"
+assert_eq "$facts" \
+    "1 3 True first@example.com second@example.com third@example.com True False None None False False one use False None None False 0 True" \
+    "JS-1 free accounts: schema, ids, emails, dirs, next launch — all as data"
+
+case "$out" in
+    \{*\}) ok "JS-2 stdout is exactly one JSON object" ;;
+    *) no "JS-2 stdout is exactly one JSON object" "got: $out" ;;
+esac
+assert_eq "$(count_lines "$out")" "1" "JS-2 ...on one line, so json.load sees nothing else"
+if printf '%s' "$out" | grep -q $'\033'; then
+    no "JS-2 ...with no ANSI decoration"
+else
+    ok "JS-2 ...with no ANSI decoration"
+fi
+assert_eq "$(cat "$STUB_LOG")" "" "JS-2 ...and claude is never launched for it"
+
+future=$(( $(date +%s) + 3600 ))
+"$BIN/cc-detect" mark two "$future" seven_day >/dev/null
+out="$(cd "$HOME" && "$BIN/cc" status --json)"
+printf '%s' "$out" > "$js"
+facts="$(python3 - "$js" "$future" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1]))
+a = {x["id"]: x for x in o["accounts"]}
+print(a["two"]["limited"], a["two"]["limitedUntil"] == int(sys.argv[2]), a["two"]["window"],
+      a["one"]["limited"], a["one"]["window"],
+      o["nextLaunch"]["account"], o["allLimited"],
+      o["soonestReset"]["account"], o["soonestReset"]["resetsAt"] == int(sys.argv[2]))
+PY
+)"
+assert_eq "$facts" "True True weekly False None one False two True" \
+    "JS-3 a recorded weekly limit: limited, until when, which window — and the launch moves on"
+
+"$BIN/cc" use three >/dev/null 2>&1
+"$BIN/cc-detect" config-set cloud.account ghost >/dev/null
+out="$(cd "$HOME" && "$BIN/cc" status --json)"
+printf '%s' "$out" > "$js"
+facts="$(python3 - "$js" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1]))
+a = {x["id"]: x for x in o["accounts"]}
+print(a["three"]["preferred"], a["one"]["preferred"],
+      o["nextLaunch"]["account"], o["nextLaunch"]["verb"],
+      o["cloud"]["account"], o["cloud"]["stale"])
+PY
+)"
+assert_eq "$facts" "True False three use ghost True" \
+    "JS-4 cc use and a stale cloud pointer: preferred, next launch, cloud.stale"
+"$BIN/cc" use one >/dev/null 2>&1
+"$BIN/cc" pin "$HOME/work/acme" --account three --fallback one --no-vscode >/dev/null 2>&1
+canon_acme="$("$BIN/cc-detect" canon "$HOME/work/acme")"
+out="$(cd "$HOME/work/acme" && "$BIN/cc" status --json)"
+printf '%s' "$out" > "$js"
+facts="$(python3 - "$js" "$canon_acme" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1]))
+a = {x["id"]: x for x in o["accounts"]}
+p = o["pins"][0]
+print(len(o["pins"]), p["path"] == sys.argv[2], p["account"], p["onLimit"], p["fallback"],
+      p["vscode"], p["here"], o["folder"] == sys.argv[2],
+      o["nextLaunch"]["account"], o["nextLaunch"]["verb"], a["three"]["pinned"])
+PY
+)"
+assert_eq "$facts" "1 True three switch one False True True three use True" \
+    "JS-5 inside a pinned folder: the pin, its rule, here — and the launch it forces"
+out="$(cd "$HOME" && "$BIN/cc" status --json)"
+printf '%s' "$out" > "$js"
+facts="$(python3 - "$js" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1]))
+print(o["pins"][0]["here"], o["nextLaunch"]["account"], o["nextLaunch"]["verb"])
+PY
+)"
+assert_eq "$facts" "False one use" \
+    "JS-5 outside the pin: here is false and the normal rotation applies"
+
+printf 'not json at all' > "$HOME/.claude-switch/config.json"
+out="$(cd "$HOME" && "$BIN/cc" status --json 2>"$SANDBOX/js.err")"; rc=$?
+assert_eq "$rc" "3" "JS-6 a broken config: the same exit 3 as the human table"
+assert_eq "$out" "" "JS-6 ...stdout stays empty"
+assert_contains "$(cat "$SANDBOX/js.err")" "cc-detect" "JS-6 ...and the complaint is on stderr"
+write_config <<EOF
+{"version":2,"accounts":[]}
+EOF
+out="$(cd "$HOME" && "$BIN/cc" status --json 2>/dev/null)"; rc=$?
+assert_eq "$rc" "3" "JS-6 ...a config with no accounts is a real error too, not data"
+three_accounts
+
+out="$(cd "$HOME" && "$BIN/cc" status 2>&1)"; rc=$?
+assert_eq "$rc" "0" "JS-7 without --json the human table still prints"
+assert_contains "$out" "LIMITED · weekly" "JS-7 ...byte-for-byte the old one: limits and windows"
+assert_contains "$out" "Pinned folders" "JS-7 ...byte-for-byte the old one: pins"
+assert_not_contains "$out" '"schema"' "JS-7 ...and never JSON"
+
+out="$(cd "$HOME" && "$BIN/cc" status --json extra 2>&1)"; rc=$?
+assert_eq "$rc" "2" "JS-8 --json with a further argument is refused"
+assert_contains "$out" "usage: cc-detect status [--json]" "JS-8 ...with cc-detect's usage line"
+out="$(cd "$HOME" && "$BIN/cc" status extra 2>&1)"; rc=$?
+assert_eq "$rc" "1" "JS-8 the human status takes no arguments either"
+assert_contains "$out" "usage: cc status [--json]" "JS-8 ...and says so"
+
+# acme's pin (JS-5) outlives its account. For the human table that has always been an
+# inline complaint and exit 0; the JSON must say the same thing as data — nextLaunch
+# carries the message — while real config errors (JS-6) still exit 3 with empty stdout.
+write_config <<EOF
+{"version":2,"accounts":[
+ {"id":"one","dir":"~/.claude","isDefault":true},
+ {"id":"two","dir":"~/.claude-2"}],
+ "fallbacks":{"apiKey":{"enabled":false,"keyCommand":null,"confirmEachUse":true},
+              "externalCli":{"enabled":false,"command":null}}}
+EOF
+human="$(cd "$HOME/work/acme" && "$BIN/cc" status 2>&1)"; rc=$?
+assert_eq "$rc" "0" "JS-9 a pin whose account is gone: the human table still exits 0"
+out="$(cd "$HOME/work/acme" && "$BIN/cc" status --json)"; rc=$?
+assert_eq "$rc" "0" "JS-9 ...and so does --json: a broken pin here is data, not a failure"
+printf '%s' "$out" > "$js"
+facts="$(python3 - "$js" "$canon_acme" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1]))
+n = o["nextLaunch"]
+print(n["verb"], n["account"], bool(n["error"]), o["pins"][0]["here"],
+      o["folder"] == sys.argv[2], len(o["accounts"]), o["schema"])
+PY
+)"
+assert_eq "$facts" "error None True True True 2 1" \
+    "JS-9 ...nextLaunch says verb error, no account, and carries the message"
+msg="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["nextLaunch"]["error"])' "$js")"
+case "$msg" in
+    "") no "JS-9 ...the extracted message is non-empty, so the next check means something" ;;
+    *) ok "JS-9 ...the extracted message is non-empty, so the next check means something" ;;
+esac
+assert_contains "$human" "$msg" "JS-9 ...the very message the human table shows inline"
+out="$(cd "$HOME" && "$BIN/cc" status --json)"; rc=$?
+assert_eq "$rc" "0" "JS-9 outside the broken pin the rotation is untouched"
+printf '%s' "$out" > "$js"
+facts="$(python3 - "$js" <<'PY'
+import json, sys
+n = json.load(open(sys.argv[1]))["nextLaunch"]
+print(n["verb"], n["account"], n["error"])
+PY
+)"
+assert_eq "$facts" "use one None" "JS-9 ...verb use, account one, no error"
+
+# A dir and an email holding a quote, a backslash, a newline and non-ASCII characters:
+# JSON escaping has to round-trip them exactly, which json.load proves better than any
+# grep could.
+python3 - "$HOME" <<'PY'
+import json, os, sys
+home = sys.argv[1]
+d = os.path.join(home, 'wé"ird\\dir\nline✓')
+os.makedirs(d, exist_ok=True)
+json.dump({"oauthAccount": {"emailAddress": 'a"b\\c\ndé✓@example.com'}},
+          open(os.path.join(d, ".claude.json"), "w"))
+p = os.path.join(home, ".claude-switch", "config.json")
+cfg = json.load(open(p))
+cfg["accounts"].append({"id": "weird", "dir": d})
+json.dump(cfg, open(p, "w"))
+PY
+out="$(cd "$HOME" && "$BIN/cc" status --json)"; rc=$?
+printf '%s' "$out" > "$js"
+facts="$(python3 - "$js" "$HOME" "$rc" <<'PY'
+import json, os, sys
+o = json.load(open(sys.argv[1]))
+a = {x["id"]: x for x in o["accounts"]}
+d = os.path.join(sys.argv[2], 'wé"ird\\dir\nline✓')
+print(sys.argv[3], len(o["accounts"]), a["weird"]["dir"] == d,
+      a["weird"]["email"] == 'a"b\\c\ndé✓@example.com')
+PY
+)"
+assert_eq "$facts" "0 3 True True" \
+    "JS-10 a dir and email with a quote, backslash, newline and non-ASCII round-trip through the JSON"
+cleanup_home
+
 # ---- SPEC-03 AC-2 : tier 2 skipped while disabled ---------------------------
 new_home >/dev/null; stub_claude; three_accounts
 future=$(( $(date +%s) + 3600 ))

@@ -12,6 +12,7 @@
 #   cc                     start on a healthy account (the preferred one while it is free)
 #   cc use <id>            prefer an account for new sessions — terminal and VS Code panel
 #   cc status              which accounts are limited, by which window, until when
+#   cc status --json       the same as one JSON object on stdout, for scripts
 #   cc refresh             ask Anthropic for each account's real usage and fix stale limits
 #   cc add <id>            create, sign in and register another account
 #   cc add <id> --email X  pre-fill the login with X and refuse any other account
@@ -413,6 +414,14 @@ cmd_pins() {
 
 # ---- cc status --------------------------------------------------------------
 cmd_status() {
+    if [ "${1:-}" = "--json" ]; then
+        # For scripts: one JSON object on stdout and nothing else — no banner, no VS
+        # Code panel, no cloud warning (the object carries the cloud account itself).
+        # Further arguments go along so cc-detect refuses them with its usage line.
+        "$DETECT" status "$@"
+        return $?
+    fi
+    [ $# -eq 0 ] || die "usage: cc status [--json]"
     echo
     "$DETECT" status || return $?
     # A cloud.account left behind by a remove from before cc remove guarded it is
@@ -749,7 +758,7 @@ usage() { sed -n 's/^#   \(cc .*\)/  \1/p' "${BASH_SOURCE[0]}"; }
 
 # ---- argument parsing -------------------------------------------------------
 case "${1:-}" in
-    status) cmd_status; exit $? ;;
+    status) shift; cmd_status "$@"; exit $? ;;
     refresh) shift; cmd_refresh "$@"; exit $? ;;
     add)    shift; cmd_add "$@"; exit $? ;;
     remove) shift; cmd_remove "$@"; exit $? ;;

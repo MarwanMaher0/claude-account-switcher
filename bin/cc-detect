@@ -25,7 +25,8 @@ Subcommands
   pick                              account to start on: the preferred one if free, else the first free
   next-free [used,ids]              first free account in config order, skipping those listed
   soonest [exclude]                 "<id> <epoch>" for the limited account freeing up first
-  status                            human-readable state, with live usage per account
+  status [--json]                   human-readable state, with live usage per account;
+                                    --json is one object on stdout, for scripts
   use <id>                          prefer this account for new sessions
   refresh                           learn limits hit outside cc (the VS Code panel, a bare claude)
   live [ids]                        ask Anthropic for each account's real usage and correct the
@@ -1620,6 +1621,73 @@ def cmd_status():
             print(f"\n  this folder is pinned · next launch here -> {shown}")
 
 
+STATUS_SCHEMA = 1
+
+
+def status_json():
+    """What `cc status` shows, as data: one JSON object, for scripts.
+
+    Every value is absolute — expanded paths, epoch seconds, cc's display name for the
+    limit window — so nothing here has to be parsed out of the table. Same rules as the
+    human output: an automatic live check only when CC_LIVE_CHECK allows one, a broken
+    pin on the current folder is data in nextLaunch (exit 0, like the table), and a
+    real config error raises, which is exit 3.
+    """
+    state = load_state()
+    now = time.time()
+    accts = accounts()
+    ids = {a["id"] for a in accts}
+    preferred = state.get("preferred")
+    pins = load_pins()
+    pinned_to = {p.get("account") for p in pins}
+    cwd = os.getcwd()
+
+    out_accounts = []
+    for acct in accts:
+        aid = acct["id"]
+        until = limited_until(state, aid)
+        limited = until > now
+        ltype = limit_type(state, aid) if limited else None
+        out_accounts.append({
+            "id": aid,
+            "dir": expand(acct["dir"]),
+            "isDefault": bool(acct.get("isDefault")),
+            "email": account_email(acct),
+            "limited": limited,
+            "limitedUntil": int(until) if limited else None,
+            "window": LIMIT_NAMES.get(ltype, ltype) if ltype else None,
+            "preferred": aid == preferred,
+            "pinned": aid in pinned_to,
+        })
+
+    try:
+        verb, nxt = start_for(cwd)
+        err = None
+    except ConfigError as exc:      # a broken pin here is data, not a failure: exit 0
+        verb, nxt, err = "error", None, str(exc)
+    soon_id, soon_until = soonest(state)
+    here = pin_for(cwd)
+    cloud = (load_config().get("cloud") or {}).get("account") or None
+
+    return {
+        "schema": STATUS_SCHEMA,
+        "generatedAt": int(now),
+        "folder": canon(cwd),
+        "accounts": out_accounts,
+        "nextLaunch": {"account": nxt or None, "verb": verb, "error": err},
+        "allLimited": verb != "error" and (not nxt) and bool(soon_id),
+        "soonestReset": {"account": soon_id, "resetsAt": int(soon_until)} if soon_id else None,
+        "cloud": {"account": cloud, "stale": bool(cloud) and cloud not in ids},
+        "pins": [{"path": p["path"],
+                  "account": p.get("account"),
+                  "onLimit": p.get("onLimit"),
+                  "fallback": p.get("fallback"),
+                  "vscode": bool(p.get("vscode")),
+                  "here": here is not None and here["path"] == p["path"]}
+                 for p in pins],
+    }
+
+
 def choose(path, answer):
     """Record the answer to an `ask` pin for VS Code windows: use its fallback, or stay
     on the limited account. It lasts until the current limit has passed. Returns the
@@ -1761,10 +1829,17 @@ def main(argv):
         print(f"{aid} {until}")
 
     elif cmd == "status":
+        if args and args != ["--json"]:
+            print("usage: cc-detect status [--json]", file=sys.stderr)
+            return 2
         _refresh_quietly()
         if live_enabled():
             live_check()                        # every account, for the usage figures
-        cmd_status()
+        if args:
+            # One object and nothing else: a script reads stdout, so no decoration.
+            print(json.dumps(status_json()))
+        else:
+            cmd_status()
 
     elif cmd == "use":
         aid = args[0] if args else ""

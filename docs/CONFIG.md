@@ -218,6 +218,58 @@ status line of your own, it still runs and shows as before.
 - **The terminal only.** The VS Code panel is not started by `cc`; its windows move when a limit
   is recorded.
 
+## `cc status --json`
+
+The same information `cc status` shows, as one JSON object on standard output, for scripts and
+status lines. Nothing else is printed: no banner, no VS Code panel, no ANSI codes. Standard error
+still carries warnings, and a broken config is the same exit `3` as the human table, with standard
+output left empty. A pin on the current folder that names a missing account is not that kind of
+error: like the human table's inline complaint, it arrives as data — `nextLaunch.verb` becomes
+`"error"` with the message in `nextLaunch.error` — and the exit code stays `0`. Any argument beyond
+`--json` is refused.
+
+```json
+{
+  "schema": 1,
+  "generatedAt": 1762600000,
+  "folder": "/home/you/work/acme",
+  "accounts": [
+    {
+      "id": "personal",
+      "dir": "/home/you/.claude",
+      "isDefault": true,
+      "email": "you@example.com",
+      "limited": false,
+      "limitedUntil": null,
+      "window": null,
+      "preferred": true,
+      "pinned": false
+    }
+  ],
+  "nextLaunch": { "account": "personal", "verb": "use", "error": null },
+  "allLimited": false,
+  "soonestReset": null,
+  "cloud": { "account": null, "stale": false },
+  "pins": []
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `schema` | The shape version, currently `1`. It rises only when a consumer would have to change. |
+| `generatedAt` | Epoch seconds, when the object was built. |
+| `folder` | The canonical current directory (absolute, symlinks resolved) — the folder a launch would read. |
+| `accounts[]` | Every account, in config order. `dir` is the expanded absolute directory; `email` is the signed-in address or `null`; `limited` and `limitedUntil` (epoch seconds or `null`) are the recorded limit; `window` is cc's display name for the limit window (`5-hour`, `weekly`, `weekly Opus`, `weekly Sonnet`) or `null`; `preferred` marks the `cc use` choice; `pinned` is true when any folder pins this account. |
+| `nextLaunch` | What a plain `cc` in `folder` would do: `account` (or `null`), `verb` — `use` (start on it), `switch` (a pin's fallback), `ask`, `stop` (a pin allows nothing else), `none` (unpinned and every account is limited), or `error` (the pin on `folder` cannot be acted on) — and `error`: the complaint for `verb` `"error"`, `null` otherwise. |
+| `allLimited` | True only when no account can start and at least one limit is recorded. Always false when `verb` is `error`: a broken pin says nothing about the rotation. |
+| `soonestReset` | `{ account, resetsAt }` for the limit that lifts first, or `null`. |
+| `cloud` | The `cloud.account` pointer, and `stale` — true when it names no registered account. |
+| `pins[]` | Every pinned folder: its canonical `path`, `account`, `onLimit` rule (`switch`, `ask` or `stop`), `fallback`, `vscode` (whether the pin binds VS Code windows too), and `here` — true when `folder` is that pin. |
+
+Like the human table, an automatic live usage check runs only when
+[`CC_LIVE_CHECK`](#environment-variables) allows one — otherwise the numbers are as fresh as the
+last recorded limit, and `cc refresh` is what asks the server.
+
 ## Environment variables
 
 | Variable | Effect |

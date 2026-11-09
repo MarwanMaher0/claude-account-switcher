@@ -7,7 +7,7 @@
 [![CI](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/MarwanMaher0/claude-account-switcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg)](#step-1-check-what-you-need)
-[![Tests](https://img.shields.io/badge/tests-1382%20checks-brightgreen.svg)](CONTRIBUTING.md)
+[![Tests](https://img.shields.io/badge/tests-1412%20checks-brightgreen.svg)](CONTRIBUTING.md)
 [![No telemetry](https://img.shields.io/badge/telemetry-none-success.svg)](#privacy)
 
 [Website](https://marwanmaher0.github.io/claude-account-switcher/) · [Docs](https://marwanmaher0.github.io/claude-account-switcher/docs/) · [Get started](#get-started) · [Everyday use](#everyday-use) · [Separate projects](#separate-projects-one-account-per-folder) · [VS Code](#step-6-vs-code-users-only) · [Troubleshooting](docs/TROUBLESHOOTING.md)
@@ -382,6 +382,7 @@ Claude Code reports usage. It is off by default. See
 |---|---|
 | Start Claude Code | `cc` |
 | See every account, its limit and when it resets | `cc status` |
+| The same as one JSON object, for a script or status line | `cc status --json` |
 | Start on a particular account while it has quota | `cc use work` |
 | Add another account | `cc add <name>` |
 | Add one without the email question | `cc add <name> --email you@company.com` |

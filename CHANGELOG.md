@@ -2,6 +2,23 @@
 
 ## Unreleased (after 2.3.1)
 
+### Added — `cc status --json`: the status table as data
+- One JSON object on stdout and nothing else — no banner, no VS Code panel, no ANSI —
+  for scripts and status lines: the schema version, the canonical folder, every account
+  with its expanded dir, email, recorded limit (`limitedUntil` epoch seconds, `window`
+  cc's display name for it), preferred and pinned flags, what the next launch in this
+  folder would do (`nextLaunch`, `allLimited`, `soonestReset`), the cloud pointer with
+  its staleness, and every pin including whether this folder is one. The rules are the
+  human table's: a live check only when `CC_LIVE_CHECK` allows one, a broken config the
+  same exit 3 with empty stdout, a pin on this folder that names a missing account
+  reported as `nextLaunch` data — `verb` `"error"` plus the message — with exit 0, and
+  any argument beyond `--json` refused. The human output is unchanged.
+  `docs/CONFIG.md` documents every field; `test/test-launch.sh` parses the object with
+  python's json — free accounts, a weekly limit, a preferred account, a stale cloud
+  pointer, inside and outside a pinned folder, a broken config, one with no accounts, a
+  pin whose account is gone, a dir and an email holding a quote, a backslash, unicode
+  and a newline, and the argument refusals.
+
 ### Fixed — `cc --acct` with no value looped forever instead of refusing the command
 - A bare `cc --acct` reached the flag loop's `shift 2` with one argument left, which
   shifts nothing: the loop saw `--acct` again and never returned. `cc --acct ""` dropped
