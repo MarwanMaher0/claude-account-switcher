@@ -75,10 +75,15 @@ underneath an in-flight tool call.
 2. `cc` scans from the pre-run offset, finds the 429, and records `resetsAt` for that account.
 3. It picks the next account in config order that is available and has not been used this run.
 4. It copies `<old-dir>/projects/<slug>/<session>.jsonl` to the same path under the new account.
-5. It relaunches with `--resume <session-id>`.
+5. It has `cc-vscode carry-session` bring the files Claude Code keeps beside the chat:
+   the session folder `<slug>/<session>/` (subagents, tool results), the rewind
+   checkpoints under `file-history/<session>/` and `todos/<session>-*.json`. They are
+   hard-linked, or copied and verified across filesystems, exactly as `cc adopt` does
+   for a pinned folder — a file the new account already has with other content is kept.
+6. It relaunches with `--resume <session-id>`.
 
 The conversation continues: the pre-limit turns, the limit itself, and everything after it live
-in one session file.
+in one session file. `/rewind` and the subagent history are there too, not just the transcript.
 
 ```
    account A                         account B
@@ -89,6 +94,7 @@ in one session file.
    └──────┬───────┘                  └──────▲───────┘
           │  watcher ends the run           │
           │  transcript copied ─────────────┘
+          │  session files, rewind, todos ──┘
           │  claude --resume <same session id>
           ▼
    conversation continues

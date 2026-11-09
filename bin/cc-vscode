@@ -36,6 +36,11 @@ Subcommands
   carry <id>               link the last week's unpinned chats from other accounts into <id>
   carry --folder <f> --from <a> --to <b> [--any-age]
                            link the last week's (or all) chats of one folder from <a> into <b>
+  carry-session --folder <f> --session <id> --from <a> --to <b>
+                           link one chat and the files beside it — its session folder
+                           (subagents, tool results), rewind checkpoints and todos — from
+                           <a> into <b>. What a terminal handoff runs after copying the
+                           transcript; never replaces a file that differs
   adopt [<folder> | --folder <f> | --all] [--from <id>]... [--dry-run] [--json] [--quick]
         [--session <id> [--also-to <id>]] [--deadline <s>]
                            link a pinned folder's chats, of any age, from the other accounts
@@ -2404,6 +2409,21 @@ def main(argv):
             print("usage: cc-vscode carry <id> | carry --folder <f> --from <a> --to <b>", file=sys.stderr)
             return 2
         print(carry(args[0]))
+        return 0
+
+    if cmd == "carry-session":
+        # A chat and the files beside it. The caller has copied the transcript; this
+        # brings the session folder (subagents, tool results), rewind checkpoints and
+        # todos the way adopt does: a hard link or a verified copy, never over a file
+        # that differs. Prints how many files it added.
+        usage = "usage: cc-vscode carry-session --folder <f> --session <id> --from <a> --to <b>"
+
+        def opt(name):
+            if name not in args or args.index(name) + 1 >= len(args):
+                print(usage, file=sys.stderr)
+                raise SystemExit(2)
+            return args[args.index(name) + 1]
+        print(carry_session(opt("--folder"), opt("--session"), opt("--from"), opt("--to")))
         return 0
 
     if cmd == "adopt":

@@ -65,6 +65,19 @@ if [ -z "${CLAUDE_CONFIG_DIR+x}" ]; then    # the default account is the one tha
   fut=$(( $(date +%s) + 3600 ))
   echo "{\"type\":\"assistant\",\"uuid\":\"t1\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"before limit\"}]}}" >> "$d/$sid.jsonl"
   echo "{\"type\":\"assistant\",\"uuid\":\"t2\",\"isApiErrorMessage\":true,\"apiErrorStatus\":429,\"error\":\"rate_limit\",\"quotaLimits\":{\"status\":\"rejected\",\"resetsAt\":$fut},\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"limit\"}]}}" >> "$d/$sid.jsonl"
+  # HX_EXTRAS: what Claude Code leaves beside a chat — a subagent's transcript, a
+  # rewind checkpoint and a todo. HX_OTHER: a file of the target account's own with
+  # the same name as the checkpoint, which a handoff must not replace.
+  if [ -n "${HX_EXTRAS:-}" ]; then
+    mkdir -p "$d/$sid/subagents" "$cfgdir/file-history/$sid" "$cfgdir/todos"
+    printf '{"agent":"explore","text":"SUBAGENT-WORK"}\n' > "$d/$sid/subagents/agent-1.jsonl"
+    printf '{"checkpoint":"SOURCE-REWIND"}\n' > "$cfgdir/file-history/$sid/checkpoint-1.json"
+    printf '{"todo":"TODO-FROM-SOURCE"}\n' > "$cfgdir/todos/$sid-agent-1.json"
+    if [ -n "${HX_OTHER:-}" ]; then
+      mkdir -p "$HOME/.claude-2/file-history/$sid"
+      printf '{"checkpoint":"TARGETS-OWN"}\n' > "$HOME/.claude-2/file-history/$sid/checkpoint-1.json"
+    fi
+  fi
 else
   echo "{\"type\":\"assistant\",\"uuid\":\"t3\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"resumed\"}]}}" >> "$d/$sid.jsonl"
 fi
@@ -142,6 +155,60 @@ case "$slug" in
 esac
 carried="$(cat "$HOME/.claude-2/projects/$slug/"*.jsonl 2>/dev/null)"
 assert_contains "$carried" "resumed" "SL-9 long path: the conversation carries under that name"
+cleanup_home
+
+# ---- HX : the files beside the chat come with it -------------------------------
+# Claude Code keeps <slug>/<session>/ (subagents, tool results), file-history/<session>/
+# (rewind checkpoints) and todos/<session>-*.json beside the transcript. A handoff
+# that copied only the .jsonl lost /rewind and subagent history on a switch.
+new_home >/dev/null; stub_claude; three_accounts; handoff_stub
+export HX_EXTRAS=1
+out="$("$BIN/cc" --manual 2>&1)"
+assert_contains "$out" "switching to two" "HX-1 the run still hands off"
+slug="$("$BIN/cc-detect" slug "$PWD")"
+tgt="$HOME/.claude-2"
+assert_contains "$(cat "$tgt/projects/$slug/"*/subagents/agent-1.jsonl 2>/dev/null)" \
+    "SUBAGENT-WORK" "HX-1 the subagent transcript arrives with the chat"
+assert_contains "$(cat "$tgt/file-history/"*/checkpoint-1.json 2>/dev/null)" \
+    "SOURCE-REWIND" "HX-1 the rewind checkpoint arrives with the chat"
+assert_contains "$(cat "$tgt/todos/"*-agent-1.json 2>/dev/null)" \
+    "TODO-FROM-SOURCE" "HX-1 the todo arrives with the chat"
+cleanup_home
+
+# A file the target account already has under the same name is its own: kept, never
+# replaced, while the rest still arrives.
+new_home >/dev/null; stub_claude; three_accounts; handoff_stub
+export HX_EXTRAS=1 HX_OTHER=1
+out="$("$BIN/cc" --manual 2>&1)"
+assert_contains "$out" "switching to two" "HX-2 the run still hands off"
+slug="$("$BIN/cc-detect" slug "$PWD")"
+tgt="$HOME/.claude-2"
+assert_contains "$(cat "$tgt/file-history/"*/checkpoint-1.json 2>/dev/null)" \
+    "TARGETS-OWN" "HX-2 a differing checkpoint in the target is kept"
+assert_not_contains "$(cat "$tgt/file-history/"*/checkpoint-1.json 2>/dev/null)" \
+    "SOURCE-REWIND" "HX-2 the source checkpoint did not overwrite it"
+assert_contains "$(cat "$tgt/todos/"*-agent-1.json 2>/dev/null)" \
+    "TODO-FROM-SOURCE" "HX-2 the other extras still arrive"
+cleanup_home
+
+# A chat with nothing beside it: the handoff is unchanged, and the transcript is a
+# copy as before, not a hard link.
+new_home >/dev/null; stub_claude; three_accounts; handoff_stub
+unset HX_EXTRAS HX_OTHER
+out="$("$BIN/cc" --manual 2>&1)"
+assert_contains "$out" "switching to two" "HX-3 a handoff with no extras still succeeds"
+slug="$("$BIN/cc-detect" slug "$PWD")"
+first_file() { local f; for f in "$@"; do [ -f "$f" ] && { printf '%s\n' "$f"; return; }; done; }
+carried="$(first_file "$HOME/.claude-2/projects/$slug/"*.jsonl)"
+assert_file "$carried" "HX-3 the transcript arrives"
+orig="$(first_file "$HOME/.claude/projects/$slug/"*.jsonl)"
+if [ -n "$orig" ] && [ -n "$carried" ] && [ ! "$orig" -ef "$carried" ]; then
+    ok "HX-3 the transcript is still copied, not linked"
+else
+    no "HX-3 the transcript is still copied, not linked"
+fi
+assert_no_file "$(first_file "$HOME/.claude-2/projects/$slug/"*/subagents/agent-1.jsonl)" \
+    "HX-3 no session files are invented"
 cleanup_home
 
 # ---- SPEC-03 AC-2 : tier 2 skipped while disabled ---------------------------

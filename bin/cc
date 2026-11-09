@@ -949,6 +949,12 @@ while :; do
         note "carrying the conversation over ($(du -h "$src" | cut -f1))…"
         # already one file when VS Code sync has linked this chat across
         [ "$src" -ef "$dst_dir/$SESSION.jsonl" ] || cp -p "$src" "$dst_dir/$SESSION.jsonl"
+        # Claude Code keeps the chat's session folder (subagents, tool results), its
+        # rewind checkpoints and its todos beside the transcript. cc-vscode brings them
+        # the way it does for a pinned folder — a hard link or a verified copy, never
+        # over a file that differs — so /rewind and subagent history survive the move.
+        [ -x "$VSCODE" ] && "$VSCODE" carry-session --folder "$CWD" --session "$SESSION" \
+            --from "$ACCT" --to "$NEXT" >/dev/null 2>&1
         RESUME=1
         # The limit cut a turn short, so nobody is about to type: say "carry on" for
         # them. After an early switch the turn had finished and Claude waits for you.

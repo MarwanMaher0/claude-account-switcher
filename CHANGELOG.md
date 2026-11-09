@@ -2,6 +2,18 @@
 
 ## Unreleased (after 2.3.1)
 
+### Fixed — a terminal handoff left `/rewind` and subagent history behind
+- A handoff copied only `<slug>/<session>.jsonl`. Claude Code keeps more beside it: the
+  session folder `<slug>/<session>/` (subagents, tool results), the rewind checkpoints
+  under `file-history/<session>/` and `todos/<session>-*.json`. On the new account
+  `/rewind` had nothing to rewind to and the subagent history was gone. `cc-vscode` now
+  exposes `carry-session`, which brings one chat's files exactly as `cc adopt` does —
+  a hard link, or a verified copy across filesystems, never over a file that differs —
+  and the handoff calls it after copying the transcript. The transcript copy and the
+  default-account rule are unchanged. `test/test-launch.sh` checks that the extras
+  arrive, that a differing file already in the new account is kept, and that a chat with
+  nothing beside it hands off as before.
+
 ### Fixed — long or non-ASCII folder paths put the transcript where `cc` did not look
 - `cc-detect` and `cc-vscode` named a project directory by replacing every
   non-alphanumeric character with `-`. Claude Code (the CLI and the VS Code bundle
