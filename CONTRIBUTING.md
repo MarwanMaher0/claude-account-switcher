@@ -7,12 +7,14 @@ bash test/run-all.sh
 ```
 
 1412 checks across the twenty-one suites run with `CC_TEST_SKIP=test-live.sh bash test/run-all.sh`
-(`test-live.sh` is the nineteenth suite of twenty-two in `run-all.sh` and needs a signed-in
-`claude`). There is no framework to install. `claude` is replaced with a stub and every test runs
-against a throwaway `HOME`, so the suite cannot touch a real account and uses no API quota. CI
-runs it on Linux and macOS, and again on Python 3.7 (on `ubuntu-22.04`, the newest runner image
-whose setup-python manifest still ships 3.7) and the newest stable on `ubuntu-latest` via
-`actions/setup-python`.
+(`test-live.sh` is the nineteenth suite of twenty-two in `run-all.sh`; like every suite it uses
+`test/lib.sh`'s stub and passes offline). There is no framework to install. `claude` is replaced
+with a stub and every test runs against a throwaway `HOME`, so the suite cannot touch a real
+account and uses no API quota. CI runs it on Linux and macOS, and again on Python 3.7 (on
+`ubuntu-22.04`, the newest runner image whose setup-python manifest still ships 3.7) and the
+newest stable on `ubuntu-latest` via `actions/setup-python`. CI then runs
+`bash test/check-counts.sh`, which fails when this count or the README badge drifts from the real
+total (`--fix` rewrites both).
 
 To see a switch happen end to end, without installing anything:
 
@@ -22,7 +24,9 @@ bash test/demo.sh
 
 ## Before opening a pull request
 
-1. `bash test/run-all.sh` passes.
+1. `bash test/run-all.sh` passes (it ends with a `grand total: …` line). If you added or
+   removed tests, `bash test/check-counts.sh` agrees with this count and the README badge —
+   run it with `--fix` to update them.
 2. `bash test/lint.sh` is clean. It runs `bash -n` and ShellCheck on every shell script (found
    by shebang) at `--severity=style`, using the options in `.shellcheckrc`. It needs
    `shellcheck` on `PATH`, or `SHELLCHECK=/path/to/shellcheck`; CI pins v0.11.0. Fix a finding

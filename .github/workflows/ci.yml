@@ -65,6 +65,13 @@ jobs:
       - name: Run test suites
         run: bash test/run-all.sh
 
+      # The README badge and CONTRIBUTING both state a check count; keep them
+      # honest against a real CC_TEST_SKIP=test-live.sh run. --fix rewrites them.
+      # Once on Linux is enough: the counts are the same on both systems.
+      - name: Check stated test counts
+        if: runner.os == 'Linux'
+        run: bash test/check-counts.sh
+
       # GitHub's macOS images put Homebrew's bash 5 first on PATH, but a stock Mac (and
       # the VS Code extension host running cc-claude-wrapper there) has /bin/bash 3.2.
       # Run everything again with `bash` and `env bash` resolving to /bin/bash.

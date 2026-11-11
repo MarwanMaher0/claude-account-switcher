@@ -2,6 +2,24 @@
 
 ## Unreleased (after 2.3.1)
 
+### Added — a grand total line at the end of `test/run-all.sh`
+- After the existing pass/fail verdict the runner now prints one plain line:
+  `grand total: <passed> passed, <failed> failed, <suites run> suites run, <skipped> skipped`.
+  Per-suite output and the suite list are unchanged. `test/check-counts.sh` reads this line.
+
+### Added — `test/check-counts.sh` keeps the stated check counts honest
+- The README tests badge and CONTRIBUTING's "N checks across the twenty-one suites" drift
+  whenever tests are added or removed. `bash test/check-counts.sh` runs the suite the way CI
+  counts it (`CC_TEST_SKIP=test-live.sh bash test/run-all.sh`) and fails when either stated
+  number differs from the real total, naming the command to run next;
+  `bash test/check-counts.sh --fix` rewrites only those two numbers (in place, so the files keep
+  their mode). CI runs it on Linux after the suites, once — the counts match on both systems.
+
+### Fixed — CONTRIBUTING claimed `test-live.sh` needs a signed-in `claude`
+- Like every other suite it uses `test/lib.sh`'s stub and passes offline; the suite already said
+  so two sentences later. The claim is gone, and the PR checklist mentions the grand total and
+  `check-counts.sh`.
+
 ### Added — `cc status --json`: the status table as data
 - One JSON object on stdout and nothing else — no banner, no VS Code panel, no ANSI —
   for scripts and status lines: the schema version, the canonical folder, every account
