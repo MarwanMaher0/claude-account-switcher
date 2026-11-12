@@ -69,14 +69,25 @@ const msgs = (kind) => rec.messages.filter((m) => !kind || m.kind === kind);
 const scenarios = {
   // C-1: a window on a pinned folder is bound at activation
   async activation() {
-    binding();
+    const python = cp.execFileSync('python3', ['-I', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim();
+    binding({ python });
     rec.folders = [path.join(ACME, 'api')];
+    process.chdir(rec.folders[0]);
+    process.env.PYTHONPATH = rec.folders[0];
+    const marker = path.join(HOME, 'imported-project-module');
+    let controls = true;
+    for (const name of ['uuid', 'json']) {
+      fs.writeFileSync(path.join(rec.folders[0], `${name}.py`),
+        `open(${JSON.stringify(marker)}, 'w').write('${name}')\nraise RuntimeError('project module imported')\n`);
+      const control = cp.spawnSync(python, ['-c', `import ${name}`], { encoding: 'utf8' });
+      controls = controls && control.status !== 0 && fs.existsSync(marker) && fs.readFileSync(marker, 'utf8') === name;
+      if (fs.existsSync(marker)) fs.unlinkSync(marker);
+    }
     delete process.env.CLAUDE_CONFIG_DIR;
     const ext = load();
     const ctx = context();
-    ext.activate(ctx);
-    check('C-1 process.env.CLAUDE_CONFIG_DIR is the pinned account, cc\'s exact dir', process.env.CLAUDE_CONFIG_DIR === D2,
-      process.env.CLAUDE_CONFIG_DIR);
+    const { binder } = ext.activate(ctx);
+    const activationAccount = process.env.CLAUDE_CONFIG_DIR;
     check('C-1 terminals get it too', ctx.ops.some((o) => o[0] === 'replace' && o[2] === D2), ctx.ops);
     check('C-1 ...not persisted across restarts', ctx.environmentVariableCollection.persistent === false);
     check('C-1 CC_WINDOW_FOLDER names the window\'s folder', process.env.CC_WINDOW_FOLDER === rec.folders[0]);
@@ -85,6 +96,11 @@ const scenarios = {
     const data = fs.existsSync(wf) ? JSON.parse(fs.readFileSync(wf, 'utf8')) : {};
     check('C-1 the window is recorded for cc status', data.account === 'acme' && data.folders[0] === rec.folders[0], data);
     check('C-1 no notification for an ordinary bind', msgs().length === 0, rec.messages);
+    const rebound = await binder.detectAsync();
+    check('C-1 recorded Python binds the pinned account without importing project modules',
+      controls && activationAccount === D2 && process.env.CLAUDE_CONFIG_DIR === D2
+        && rebound.account === 'acme' && !fs.existsSync(marker),
+      { activationAccount, account: process.env.CLAUDE_CONFIG_DIR, rebound, imported: fs.existsSync(marker) });
     ext.deactivate();
     check('C-10 deactivate removes the window file', !fs.existsSync(wf));
   },

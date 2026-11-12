@@ -1,5 +1,6 @@
-#!/usr/bin/env python3
-"""Config, state and rate-limit detection for the `cc` account switcher.
+#!/bin/sh
+":" 'Config, state and rate-limit detection for the cc account switcher.'; "exec" "python3" "-I" "$0" "$@"
+__doc__ = """Config, state and rate-limit detection for the `cc` account switcher.
 
 Claude Code writes one JSON object per line into
   <config-dir>/projects/<slugified-cwd>/<session-id>.jsonl

@@ -123,7 +123,7 @@ if [ "${1:-}" = "auth" ]; then
   [ -n "${STUB_NO_AUTH:-}" ] && { echo "error: unknown command 'auth'" >&2; exit 1; }
   [ "${2:-}" = "login" ] || exit 0
 fi
-slug=$(python3 - "$PWD" <<'PY'
+slug=$(python3 -I - "$PWD" <<'PY'
 # Claude Code's project slug: each non-alphanumeric UTF-16 unit -> '-', and past 200
 # chars the first 200 + '-' + base36(|int32 hash of the path|). Kept apart from
 # cc-detect on purpose, so the two can disagree.

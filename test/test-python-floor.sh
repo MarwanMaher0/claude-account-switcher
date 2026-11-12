@@ -7,31 +7,38 @@
 
 echo "Python floor — 3.7 or newer"
 
-# A python3 that reports and behaves as 3.6.9: sitecustomize pins sys.version_info
-# before any script body runs; --version is answered by the stub itself, because the
-# real binary answers that before site loads. PY_OLD_REAL must be the interpreter
-# that was on PATH *before* the stub was put first.
 make_old_python() {   # make_old_python <dir>
     local dir="$1"
     mkdir -p "$dir"
     PY_OLD_REAL="$(command -v python3)"
     export PY_OLD_REAL
-    cat > "$dir/sitecustomize.py" <<'PY'
+    cat > "$dir/python3" <<'STUB'
+#!/usr/bin/env bash
+while [ "${1:-}" = "-I" ]; do shift; done
+case "${1:-}" in
+    --version|-V) echo "Python 3.6.9"; exit 0 ;;
+esac
+exec "${PY_OLD_REAL:?}" -I -c '
 import os
+import runpy
 import sys
 sys.version_info = (3, 6, 9, "final", 0)
 log = os.environ.get("PY_OLD_LOG")
 if log:
     with open(log, "a") as f:
         f.write("py\n")
-PY
-    cat > "$dir/python3" <<'STUB'
-#!/usr/bin/env bash
-case "${1:-}" in
-    --version|-V) echo "Python 3.6.9"; exit 0 ;;
-esac
-export PYTHONPATH="$(dirname "$0")${PYTHONPATH:+:$PYTHONPATH}"
-exec "${PY_OLD_REAL:?}" "$@"
+args = sys.argv[1:]
+if args[0] == "-c":
+    sys.argv = ["-c"] + args[2:]
+    exec(compile(args[1], "<string>", "exec"), {"__name__": "__main__"})
+elif args[0] == "-":
+    sys.argv = args
+    exec(compile(sys.stdin.read(), "<stdin>", "exec"),
+         {"__name__": "__main__", "__file__": "<stdin>"})
+else:
+    sys.argv = args
+    runpy.run_path(args[0], run_name="__main__")
+' "$@"
 STUB
     chmod 755 "$dir/python3"
 }

@@ -78,6 +78,13 @@ and runs the hooks against BSD-style stand-ins; CI
 also runs the whole suite on macOS under `/bin/bash`. To try bash 3.2 locally, put it first on
 `PATH` and run `bash test/run-all.sh`.
 
+`cc-detect` and `cc-vscode` are Python files with a two-line POSIX-shell bootstrap.
+Executable invocation starts `python3 -I` before project or user-site code can load,
+without relying on `env -S`. The line-two ownership markers must stay in place for
+uninstall; `__doc__` retains the help text. Lint and portability checks inspect the
+shell bootstrap separately from the Python body. Callers using Python directly must
+also pass `-I`; importing the file cannot retroactively isolate interpreter startup.
+
 Python must run on 3.7, the floor CI tests — chosen because those are the first versions with
 `capture_output`/`text` and `fromisoformat`, and because it sits below every stock interpreter
 (macOS Command Line Tools ships 3.9.6, Ubuntu 22.04 LTS 3.10, Ubuntu 24.04 LTS 3.12): no walrus

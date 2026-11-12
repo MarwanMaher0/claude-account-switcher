@@ -25,7 +25,7 @@ DETECT="${CLAUDE_PLUGIN_ROOT:-}/bin/cc-detect"
 
 # session_id and transcript_path, split on the unit separator: a tab is IFS
 # whitespace, which would swallow an empty first field.
-IFS=$'\037' read -r session transcript < <(python3 -c '
+IFS=$'\037' read -r session transcript < <(python3 -I -c '
 import json, sys
 try:
     d = json.load(sys.stdin)

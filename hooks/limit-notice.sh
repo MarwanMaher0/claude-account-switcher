@@ -40,7 +40,7 @@ tilde() {
     esac
 }
 
-IFS=$'\037' read -r session transcript cwd first < <(python3 -c '
+IFS=$'\037' read -r session transcript cwd first < <(python3 -I -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -113,7 +113,7 @@ if pin="$("$DETECT" pin-of "$cwd" 2>/dev/null)"; then
         *)
             msg="$hit $(tilde "$folder") is pinned to '$id' with nothing else allowed, so wait for the reset." ;;
     esac
-    python3 -c 'import json, sys; print(json.dumps({"decision": "block", "reason": sys.argv[1]}))' "$msg"
+    python3 -I -c 'import json, sys; print(json.dumps({"decision": "block", "reason": sys.argv[1]}))' "$msg"
     exit 0
 fi
 
@@ -132,5 +132,5 @@ else
     msg="$hit Exit and run \`cc\` to continue on '$next'."
 fi
 
-python3 -c 'import json, sys; print(json.dumps({"decision": "block", "reason": sys.argv[1]}))' "$msg"
+python3 -I -c 'import json, sys; print(json.dumps({"decision": "block", "reason": sys.argv[1]}))' "$msg"
 exit 0

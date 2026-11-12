@@ -23,6 +23,7 @@ pass() { printf '%s✓%s %s\n' "$_green" "$_rst" "$1"; }
 scripts=()
 for f in bin/* hooks/* test/* install.sh uninstall.sh; do
     [ -f "$f" ] || continue
+    case "$f" in bin/cc-detect|bin/cc-vscode) scripts+=("$f"); continue ;; esac
     case "$(head -1 "$f" 2>/dev/null)" in
         '#!'*/bash*|'#!'*' bash'*|'#!'*/sh|'#!'*' sh') scripts+=("$f") ;;
     esac
@@ -34,16 +35,32 @@ fi
 echo "Linting ${#scripts[@]} shell scripts"
 
 # ---- syntax, with the bash on PATH (macOS CI runs this again with /bin/bash 3.2) ----
+check_shell() {
+    local f="$1"
+    shift
+    case "$f" in
+        bin/cc-detect|bin/cc-vscode) head -n 2 "$f" | "$@" - ;;
+        *) "$@" "$f" ;;
+    esac
+}
+
 bad=""
 for f in "${scripts[@]}"; do
-    bash -n "$f" 2>/dev/null || bad="$bad $f"
+    check_shell "$f" bash -n 2>/dev/null || bad="$bad $f"
 done
 if [ -z "$bad" ]; then pass "bash -n: every script parses under bash ${BASH_VERSION}"
-else fail "bash -n: syntax errors in:$bad"; for f in $bad; do bash -n "$f"; done; fi
+else fail "bash -n: syntax errors in:$bad"; for f in $bad; do check_shell "$f" bash -n; done; fi
+for f in bin/cc-detect bin/cc-vscode; do
+    if check_shell "$f" sh -n; then pass "$f: POSIX shell bootstrap parses"
+    else fail "$f: POSIX shell bootstrap syntax error"; fi
+done
 
 # ---- every disable says why ----------------------------------------------------
-bare="$(grep -nE '^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]+disable=' "${scripts[@]}" \
-        | grep -vE 'disable=[A-Z0-9,]+[[:space:]]+#[[:space:]]*[^[:space:]]' || true)"
+bare="$(for f in "${scripts[@]}"; do
+    check_shell "$f" grep -nE '^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]+disable=' \
+        | grep -vE 'disable=[A-Z0-9,]+[[:space:]]+#[[:space:]]*[^[:space:]]' \
+        | while IFS= read -r line; do printf '%s:%s\n' "$f" "$line"; done
+done || true)"
 if [ -z "$bare" ]; then pass "every '# shellcheck disable=' carries a reason"
 else fail "a shellcheck disable without a reason ('# shellcheck disable=SCxxxx  # why'):"; printf '    %s\n' "$bare"; fi
 if grep -qE '^[[:space:]]*disable=' .shellcheckrc 2>/dev/null; then
@@ -56,7 +73,14 @@ if ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
     exit 2
 fi
 version="$("$SHELLCHECK" --version 2>/dev/null | awk '/^version:/ { print $2 }')"
-if "$SHELLCHECK" --external-sources --severity=style "${scripts[@]}"; then
+sc_rc=0
+for f in "${scripts[@]}"; do
+    if ! check_shell "$f" "$SHELLCHECK" --external-sources --severity=style; then
+        fail "$f: shellcheck findings (above)"
+        sc_rc=1
+    fi
+done
+if [ "$sc_rc" -eq 0 ]; then
     pass "shellcheck ${version:-?}: no findings at style severity"
 else
     fail "shellcheck ${version:-?} reported findings (above)"

@@ -18,13 +18,18 @@ account is `~/.claude.json`.
 
 ## `cc` says "command not found"
 
-`~/.local/bin` is probably not on your `PATH`:
+`~/.local/bin` is probably not on your `PATH`. If `cc` starts the C compiler instead, the
+install directory comes too late on `PATH`. Prepend it in either case:
 
 ```bash
-export PATH="$PATH:$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
+command -v cc
 ```
 
-Add it to your shell profile to make it stick.
+The last command should show `$HOME/.local/bin/cc` with your home directory expanded. If you
+used `CC_INSTALL_DIR`, use that directory instead. Add the export to your shell profile to
+make it stick. Builds that call `cc` will now find the switcher too; use your compiler's own
+name or path for those builds.
 
 ## `claude` itself will not start
 
@@ -165,7 +170,7 @@ events) are both guarded and tested, so a third would be a real bug worth fixing
 ## It behaves differently on macOS than on Linux
 
 cc-switch runs on the bash 3.2 and BSD tools that macOS ships, and CI tests both systems. A few
-things changed in the release after 2.3.1 because they did not match before:
+things changed in 2.4.0 because they did not match before:
 
 - **`CC_WATCH_GRACE=0`** now stops a limited session at once on macOS, as on Linux; before, it
   waited 2 s. A value that is not a whole number uses the default, 8 s.

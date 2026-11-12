@@ -10,7 +10,7 @@
     {
       "name": "cc-switch",
       "displayName": "Claude Account Switcher",
-      "version": "2.3.1",
+      "version": "2.4.0",
       "description": "Claude Code: switch to your next Claude account when one hits its usage limit, keeping the conversation. Run /cc-setup after installing.",
       "source": "./",
       "category": "productivity",

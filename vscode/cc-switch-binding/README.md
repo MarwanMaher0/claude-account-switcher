@@ -63,7 +63,7 @@ npx ovsx@1.1 --help
 npx ovsx@1.1 publish --help
 ```
 
-VSCE produces `cc-switch-binding-2.3.1.vsix`, usable by both Marketplace and Open VSX. The Open VSX CLI uses VSCE internally; it has no standalone `package` command or publish dry-run. The help commands validate CLI availability without uploading anything. Do not run `ovsx publish` just to test packaging.
+VSCE produces `cc-switch-binding-2.4.0.vsix`, usable by both Marketplace and Open VSX. The Open VSX CLI uses VSCE internally; it has no standalone `package` command or publish dry-run. The help commands validate CLI availability without uploading anything. Do not run `ovsx publish` just to test packaging.
 
 Registry packages use the `.vscodeignore` allowlist to ship only the runtime entry point, manifest, PNG icon, README, changelog, and license; SVG source and generated VSIX files are excluded. The CLI's offline local installer instead builds a minimal runtime-only VSIX and omits the icon reference because that asset is not installed with the CLI. The icon is a simple original SVG in `icon.svg`, rendered to a 128×128 PNG. To regenerate with ImageMagick:
 

@@ -189,7 +189,7 @@ class Binder {
   command(tool, args) {
     const b = this.binding();
     const py = b.python;
-    if (py && fs.existsSync(py)) return [py, [tool, ...args]];
+    if (py && fs.existsSync(py)) return [py, ['-I', tool, ...args]];
     return [tool, args];
   }
 

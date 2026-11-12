@@ -335,10 +335,25 @@ RULES = [
     ("read -t with a fraction (bash 3.2 takes whole seconds)", re.compile(r"\bread\b[^|;]*\s-t\s*\d*\.\d")),
 ]
 
+POLYGLOTS = {
+    "bin/cc-detect": "Config, state and rate-limit detection for the cc account switcher.",
+    "bin/cc-vscode": "Run Claude in each VS Code window on the account its folder is pinned to.",
+}
+ROOT = pathlib.Path(sys.argv.pop(1))
+
+
 def scan(paths):
     hits = []
     for p in paths:
-        for n, line in enumerate(pathlib.Path(p).read_text(encoding="utf-8").splitlines(), 1):
+        path = pathlib.Path(p)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        marker = next((text for name, text in POLYGLOTS.items() if path == ROOT / name), None)
+        if marker is not None:
+            expected = ["#!/bin/sh", '":" %r; "exec" "python3" "-I" "$0" "$@"' % marker]
+            if lines[:2] != expected or not lines[2:3] or not lines[2].startswith("__doc__ = \"\"\""):
+                hits.append("%s:1: invalid isolated shell/Python bootstrap" % p)
+            lines = lines[:2]
+        for n, line in enumerate(lines, 1):
             if line.lstrip().startswith("#"):
                 continue
             for why, rx in RULES:
@@ -358,9 +373,10 @@ scripts=()
 for f in "$REPO"/bin/* "$REPO"/hooks/*.sh "$REPO"/install.sh "$REPO"/uninstall.sh "$REPO"/test/*.sh; do
     [ -f "$f" ] || continue
     [ "$f" = "$REPO/test/test-portability.sh" ] && continue
+    case "$f" in "$REPO/bin/cc-detect"|"$REPO/bin/cc-vscode") scripts+=("$f"); continue ;; esac
     case "$(head -1 "$f")" in '#!'*sh*) scripts+=("$f") ;; esac
 done
-hits="$(python3 -c "$SCAN_PY" "${scripts[@]}")"
+hits="$(python3 -c "$SCAN_PY" "$REPO" "${scripts[@]}")"
 assert_eq "$(printf '%s' "$hits" | sed "s|$REPO/||")" "" \
     "PT-6 no GNU-only or bash 4+ construct in ${#scripts[@]} shell scripts"
 
@@ -403,7 +419,7 @@ shopt -s globstar
 echo {1..9..2}
 read -r -t 0.5 ans
 EOF
-assert_eq "$(python3 -c "$SCAN_PY" --rules-hit "$planted")" "$(python3 -c "$SCAN_PY" --count-rules)" \
+assert_eq "$(python3 -c "$SCAN_PY" "$REPO" --rules-hit "$planted")" "$(python3 -c "$SCAN_PY" "$REPO" --count-rules)" \
     "PT-6 self-test: every rule catches its planted construct"
 cat > "$planted" <<'EOF'
 # sed -i and readlink -f in a comment are fine
@@ -414,12 +430,60 @@ sed -E 's/a+/b/' f
 sed -n 's/^#   \(cc .*\)/  \1/p' f
 while [ "$n" -lt "$tries" ]; do n=$((n + 1)); done
 EOF
-assert_eq "$(python3 -c "$SCAN_PY" "$planted")" "" "PT-6 self-test: the portable forms pass"
+assert_eq "$(python3 -c "$SCAN_PY" "$REPO" "$planted")" "" "PT-6 self-test: the portable forms pass"
 cleanup_home
 
 # ---- PT-7 : the suites run under bash 3.2 -----------------------------------------
 # macOS ships bash 3.2. CI re-runs every suite with /bin/bash there; this records which
 # bash ran this one, so a log shows it.
-ok "PT-7 running under bash ${BASH_VERSION}"
+new_home >/dev/null
+entrypoints_rc=0
+for helper in cc-detect cc-vscode; do
+    if python3 -I - "$BIN/$helper" <<'PY'
+import ast
+import importlib.machinery
+import importlib.util
+import pathlib
+import runpy
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+path = pathlib.Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+compile(source, str(path), "exec")
+tree = ast.parse(source)
+assignment = next(node for node in tree.body if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == "__doc__"
+                          for target in node.targets))
+expected = ast.literal_eval(assignment.value)
+assert expected.replace("`", "").startswith(source.splitlines()[1].split("'", 2)[1])
+assert "Subcommands\n" in expected
+loader = importlib.machinery.SourceFileLoader("portability_helper", str(path))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+assert module.__doc__ == expected
+assert runpy.run_path(str(path))["__doc__"] == expected
+args = [] if path.name == "cc-detect" else ["--help"]
+for prefix in ([], ["/bin/sh"], ["bash"], [sys.executable, "-I"]):
+    result = subprocess.run(prefix + [str(path)] + args, capture_output=True,
+                            text=True, timeout=10)
+    assert result.returncode == 2, (prefix, result.returncode, result.stderr)
+    assert result.stdout == expected.strip() + "\n", (prefix, result.stdout)
+    assert not result.stderr, (prefix, result.stderr)
+PY
+    then :; else entrypoints_rc=1; fi
+    if bash -c "$(sed -n '/^is_ours()/,/^}/p; /^marker_for()/,/^}/p' "$REPO/uninstall.sh")
+        is_ours \"\$1\" \"\$2\" \"\$(marker_for \"\$3\")\"" \
+        _ "$BIN/$helper" "$SANDBOX/missing-original" "$helper"; then :
+    else
+        printf '%s: uninstall ownership marker failed\n' "$helper"
+        entrypoints_rc=1
+    fi
+done
+cleanup_home
+assert_eq "$entrypoints_rc" "0" \
+    "PT-7 shell/Python entry points preserve imports, help and ownership under bash ${BASH_VERSION}"
 
 summary

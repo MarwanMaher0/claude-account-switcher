@@ -152,16 +152,6 @@ rm -rf "$GATE_DIR"
 assert_contains "$(cat "$REPO/bin/cc-detect")" "0o600" "S-5 config and state written mode 600"
 assert_contains "$(cat "$REPO/bin/cc")" "chmod 700" "S-5 account dirs created mode 700"
 
-# ---- S-1 runtime proof ------------------------------------------------------
-# Static greps can be fooled; run an add and prove the token never lands.
-new_home >/dev/null; stub_claude
-"$BIN/cc-detect" accounts >/dev/null
-export STUB_MODE=login
-"$BIN/cc" add proof >/dev/null 2>&1
-found="$(grep -rl "SHOULD-NEVER-BE-COPIED" "$HOME/.claude-proof" 2>/dev/null || true)"
-assert_eq "$found" "" "S-1 runtime: source credential material never reaches a new account"
-cleanup_home
-
 # ---- Copilot is never a backend (SPEC-03 AC-9) ------------------------------
 copilot="$(grep -ril "copilot" "$REPO/bin" 2>/dev/null || true)"
 assert_eq "$copilot" "" "AC-9 Copilot is never wired in as a Claude Code backend"
@@ -185,5 +175,80 @@ for f in files:
 PY
 )"
 assert_eq "$glued" "" "P-1 no \$variable is directly followed by a non-ASCII character"
+
+new_home >/dev/null; stub_claude
+if out="$(python3 -I - "$BIN" "$REPO/hooks" "$SANDBOX" <<'PY'
+import json, os, pathlib, re, subprocess, sys
+from datetime import datetime, timezone
+
+bin_dir, hooks, home = map(pathlib.Path, sys.argv[1:])
+project = home / "project"
+project.mkdir()
+marker = home / "imported-project-module"
+for name in ("uuid", "json"):
+    (project / (name + ".py")).write_text(
+        "open(%r, 'w').write(%r)\nraise RuntimeError('project module imported')\n"
+        % (str(marker), name), encoding="utf-8")
+    control = subprocess.run([sys.executable, "-c", "import " + name],
+                             cwd=str(project), capture_output=True, text=True)
+    assert control.returncode != 0 and marker.read_text() == name, name
+    marker.unlink()
+
+for path in [bin_dir / "cc"] + sorted(hooks.glob("*.sh")):
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.lstrip().startswith("#") and re.search(r"\bpython3\s+-", line):
+            assert re.search(r"\bpython3\s+-I\s+-(?:c\b|\s)", line), (str(path), line)
+assert "sys.path.insert(" not in (bin_dir / "cc").read_text(encoding="utf-8")
+
+env = dict(os.environ, CC_HOOK_TRIES="1", CLAUDE_PLUGIN_ROOT=str(hooks.parent))
+env.pop("CLAUDE_CONFIG_DIR", None)
+env["PYTHONPATH"] = str(project)
+(project / "sitecustomize.py").write_text(
+    "open(%r, 'w').write('sitecustomize')\n" % str(marker), encoding="utf-8")
+control = subprocess.run([sys.executable, "-c", "pass"], cwd=str(project), env=env,
+                         capture_output=True, text=True)
+assert control.returncode == 0 and marker.read_text() == "sitecustomize"
+marker.unlink()
+
+def run(args, data="", mode="ok"):
+    result = subprocess.run(args, cwd=str(project), env=dict(env, STUB_MODE=mode),
+                            input=data, capture_output=True, text=True, timeout=20)
+    assert not marker.exists(), (args, marker.read_text())
+    assert result.returncode == 0, (args, result.stdout, result.stderr)
+    return result.stdout
+
+run([str(bin_dir / "cc-detect"), "accounts"])
+run([str(bin_dir / "cc-vscode"), "status"])
+run([str(bin_dir / "cc"), "add", "isolated"], mode="login")
+for path in (home / ".claude-isolated").rglob("*"):
+    if path.is_file():
+        assert b"SHOULD-NEVER-BE-COPIED" not in path.read_bytes(), str(path)
+run([str(bin_dir / "cc"), "status"])
+status = json.loads(run([str(bin_dir / "cc"), "status", "--json"]))
+assert status["accounts"], status
+run([str(bin_dir / "cc"), "cloud", "set", "isolated"])
+run([str(bin_dir / "cc"), "--manual", "--no-auto-continue"])
+transcript = project / "session.jsonl"
+transcript.write_text('{"type":"user","uuid":"import-test"}\n', encoding="utf-8")
+payload = json.dumps({"session_id": "import-test", "transcript_path": str(transcript),
+                      "cwd": str(project), "source": "startup", "prompt": "hello"})
+for hook in sorted(hooks.glob("*.sh")):
+    run(["bash", str(hook)], data=payload)
+now = datetime.now(timezone.utc)
+with transcript.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"type": "assistant", "uuid": "import-limit",
+                         "isApiErrorMessage": True, "apiErrorStatus": 429, "error": "rate_limit",
+                         "timestamp": now.isoformat().replace("+00:00", "Z"),
+                         "quotaLimits": {"status": "rejected", "rateLimitType": "five_hour",
+                                         "resetsAt": int(now.timestamp()) + 3600}}) + "\n")
+notice = json.loads(run(["bash", str(hooks / "limit-notice.sh")], data=payload))
+assert notice["decision"] == "block" and "5-hour limit" in notice["reason"], notice
+PY
+)"; then
+    ok "S-1/S-6 runtime: no copied credentials or project/startup imports in commands and hooks"
+else
+    no "S-1/S-6 runtime: no copied credentials or project/startup imports in commands and hooks" "$out"
+fi
+cleanup_home
 
 summary

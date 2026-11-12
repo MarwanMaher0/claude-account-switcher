@@ -38,7 +38,7 @@ id="${acct%%$'\t'*}"
 session=""
 source=""
 if [ ! -t 0 ]; then
-    IFS=$'\037' read -r session source < <(python3 -c '
+    IFS=$'\037' read -r session source < <(python3 -I -c '
 import json, sys
 try:
     d = json.load(sys.stdin)

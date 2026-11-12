@@ -95,7 +95,8 @@ assert_eq "$writes" "" "XC-5 ...and in cc-vscode only the migration does"
 
 # ---- XC-6 : the installed extension, when there is one ------------------------------------
 if [ -z "$installed" ]; then
-    echo "  - no Claude Code extension installed here: only the snapshot was checked"
+    out="$(python3 "$CONTRACT" check "$FIXTURE")"; rc=$?
+    assert_eq "$rc" "0" "XC-6 no installed extension: the committed snapshot keeps the contract"
 else
     python3 "$CONTRACT" facts "$installed" > "$SANDBOX/installed.json"
     out="$(python3 "$CONTRACT" check "$SANDBOX/installed.json")"; rc=$?

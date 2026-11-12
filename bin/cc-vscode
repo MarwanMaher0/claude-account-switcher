@@ -1,5 +1,6 @@
-#!/usr/bin/env python3
-"""Run Claude in each VS Code window on the account its folder is pinned to.
+#!/bin/sh
+":" 'Run Claude in each VS Code window on the account its folder is pinned to.'; "exec" "python3" "-I" "$0" "$@"
+__doc__ = """Run Claude in each VS Code window on the account its folder is pinned to.
 
 VS Code reads claudeCode.environmentVariables and claudeCode.claudeProcessWrapper
 from USER settings only: the Claude extension declares both machine-scoped, and VS

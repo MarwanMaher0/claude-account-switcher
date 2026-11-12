@@ -63,7 +63,7 @@ die()  { printf '%s[cc]%s %s\n' "$c_yel" "$c_rst" "$*" >&2; exit 1; }
 
 # Python 3.7 floor: capture_output/text= and datetime.fromisoformat need it. Stop
 # with one line before any traceback. Hooks never reach this path (they stay silent).
-pyver="$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null)" || pyver=""
+pyver="$(python3 -I -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null)" || pyver=""
 case "$pyver" in
     3.[0-6]|3.[0-6].*|2.*|[01].*) die "Python 3.7 or newer is required (found $pyver)" ;;
     "") die "Python 3.7 or newer is required (python3 not found)" ;;
@@ -77,7 +77,7 @@ is_default() { "$DETECT" is-default "$1"; }
 # Any <dir>/.claude.json there is debris from launching it with CLAUDE_CONFIG_DIR
 # set — the mistake this launcher exists to avoid.
 acct_email() {
-    python3 - "$1" "$2" <<'PY' 2>/dev/null || echo "not logged in"
+    python3 -I - "$1" "$2" <<'PY' 2>/dev/null || echo "not logged in"
 import json, os, sys
 d, is_default = os.path.expanduser(sys.argv[1]), sys.argv[2] == "1"
 path = os.path.expanduser("~/.claude.json") if is_default else os.path.join(d, ".claude.json")
@@ -110,7 +110,7 @@ run_acct() {
     fi
 }
 
-new_session() { python3 -c 'import uuid; print(uuid.uuid4())'; }
+new_session() { python3 -I -c 'import uuid; print(uuid.uuid4())'; }
 
 # GNU `date -d @epoch` and BSD/macOS `date -r epoch` do the same job with
 # different flags. Try both rather than assuming GNU coreutils. A reset more than
@@ -467,9 +467,8 @@ cmd_add() {
     # did not exist yet.
     "$DETECT" accounts >/dev/null || exit 3
 
-    python3 - "$id" "$dir" "$adopt" <<'PY' || exit 1
+    python3 -I - "$id" "$dir" "$adopt" <<'PY' || exit 1
 import json, os, re, sys
-sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 HOME = os.path.expanduser("~")
 CONFIG = os.path.join(HOME, ".claude-switch", "config.json")
 aid, adir, adopt = sys.argv[1], os.path.abspath(os.path.expanduser(sys.argv[2])), sys.argv[3] == "1"
@@ -718,7 +717,7 @@ cmd_clear() {
 # account's cloud session credit first, so they go to one fixed account — the one
 # holding the credit — even while its local 5-hour or weekly window is exhausted.
 cloud_account() {
-    python3 - <<'PY' 2>/dev/null
+    python3 -I - <<'PY' 2>/dev/null
 import json, os
 cfg = json.load(open(os.path.expanduser("~/.claude-switch/config.json")))
 print((cfg.get("cloud") or {}).get("account") or "")

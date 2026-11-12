@@ -35,9 +35,15 @@ echo "  installed $SHARE/vscode/cc-switch-binding"
 case ":$PATH:" in
     *":$DEST:"*) ;;
     *) echo
-       echo "  NOTE: $DEST is not on your PATH."
-       echo "  Add this to your shell profile:  export PATH=\"\$PATH:$DEST\"" ;;
+       echo "  NOTE: $DEST is not on your PATH." ;;
 esac
+
+resolved_cc="$(command -v cc || true)"
+if ! [ "$resolved_cc" -ef "$DEST/cc" ]; then
+    echo
+    echo "  WARNING: \`command -v cc\` resolves to ${resolved_cc:-nothing}, not $DEST/cc."
+    echo "  Add this to your shell profile:  export PATH=\"$DEST:\$PATH\""
+fi
 
 if [ -n "$other_cc" ]; then
     echo

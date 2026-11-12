@@ -71,8 +71,9 @@ This copies five commands (`cc`, `cc-detect`, `cc-watch`, `cc-vscode`, `cc-claud
 `~/.local/bin`, and the VS Code companion extension's two files into `~/.local/share/cc-switch`.
 Nothing else on your machine changes.
 
-If it prints `NOTE: ... is not on your PATH`, run the `export` line it shows, add that line to
-your shell profile, and open a new terminal.
+If it prints `NOTE: ... is not on your PATH` or warns that `command -v cc` resolves to another
+command, run the `export` line it shows, add that line to your shell profile, and open a new
+terminal. The install directory must come before any other `cc` on `PATH`.
 
 > [!NOTE]
 > `cc` is also the usual name of the C compiler, and `install.sh` warns you if one exists. While

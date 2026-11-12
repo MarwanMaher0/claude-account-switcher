@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased (after 2.3.1)
+## 2.4.0 — 2026-11-12
+
+### Security — isolate Python imports from project files
+- Python helpers use isolated mode (`python3 -I`) and no longer insert the current
+  folder into `sys.path`. A project's `uuid.py` or `json.py` cannot run as part of
+  launching `cc`, its hooks or the VS Code companion's recorded Python interpreter.
+  The executable helpers use a portable shell bootstrap, without requiring `env -S`.
+  Runtime coverage combines the credential-copy guard with planted project modules
+  and `PYTHONPATH` startup injection.
+
+### Fixed — consistent CI counts and command lookup
+- XC-6 always counts a contract check, using the committed snapshot when no Claude
+  Code extension is installed.
+- Installation and troubleshooting instructions prepend the install directory to
+  `PATH`. The installer warns when `command -v cc` still resolves to another command.
 
 ### Added — a grand total line at the end of `test/run-all.sh`
 - After the existing pass/fail verdict the runner now prints one plain line:
@@ -219,7 +233,7 @@
   `cc-watch`, `cc-vscode`, `cc-claude-wrapper`) — and the README tests badge shows the real
   check count.
 
-## Unreleased
+## 2.3.0 — 2026-10-05
 
 ### Fixed — hooks could start `claude` and outlive their timeout
 - The SessionStart and UserPromptSubmit hooks called `cc-detect next-free` (and

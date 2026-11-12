@@ -8,6 +8,12 @@ echo "Installer and uninstaller (install.sh, uninstall.sh)"
 COMMANDS="cc cc-detect cc-watch cc-vscode cc-claude-wrapper"
 EXT_FILES="package.json extension.js"
 
+has_path_warning() {
+    local output="$1" dest="$2" resolved="$3"
+    [[ "$output" == *"WARNING: \`command -v cc\` resolves to $resolved, not $dest/cc."* &&
+       "$output" == *"Add this to your shell profile:  export PATH=\"$dest:\$PATH\""* ]]
+}
+
 # ---- IN-1 : default install and idempotent reinstall -------------------------------
 new_home >/dev/null
 dest="$HOME/.local/bin"
@@ -34,15 +40,39 @@ for f in $EXT_FILES; do
     it "IN-1 installed $f matches vscode/cc-switch-binding/$f byte for byte"
     assert_ok cmp -s "$ext_dir/$f" "$REPO/vscode/cc-switch-binding/$f"
 done
-assert_contains "$out" "not on your PATH" "IN-1 notes when install dir is not on PATH"
-assert_contains "$out" "WARNING: $cc_dir/cc already exists" "IN-1 warns when another cc is on PATH"
+it "IN-1 missing install dir warns about resolution and recommends prepending PATH"
+if [[ "$out" == *"not on your PATH"* ]] && has_path_warning "$out" "$dest" "$cc_dir/cc"; then ok
+else no "$CURRENT" "$out"; fi
+out_late="$(PATH="$cc_dir:/usr/bin:/bin:$dest" bash "$REPO/install.sh" 2>&1)"; rc_late=$?
+it "IN-1 preserves C compiler warnings and warns when install dir is late on PATH"
+if [ "$rc_late" -eq 0 ] &&
+   [[ "$out" == *"WARNING: $cc_dir/cc already exists"* &&
+      "$out_late" == *"WARNING: $cc_dir/cc already exists"* &&
+      "$out_late" != *"not on your PATH"* ]] &&
+   has_path_warning "$out_late" "$dest" "$cc_dir/cc"; then ok
+else no "$CURRENT" "$out
+$out_late"; fi
 assert_no_file "$HOME/.claude-switch/config.json" "IN-1 install.sh does not create ~/.claude-switch"
 
 # Re-running install.sh with $dest on PATH is idempotent and never mistakes $dest/cc for a C compiler.
-rm -f "$cc_dir/cc"
 out2="$(PATH="$dest:$cc_dir:/usr/bin:/bin" bash "$REPO/install.sh" 2>&1)"; rc2=$?
 assert_eq "$rc2" "0" "IN-1 running install.sh a second time succeeds"
-assert_not_contains "$out2" "not on your PATH" "IN-1 no PATH note when install dir is on PATH"
+alias_dir="$SANDBOX/bin alias"
+ln -s "$dest" "$alias_dir"
+out_alias="$(PATH="$alias_dir/:$cc_dir:/usr/bin:/bin" bash "$REPO/install.sh" 2>&1)"; rc_alias=$?
+resolved_alias="$(PATH="$alias_dir/:$cc_dir:/usr/bin:/bin" command -v cc)"
+it "IN-1 correct precedence, including a symlinked PATH entry, needs no resolution advice"
+if [[ "$out2" != *"not on your PATH"* &&
+      "$out2" != *"WARNING: \`command -v cc\`"* &&
+      "$out2" != *"Add this to your shell profile"* &&
+      "$out2" == *"WARNING: $cc_dir/cc already exists"* &&
+      "$out_alias" != *"WARNING: \`command -v cc\`"* &&
+      "$out_alias" != *"Add this to your shell profile"* ]] &&
+   [ "$rc_alias" -eq 0 ] && [ "$resolved_alias" != "$dest/cc" ] &&
+   [ "$resolved_alias" -ef "$dest/cc" ] &&
+   [ "$(PATH="$dest:$cc_dir:/usr/bin:/bin" command -v cc)" = "$dest/cc" ]; then ok
+else no "$CURRENT" "$out2
+$out_alias"; fi
 assert_not_contains "$out2" "WARNING: $dest/cc" "IN-1 installed cc in DEST does not trigger the C compiler warning"
 for f in $COMMANDS; do
     assert_eq "$(file_mode "$dest/$f")" "755" "IN-1 reinstall keeps $f mode 755"
@@ -51,12 +81,26 @@ cleanup_home
 
 # ---- IN-2 : custom CC_INSTALL_DIR and CC_SHARE_DIR + clean uninstall ---------------
 new_home >/dev/null
-custom_bin="$SANDBOX/opt/bin"
+custom_bin="$SANDBOX/opt/custom bin"
 custom_share="$SANDBOX/opt/share/cc-switch"
 custom_ext="$custom_share/vscode/cc-switch-binding"
 
-out="$(CC_INSTALL_DIR="$custom_bin" CC_SHARE_DIR="$custom_share" bash "$REPO/install.sh" 2>&1)"; rc=$?
-assert_eq "$rc" "0" "IN-2 install.sh honours CC_INSTALL_DIR and CC_SHARE_DIR"
+out="$(PATH="$BIN:/usr/bin:/bin" CC_INSTALL_DIR="$custom_bin" CC_SHARE_DIR="$custom_share" bash "$REPO/install.sh" 2>&1)"; rc=$?
+out_late="$(PATH="$BIN:/usr/bin:/bin:$custom_bin" CC_INSTALL_DIR="$custom_bin" CC_SHARE_DIR="$custom_share" bash "$REPO/install.sh" 2>&1)"; rc_late=$?
+out_first="$(PATH="$custom_bin:$BIN:/usr/bin:/bin" CC_INSTALL_DIR="$custom_bin" CC_SHARE_DIR="$custom_share" bash "$REPO/install.sh" 2>&1)"; rc_first=$?
+it "IN-2 honours custom dirs and PATH precedence, including spaces in the install dir"
+if [ "$rc" -eq 0 ] && [ "$rc_late" -eq 0 ] && [ "$rc_first" -eq 0 ] &&
+   has_path_warning "$out" "$custom_bin" "$BIN/cc" &&
+   has_path_warning "$out_late" "$custom_bin" "$BIN/cc" &&
+   [[ "$out" == *"not on your PATH"* &&
+      "$out_late" != *"not on your PATH"* &&
+      "$out_first" != *"not on your PATH"* &&
+      "$out_first" != *"WARNING: \`command -v cc\`"* &&
+      "$out_first" != *"Add this to your shell profile"* ]] &&
+   [ "$(PATH="$custom_bin:$BIN:/usr/bin:/bin" command -v cc)" = "$custom_bin/cc" ]; then ok
+else no "$CURRENT" "$out
+$out_late
+$out_first"; fi
 for f in $COMMANDS; do
     assert_file "$custom_bin/$f" "IN-2 installs $f into custom CC_INSTALL_DIR"
 done
