@@ -1463,23 +1463,32 @@ def between_turns(session, transcript):
 
 
 def early_settings(aid, session, cwd, detect_path):
-    """Write the --settings file an early-switch run starts with. The user's own status
-    line, if any, still runs and prints: ours records usage and hands over to it."""
+    """Write the --settings file an early-switch run starts with. The account's own
+    status line, if any, still runs and prints: ours records usage and hands over to it."""
     own = None
     acct = account_by_id(aid)
-    sources = [os.path.join(cwd, ".claude", "settings.local.json"),
-               os.path.join(cwd, ".claude", "settings.json"),
-               os.path.join(expand(acct["dir"]), "settings.json")]
+    sources = [os.path.join(expand(acct["dir"]), "settings.json")]
+    if config_get("earlySwitch.projectStatusLine") is True:
+        sources = [os.path.join(cwd, ".claude", "settings.local.json"),
+                   os.path.join(cwd, ".claude", "settings.json")] + sources
     for src in sources:
         data = _load_json(src, {})
         line = data.get("statusLine") if isinstance(data, dict) else None
-        if isinstance(line, dict) and line.get("command"):
+        if isinstance(line, dict) and isinstance(line.get("command"), str) and line["command"]:
             own = line
             break
     os.makedirs(RUN_DIR, exist_ok=True)
+    os.chmod(RUN_DIR, 0o700)
+    next_path = os.path.join(RUN_DIR, f"{session}.next")
     if own:
-        with open(os.path.join(RUN_DIR, f"{session}.next"), "w") as fh:
+        fd = os.open(next_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
             fh.write(own["command"])
+    else:
+        try:
+            os.unlink(next_path)
+        except OSError:
+            pass
     quoted = "'" + detect_path.replace("'", "'\\''") + "'"
     status = {"type": "command", "command": f"{quoted} statusline {aid} {session}"}
     if own and own.get("padding") is not None:

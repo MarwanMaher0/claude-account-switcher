@@ -66,16 +66,62 @@ if [[ "$out2" != *"not on your PATH"* &&
       "$out2" != *"WARNING: \`command -v cc\`"* &&
       "$out2" != *"Add this to your shell profile"* &&
       "$out2" == *"WARNING: $cc_dir/cc already exists"* &&
+      "$out_alias" != *"not on your PATH"* &&
       "$out_alias" != *"WARNING: \`command -v cc\`"* &&
-      "$out_alias" != *"Add this to your shell profile"* ]] &&
+      "$out_alias" != *"Add this to your shell profile"* &&
+      "$out_alias" == *"WARNING: $cc_dir/cc already exists"* ]] &&
    [ "$rc_alias" -eq 0 ] && [ "$resolved_alias" != "$dest/cc" ] &&
    [ "$resolved_alias" -ef "$dest/cc" ] &&
    [ "$(PATH="$dest:$cc_dir:/usr/bin:/bin" command -v cc)" = "$dest/cc" ]; then ok
 else no "$CURRENT" "$out2
 $out_alias"; fi
 assert_not_contains "$out2" "WARNING: $dest/cc" "IN-1 installed cc in DEST does not trigger the C compiler warning"
+assert_not_contains "$out_alias" "WARNING: $alias_dir" "IN-1 symlinked PATH entry to DEST does not trigger the C compiler warning"
+out_slash="$(PATH="$dest/:$cc_dir:/usr/bin:/bin" bash "$REPO/install.sh" 2>&1)"; rc_slash=$?
+it "IN-1 trailing slash on DEST in PATH is recognised as on PATH without false warnings"
+if [ "$rc_slash" -eq 0 ] &&
+   [[ "$out_slash" != *"not on your PATH"* &&
+      "$out_slash" != *"WARNING: \`command -v cc\`"* &&
+      "$out_slash" == *"WARNING: $cc_dir/cc already exists"* ]]; then ok
+else no "$CURRENT" "$out_slash"; fi
+assert_not_contains "$out_slash" "WARNING: $dest" "IN-1 trailing-slash PATH entry does not mistake DEST/cc for a C compiler"
+out_empty_seg="$(PATH=":/usr/bin:/bin" bash "$REPO/install.sh" 2>&1)"; rc_empty_seg=$?
+assert_eq "$rc_empty_seg" "0" "IN-1 empty PATH segment succeeds cleanly under set -u"
+assert_contains "$out_empty_seg" "not on your PATH" "IN-1 empty PATH segment still warns when DEST is absent"
 for f in $COMMANDS; do
     assert_eq "$(file_mode "$dest/$f")" "755" "IN-1 reinstall keeps $f mode 755"
+done
+cleanup_home
+
+# ---- IN-1b : symlinked HOME and resolved PATH entry (and vice versa) ---------------
+new_home >/dev/null
+real_home="$SANDBOX/real-home"
+link_home="$SANDBOX/link-home"
+mkdir -p "$real_home"
+mv "$SANDBOX/.claude" "$SANDBOX/.claude-2" "$SANDBOX/.claude.json" "$real_home/"
+ln -s "$real_home" "$link_home"
+
+out_sym1="$(HOME="$link_home" PATH="$real_home/.local/bin:/usr/bin:/bin" bash "$REPO/install.sh" 2>&1)"; rc_sym1=$?
+out_sym2="$(HOME="$link_home" PATH="$real_home/.local/bin:/usr/bin:/bin" bash "$REPO/install.sh" 2>&1)"; rc_sym2=$?
+out_sym3="$(HOME="$real_home" PATH="$link_home/.local/bin:/usr/bin:/bin" bash "$REPO/install.sh" 2>&1)"; rc_sym3=$?
+it "IN-1b symlinked HOME matches resolved PATH on first install and reinstall"
+if [ "$rc_sym1" -eq 0 ] && [ "$rc_sym2" -eq 0 ] && [ "$rc_sym3" -eq 0 ] &&
+   [[ "$out_sym1" != *"not on your PATH"* &&
+      "$out_sym1" != *"WARNING: \`command -v cc\`"* &&
+      "$out_sym2" != *"not on your PATH"* &&
+      "$out_sym2" != *"WARNING: \`command -v cc\`"* &&
+      "$out_sym3" != *"not on your PATH"* &&
+      "$out_sym3" != *"WARNING: \`command -v cc\`"* ]]; then ok
+else no "$CURRENT" "$out_sym1
+---
+$out_sym2
+---
+$out_sym3"; fi
+for sym_out in "$out_sym1" "$out_sym2" "$out_sym3"; do
+    assert_not_contains "$sym_out" "WARNING: $real_home/.local/bin/cc" \
+        "IN-1b resolved HOME install dir is never mistaken for a C compiler"
+    assert_not_contains "$sym_out" "WARNING: $link_home/.local/bin/cc" \
+        "IN-1b symlinked HOME install dir is never mistaken for a C compiler"
 done
 cleanup_home
 

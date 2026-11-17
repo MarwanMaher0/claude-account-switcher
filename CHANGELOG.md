@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Security — isolate early-switch status lines from repository settings by default
+- `early-settings` now reads `statusLine` only from the active account's `settings.json`
+  unless `"projectStatusLine": true` is explicitly set under `earlySwitch` in
+  `~/.claude-switch/config.json`, so an untrusted repository's `.claude/settings*.json`
+  cannot supply a command for `cc` to run. `RUN_DIR` is created mode `700`, `<session>.next`
+  is written mode `600` (only when `command` is a non-empty string), and `<session>.next` is
+  removed both when switching to an account without a status line and before each launch
+  attempt in `bin/cc`.
+- `test/test-security.sh` now exercises the pinned-folder `decision: "block"` paths in
+  `hooks/limit-notice.sh` under planted project modules and `PYTHONPATH` startup injection.
+
+### Fixed — `install.sh` checks `PATH` membership by resolved directory (`-ef`)
+- `install.sh` creates the install directory first and compares `PATH` entries against
+  `$DEST` with `-ef` instead of literal string matching, avoiding false `"not on your PATH"`
+  notes and C-compiler warnings when `PATH` holds a symlink, a trailing slash, or a resolved
+  path under a symlinked `HOME` (while guarding empty `PATH` arrays under Bash 3.2 `set -u`).
+
+### Fixed — refresh slash-command, privacy, and release-gate documentation
+- `commands/cc-status.md` and `commands/cc-switch.md` match current multi-account `cc status`
+  output and folder-pin rules (dropping the stale `plan` column, `claude2` reference, and
+  two-account phrasing).
+- `PRIVACY.md` states up front in `#intro` that automatic live usage checks (`claude -p /usage`)
+  are enabled by default and how to turn them off (`CC_LIVE_CHECK=0` or `"liveCheck": false`).
+- `docs/specs/SPEC-04-release.md` replaces the stale `@claude-flow/cli` gate and `v2.0.0` tag
+  step with the CI `security` job (`test/test-security.sh`) and `check-release.sh` /
+  `release.yml` `vX.Y.Z` flow.
+
 ## 2.4.0 — 2026-11-12
 
 ### Security — isolate Python imports from project files

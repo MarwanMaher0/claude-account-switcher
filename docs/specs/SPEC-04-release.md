@@ -31,7 +31,7 @@ unlimited usage in the README, marketplace entry, or post.
 | S-5 | File modes asserted in code: config and state `600`, account dirs `700`. |
 | S-6 | The logout trap carries a top-level README warning, since a fork could reintroduce it. |
 | S-7 | Transcript copying is documented: what moves, where, and that it never leaves the machine. |
-| S-8 | `npx @claude-flow/cli@3.5.79 security scan` run and triaged. |
+| S-8 | Dedicated `security` CI job (`bash test/test-security.sh`) and pre-release security review of shipped scripts and manifest changes run and triaged. |
 | S-9 | `shellcheck` clean on every shell script, in CI. |
 
 ## Test matrix
@@ -85,7 +85,9 @@ claude-account-switcher/
 1. Self-hosted marketplace: `marketplace.json` with `source: "./"`. Users run
    `claude plugin marketplace add MarwanMaher0/claude-account-switcher`, then
    `claude plugin install cc-switch`.
-2. Tag `v2.0.0` once CI is green on both runners and a clean-checkout install works.
+2. Tag `vX.Y.Z` once `bash test/check-release.sh vX.Y.Z` passes, CI is green on both runners, and
+   a clean-checkout install works (`.github/workflows/release.yml` publishes the GitHub release
+   and attaches `cc-switch-binding.vsix`).
 3. Optional: PR to Anthropic's `claude-plugins-official` with a `git-subdir` entry pinned to
    tag and sha, `category: productivity`. Acceptance is not ours to decide, so the self-hosted
    path must stand alone.

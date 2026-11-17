@@ -1,13 +1,16 @@
 # Privacy Policy
 
-**Short version: this plugin works entirely on your own machine. It sends nothing
-anywhere — no network requests, no telemetry, no analytics, no crash reports.**
+**Short version: the plugin itself makes no direct network calls and has no telemetry,
+analytics, or crash reports.** Everything it stores stays on your own machine. By default,
+`cc status` and limit re-checks run your own `claude -p /usage` so Claude Code can check live
+quota with Anthropic (`cc refresh` runs it on demand; hooks never do); set `CC_LIVE_CHECK=0` or
+`"liveCheck": false` in `~/.claude-switch/config.json` to keep automatic checks strictly local.
 
 It also never reads your credentials file (`.credentials.json`). That is asserted by a test
 over everything the plugin ships (`test/test-security.sh`, gates S-1 and S-4 in
 `docs/specs/SPEC-04-release.md`), and stated in `SECURITY.md`.
 
-What follows is the full picture of what it does read and write, all of it local.
+What follows is the full picture of what it reads, writes, and invokes through Claude Code.
 
 ## What it reads
 
@@ -46,9 +49,10 @@ What follows is the full picture of what it does read and write, all of it local
 ## What it sends
 
 The plugin itself makes no network calls and has no telemetry, analytics or crash reports.
-The exception to offline operation is the optional **live usage check**: it runs your own
-`claude -p /usage` for your own accounts. That is Claude Code talking to Anthropic using each
-account's login, not a direct network request or telemetry from the plugin.
+The exception to offline operation is the **live usage check** (enabled by default, can be
+turned off): it runs your own `claude -p /usage` for your own accounts. That is Claude Code
+talking to Anthropic using each account's login, not a direct network request or telemetry from
+the plugin.
 
 Automatic live checks are **enabled by default** (`liveCheck` defaults to `true` in
 `bin/cc-detect`). They can run during `cc status` and when an account recorded as limited is
