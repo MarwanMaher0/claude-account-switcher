@@ -2,8 +2,12 @@
 
 ## Reporting
 
-Open a GitHub issue. If the issue involves credential exposure, say so in the title and leave
-out the sensitive values themselves.
+Report a vulnerability privately through GitHub's private vulnerability reporting: open the
+repository's **Security** tab and choose **Report a vulnerability**
+([direct link](https://github.com/MarwanMaher0/claude-account-switcher/security/advisories/new)).
+The report is visible only to you and the maintainers until a fix is published. Do not open a
+public issue for a vulnerability. If it involves credential exposure, say so in the title and
+leave out the sensitive values themselves.
 
 ## What this tool does and does not touch
 

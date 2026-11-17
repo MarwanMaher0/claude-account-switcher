@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Release gate: the tag must match the manifests and one dated changelog section.
+# Release gates: the tag must match the manifests and one dated changelog section with
+# no non-empty Unreleased section above it, name a commit already on main, ship with
+# honest check counts, and publish a correctly named vsix covered by SHA256SUMS,
+# rerun-safely. Every gate runs here offline against throwaway fixtures and git repos.
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 echo "Release tag, changelog notes, and the tag workflow"
@@ -103,12 +106,20 @@ elif mode == "glued":
     text = "## %s%s %s\n%s" % (ver, em, date, body)
 elif mode == "nearmiss":
     text = "## 9.9.90 %s %s\n%s" % (em, date, body)
+elif mode == "unreleased-full":
+    text = "# Changelog\n\n## Unreleased\n\n- not shipped yet\n\n" + expected + next_section
+elif mode == "unreleased-bracket":
+    text = "## [Unreleased]\n### Added\n- not shipped yet\n" + expected + next_section
+elif mode == "unreleased-empty":
+    text = "# Changelog\n\n## Unreleased\n\n   \n" + expected + next_section
+elif mode == "unreleased-below":
+    text = expected + "## Unreleased\n- an old leftover below this version\n"
 else:
     sys.exit("unknown fixture mode: " + mode)
 
 with open(os.path.join(root, "CHANGELOG.md"), "w", encoding="utf-8") as fh:
     fh.write(text)
-if mode == "dated":
+if mode in ("dated", "unreleased-empty", "unreleased-below"):
     with open(os.path.join(root, "expected-notes.md"), "w", encoding="utf-8") as fh:
         fh.write(expected)
 PY
@@ -216,11 +227,113 @@ expect_ok "matching GITHUB_REF and GITHUB_REF_NAME need no argument" \
 expect_ok "empty GITHUB_REF_NAME does not disagree with the tag ref" \
     env GITHUB_REF=refs/tags/v9.9.9 GITHUB_REF_NAME= bash "$CHECK" --root "$FIX"
 
+# ---- Unreleased: changes listed above the tagged version would ship unannounced ----
+UNREL_MSG="CHANGELOG.md has a non-empty Unreleased section above 9.9.9; move its entries into the 9.9.9 section"
+
+write_fix "$WORK/unrel-full" 9.9.9 9.9.9 9.9.9 unreleased-full
+expect_fail "a non-empty Unreleased section above the version" "$UNREL_MSG" \
+    bash "$CHECK" --root "$WORK/unrel-full" v9.9.9
+
+write_fix "$WORK/unrel-bracket" 9.9.9 9.9.9 9.9.9 unreleased-bracket
+expect_fail "a non-empty [Unreleased] section above the version" "$UNREL_MSG" \
+    bash "$CHECK" --root "$WORK/unrel-bracket" v9.9.9
+
+write_fix "$WORK/unrel-empty" 9.9.9 9.9.9 9.9.9 unreleased-empty
+expect_ok "an empty Unreleased heading above the version" \
+    bash "$CHECK" --root "$WORK/unrel-empty" v9.9.9
+if cmp -s "$RC_OUT" "$WORK/unrel-empty/expected-notes.md"; then
+    ok "an empty Unreleased heading stays out of the notes"
+else
+    no "an empty Unreleased heading stays out of the notes" "notes did not match"
+fi
+
+write_fix "$WORK/unrel-below" 9.9.9 9.9.9 9.9.9 unreleased-below
+expect_ok "an Unreleased section below the version does not block it" \
+    bash "$CHECK" --root "$WORK/unrel-below" v9.9.9
+
+# ---- the tagged commit must already be on main (throwaway repos, no remote) ----
 GIT_AUTHOR_NAME=Release
 GIT_AUTHOR_EMAIL=release@example.com
 GIT_COMMITTER_NAME=Release
 GIT_COMMITTER_EMAIL=release@example.com
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+mkdir -p "$WORK/githome"
+
+# A user's global config (signing, hooks, default branch) must not reach the fixtures.
+fx_git() {
+    env -u GIT_DIR -u GIT_WORK_TREE HOME="$WORK/githome" GIT_CONFIG_NOSYSTEM=1 \
+        git -c init.defaultBranch=main -c commit.gpgsign=false -c tag.gpgsign=false -c core.hooksPath=/dev/null "$@"
+}
+
+# A release fixture committed on main; origin/main is a plain ref, as a fetch leaves it.
+new_repo() {
+    write_fix "$1" 9.9.9 9.9.9 9.9.9 dated
+    fx_git init -q "$1"
+    fx_git -C "$1" symbolic-ref HEAD refs/heads/main
+    fx_git -C "$1" add -A
+    fx_git -C "$1" commit -q -m release
+}
+
+new_repo "$WORK/on-main"
+fx_git -C "$WORK/on-main" tag -a -m v9.9.9 v9.9.9
+fx_git -C "$WORK/on-main" update-ref refs/remotes/origin/main HEAD
+expect_ok "an annotated tag on origin/main passes" \
+    bash "$CHECK" --root "$WORK/on-main" --ancestor-of origin/main v9.9.9
+
+expect_ok "GITHUB_REF and --ancestor-of together pass on main" \
+    env GITHUB_REF=refs/tags/v9.9.9 GITHUB_REF_NAME=v9.9.9 \
+    bash "$CHECK" --root "$WORK/on-main" --ancestor-of origin/main
+
+new_repo "$WORK/behind"
+fx_git -C "$WORK/behind" tag v9.9.9
+fx_git -C "$WORK/behind" commit -q --allow-empty -m later
+fx_git -C "$WORK/behind" update-ref refs/remotes/origin/main HEAD
+expect_fail "a checkout that is not the tag" "the checkout is not v9.9.9; check out the tag first" \
+    bash "$CHECK" --root "$WORK/behind" --ancestor-of origin/main v9.9.9
+fx_git -C "$WORK/behind" checkout -q --detach v9.9.9
+expect_ok "a tag that main has moved past passes" \
+    bash "$CHECK" --root "$WORK/behind" --ancestor-of origin/main v9.9.9
+
+new_repo "$WORK/side"
+fx_git -C "$WORK/side" update-ref refs/remotes/origin/main HEAD
+fx_git -C "$WORK/side" checkout -q -b side
+printf 'side work\n' > "$WORK/side/side.txt"
+fx_git -C "$WORK/side" add side.txt
+fx_git -C "$WORK/side" commit -q -m side
+fx_git -C "$WORK/side" tag v9.9.9
+expect_fail "a tag that is not on main" \
+    "v9.9.9 is not an ancestor of origin/main; release only commits already on main" \
+    bash "$CHECK" --root "$WORK/side" --ancestor-of origin/main v9.9.9
+
+expect_fail "a tag whose commit main does not contain, against a local branch" \
+    "v9.9.9 is not an ancestor of main; release only commits already on main" \
+    bash "$CHECK" --root "$WORK/side" --ancestor-of main v9.9.9
+
+new_repo "$WORK/pretag"
+fx_git -C "$WORK/pretag" update-ref refs/remotes/origin/main HEAD
+expect_ok "before tagging, HEAD on main passes" \
+    bash "$CHECK" --root "$WORK/pretag" --ancestor-of origin/main v9.9.9
+
+new_repo "$WORK/nomain"
+fx_git -C "$WORK/nomain" tag v9.9.9
+expect_fail "an unfetched main" "cannot resolve origin/main; fetch it first (git fetch origin main)" \
+    bash "$CHECK" --root "$WORK/nomain" --ancestor-of origin/main v9.9.9
+
+fx_git clone -q --depth 1 "file://$WORK/on-main" "$WORK/shallow" 2>/dev/null
+fx_git -C "$WORK/shallow" update-ref refs/remotes/origin/main HEAD
+expect_fail "a shallow checkout" "the checkout is shallow; fetch full history (fetch-depth: 0) first" \
+    bash "$CHECK" --root "$WORK/shallow" --ancestor-of origin/main v9.9.9
+
+FIX_REAL="$(cd -P "$FIX" && pwd)"
+expect_fail "--ancestor-of outside a git checkout" "$FIX_REAL is not a git checkout" \
+    bash "$CHECK" --root "$FIX" --ancestor-of origin/main v9.9.9
+
+expect_fail "--ancestor-of needs a ref" "--ancestor-of needs a ref" \
+    bash "$CHECK" --root "$FIX" v9.9.9 --ancestor-of
+
+expect_fail "a non-empty Unreleased section blocks a tag on main too" "$UNREL_MSG" \
+    bash "$CHECK" --root "$WORK/unrel-full" --ancestor-of origin/main v9.9.9
+
 git -C "$PARENT" init >/dev/null
 git -C "$PARENT" config user.email release@example.com
 git -C "$PARENT" config user.name Release
@@ -254,6 +367,30 @@ with open(sys.argv[1], encoding="utf-8") as fh:
     sys.stdout.write(json.load(fh)["version"])
 PY
 )"
+# Between releases the real changelog may list work under a non-empty Unreleased
+# section, which must block re-releasing the current version; once that section is
+# renamed to the next version's heading, the real repo must release. Both paths make
+# the same number of checks, so the stated counts do not change at release time.
+real_pending="$(python3 - "$REPO/CHANGELOG.md" "$real_version" <<'PY'
+import re
+import sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+version = sys.argv[2]
+heading = re.compile(r"^## " + re.escape(version) + r"\s")
+unreleased = re.compile(r"^##\s+\[?unreleased\]?\s*$", re.IGNORECASE)
+pending = "no"
+for i, line in enumerate(lines):
+    if heading.match(line):
+        break
+    if unreleased.match(line):
+        j = i + 1
+        while j < len(lines) and not lines[j].startswith("## "):
+            if lines[j].strip():
+                pending = "yes"
+            j += 1
+sys.stdout.write(pending)
+PY
+)"
 mkdir -p "$WORK/elsewhere"
 (
     cd "$WORK/elsewhere" || exit 1
@@ -261,30 +398,20 @@ mkdir -p "$WORK/elsewhere"
         bash "$CHECK" "v$real_version"
 ) >"$RC_OUT" 2>"$RC_ERR"
 RC_STATUS=$?
-assert_eq "$RC_STATUS" "0" "the real repo accepts its manifest version from another directory"
-if [ -s "$RC_OUT" ]; then
-    ok "the real repo prints release notes"
-else
-    no "the real repo prints release notes" "stdout was empty"
-fi
-if [ ! -s "$RC_ERR" ]; then
-    ok "the real repo check is silent on stderr"
-else
-    no "the real repo check is silent on stderr" "$(cat "$RC_ERR")"
-fi
-note_problems="$(python3 - "$RC_OUT" "$REPO/CHANGELOG.md" "$real_version" <<'PY'
+note_problems="$(python3 - "$RC_OUT" "$REPO/CHANGELOG.md" "$real_version" "$real_pending" <<'PY'
 import re
 import sys
 got = open(sys.argv[1], encoding="utf-8").read()
 lines = open(sys.argv[2], encoding="utf-8").read().splitlines()
 version = sys.argv[3]
+pending = sys.argv[4] == "yes"
 em = "\u2014"
 heading = re.compile(r"^## " + re.escape(version) + " " + em + r" \d{4}-\d{2}-\d{2}\s*$")
 hits = [i for i, line in enumerate(lines) if heading.match(line)]
 problems = []
 if len(hits) != 1:
     problems.append("changelog dated sections for %s: %d" % (version, len(hits)))
-else:
+elif not pending:
     start = hits[0]
     end = start + 1
     while end < len(lines) and not lines[end].startswith("## "):
@@ -304,7 +431,31 @@ else:
 sys.stdout.write("\n".join(problems))
 PY
 )"
-assert_eq "$note_problems" "" "real notes are only the dated section for the manifest version"
+if [ "$real_pending" = "no" ]; then
+    assert_eq "$RC_STATUS" "0" "the real repo accepts its manifest version from another directory"
+    if [ -s "$RC_OUT" ]; then
+        ok "the real repo prints release notes"
+    else
+        no "the real repo prints release notes" "stdout was empty"
+    fi
+    if [ ! -s "$RC_ERR" ]; then
+        ok "the real repo check is silent on stderr"
+    else
+        no "the real repo check is silent on stderr" "$(cat "$RC_ERR")"
+    fi
+    assert_eq "$note_problems" "" "real notes are only the dated section for the manifest version"
+else
+    assert_eq "$RC_STATUS" "1" "the real repo refuses its released version while Unreleased has entries"
+    assert_eq "$(cat "$RC_ERR")" \
+        "check-release: CHANGELOG.md has a non-empty Unreleased section above $real_version; move its entries into the $real_version section" \
+        "the real repo names the Unreleased gate"
+    if [ ! -s "$RC_OUT" ]; then
+        ok "the real repo prints no notes while Unreleased has entries"
+    else
+        no "the real repo prints no notes while Unreleased has entries" "stdout was not empty"
+    fi
+    assert_eq "$note_problems" "" "the real changelog keeps one dated section for the manifest version"
+fi
 
 bump_version="$(python3 - "$REPO" "$WORK/bump" <<'PY'
 import json
@@ -349,13 +500,22 @@ for rel, obj in ((plugin_rel, plugin), (market_rel, market), (package_rel, packa
 em = "\u2014"
 date = "2026-11-08"
 heading = "## %s %s %s" % (bump, em, date)
-section = [heading, "", "### Fixed", "simulated bump", ""]
-insert_at = len(changelog)
+# Releasing renames a pending "## Unreleased" heading to the version; without one,
+# a new section goes above the newest.
+first = len(changelog)
 for i, line in enumerate(changelog):
     if line.startswith("## "):
-        insert_at = i
+        first = i
         break
-new_lines = changelog[:insert_at] + section + changelog[insert_at:]
+if first < len(changelog) and changelog[first].strip().lower() == "## unreleased":
+    end = first + 1
+    while end < len(changelog) and not changelog[end].startswith("## "):
+        end += 1
+    section = [heading] + changelog[first + 1:end]
+    new_lines = changelog[:first] + section + changelog[end:]
+else:
+    section = [heading, "", "### Fixed", "simulated bump", ""]
+    new_lines = changelog[:first] + section + changelog[first:]
 with open(os.path.join(dest, "CHANGELOG.md"), "w", encoding="utf-8") as fh:
     fh.write("\n".join(new_lines) + "\n")
 with open(os.path.join(dest, "expected-notes.md"), "w", encoding="utf-8") as fh:
@@ -371,12 +531,207 @@ else
     no "a simulated bump prints only its dated section" "notes did not match"
 fi
 
-python3 - "$REPO/.github/workflows/release.yml" >"$WORK/wf.txt" <<'PY'
+# ---- stale counts: check-counts.sh against a fixture repo with a stub run-all ----
+COUNTS="$WORK/counts"
+mkdir -p "$COUNTS/test"
+cp "$REPO/test/check-counts.sh" "$COUNTS/test/check-counts.sh"
+cat > "$COUNTS/test/run-all.sh" <<'SH'
+#!/usr/bin/env bash
+echo "fixture suite"
+printf 'grand total: 7 passed, 0 failed, 1 suites run, 0 skipped\n'
+SH
+write_counts() {
+    printf '[![tests](https://img.shields.io/badge/tests-%s%%20checks-green)](CONTRIBUTING.md)\n' "$1" \
+        > "$COUNTS/README.md"
+    printf '# Contributing\n\n%s checks across the fixture suites\n' "$2" > "$COUNTS/CONTRIBUTING.md"
+}
+run_counts() {
+    COUNTS_OUT="$(bash "$COUNTS/test/check-counts.sh" 2>&1)"
+    COUNTS_RC=$?
+}
+
+write_counts 7 7
+run_counts
+assert_eq "$COUNTS_RC" "0" "check-counts passes when both stated counts are right"
+assert_contains "$COUNTS_OUT" "stated counts match the real total: 7" "check-counts names the matching total"
+
+write_counts 6 7
+run_counts
+assert_eq "$COUNTS_RC" "1" "a stale README badge fails check-counts"
+assert_contains "$COUNTS_OUT" "README badge says 6 checks; the suite runs 7" "a stale badge is named"
+assert_contains "$COUNTS_OUT" "run: bash test/check-counts.sh --fix" "a stale count names the fix"
+assert_not_contains "$COUNTS_OUT" "CONTRIBUTING says" "a stale badge alone does not blame CONTRIBUTING"
+
+write_counts 7 8
+run_counts
+assert_eq "$COUNTS_RC" "1" "a stale CONTRIBUTING count fails check-counts"
+assert_contains "$COUNTS_OUT" "CONTRIBUTING says 8 checks; the suite runs 7" "a stale CONTRIBUTING count is named"
+
+# ---- the asset is cc-switch-binding-X.Y.Z.vsix, covered by SHA256SUMS ----
+ASSETS="$REPO/test/release-assets.sh"
+VSIX_NAME="cc-switch-binding-9.9.9.vsix"
+new_assets() {
+    rm -rf "$1"
+    mkdir -p "$1"
+    printf 'PK fixture vsix\n' > "$1/$VSIX_NAME"
+    printf '## 9.9.9\nnotes\n' > "$1/notes.md"
+}
+run_assets() {
+    RA_OUT="$WORK/assets.out"
+    RA_ERR="$WORK/assets.err"
+    bash "$ASSETS" "$@" >"$RA_OUT" 2>"$RA_ERR"
+    RA_STATUS=$?
+}
+expect_assets_fail() {
+    label="$1"
+    msg="$2"
+    shift 2
+    run_assets verify "$@"
+    assert_eq "$RA_STATUS" "1" "$label exits 1"
+    assert_eq "$(cat "$RA_ERR")" "release-assets: $msg" "$label"
+}
+
+assert_eq "$([ -x "$ASSETS" ] && echo executable || echo not-executable)" "executable" "release-assets.sh is executable"
+
+new_assets "$WORK/assets-ok"
+run_assets write "$WORK/assets-ok" v9.9.9
+assert_eq "$RA_STATUS" "0" "write records the vsix checksum"
+sum_line="$(cat "$WORK/assets-ok/SHA256SUMS")"
+expected_sum="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$WORK/assets-ok/$VSIX_NAME")"
+assert_eq "$sum_line" "$expected_sum  $VSIX_NAME" "SHA256SUMS is one '<sha256>  <file>' line for the vsix"
+run_assets verify "$WORK/assets-ok" v9.9.9
+assert_eq "$RA_STATUS" "0" "a clean asset directory verifies"
+assert_eq "$(cat "$RA_ERR")" "" "a clean verify is silent on stderr"
+if command -v sha256sum >/dev/null 2>&1; then
+    sum_tool="sha256sum -c SHA256SUMS"
+else
+    sum_tool="shasum -a 256 -c SHA256SUMS"
+fi
+if (cd "$WORK/assets-ok" && $sum_tool >/dev/null 2>&1); then
+    ok "the documented '$sum_tool' accepts SHA256SUMS"
+else
+    no "the documented '$sum_tool' accepts SHA256SUMS" "the checksum tool rejected it"
+fi
+
+new_assets "$WORK/assets-nosums"
+expect_assets_fail "a missing SHA256SUMS" "missing SHA256SUMS" "$WORK/assets-nosums" v9.9.9
+
+new_assets "$WORK/assets-wrong"
+run_assets write "$WORK/assets-wrong" v9.9.9
+printf 'tampered\n' >> "$WORK/assets-wrong/$VSIX_NAME"
+expect_assets_fail "a wrong checksum" "checksum mismatch for $VSIX_NAME" "$WORK/assets-wrong" v9.9.9
+
+new_assets "$WORK/assets-other"
+printf '%s  cc-switch-binding.vsix\n' "$expected_sum" > "$WORK/assets-other/SHA256SUMS"
+expect_assets_fail "SHA256SUMS for another file" \
+    "SHA256SUMS lists cc-switch-binding.vsix, which is not a release asset" "$WORK/assets-other" v9.9.9
+
+new_assets "$WORK/assets-empty"
+: > "$WORK/assets-empty/SHA256SUMS"
+expect_assets_fail "an empty SHA256SUMS" "SHA256SUMS does not cover $VSIX_NAME" "$WORK/assets-empty" v9.9.9
+
+new_assets "$WORK/assets-garbled"
+printf 'not a checksum line\n' > "$WORK/assets-garbled/SHA256SUMS"
+expect_assets_fail "a malformed SHA256SUMS" "SHA256SUMS line 1 is not '<sha256>  <file>'" "$WORK/assets-garbled" v9.9.9
+
+new_assets "$WORK/assets-unversioned"
+mv "$WORK/assets-unversioned/$VSIX_NAME" "$WORK/assets-unversioned/cc-switch-binding.vsix"
+expect_assets_fail "an unversioned vsix name" \
+    "unexpected asset cc-switch-binding.vsix; the vsix must be named $VSIX_NAME" "$WORK/assets-unversioned" v9.9.9
+
+new_assets "$WORK/assets-novsix"
+rm -f "$WORK/assets-novsix/$VSIX_NAME"
+expect_assets_fail "a missing vsix" "missing $VSIX_NAME" "$WORK/assets-novsix" v9.9.9
+
+new_assets "$WORK/assets-real"
+rm -f "$WORK/assets-real/$VSIX_NAME"
+real_vsix="$WORK/assets-real/cc-switch-binding-$real_version.vsix"
+if "$REPO/bin/cc-vscode" build "$real_vsix" >/dev/null 2>"$WORK/build.err" \
+    && bash "$ASSETS" write "$WORK/assets-real" "v$real_version" >/dev/null \
+    && bash "$ASSETS" verify "$WORK/assets-real" "v$real_version" >/dev/null; then
+    ok "the workflow's build, write and verify steps agree on the real version"
+else
+    no "the workflow's build, write and verify steps agree on the real version" "$(cat "$WORK/build.err")"
+fi
+
+# ---- publish: create once, then rerun-safe (stub gh, no network) ----
+PUBLISH="$REPO/test/publish-release.sh"
+GHBIN="$WORK/ghbin"
+GHLOG="$WORK/gh.log"
+mkdir -p "$GHBIN"
+cat > "$GHBIN/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_STUB_LOG"
+if [ "$1 $2" = "release view" ]; then
+    case "$GH_STUB_STATE" in
+        exists) exit 0 ;;
+        missing) echo "release not found" >&2; exit 1 ;;
+        *) echo "HTTP 502: Bad Gateway" >&2; exit 1 ;;
+    esac
+fi
+exit 0
+SH
+chmod +x "$GHBIN/gh"
+run_publish() {
+    state="$1"
+    shift
+    rm -f "$GHLOG"
+    : > "$GHLOG"
+    PATH="$GHBIN:$PATH" GH_STUB_LOG="$GHLOG" GH_STUB_STATE="$state" \
+        bash "$PUBLISH" "$@" >"$WORK/pub.out" 2>"$WORK/pub.err"
+    PUB_STATUS=$?
+}
+
+assert_eq "$([ -x "$PUBLISH" ] && echo executable || echo not-executable)" "executable" "publish-release.sh is executable"
+
+D="$WORK/assets-ok"
+run_publish missing --repo owner/name v9.9.9 "$D"
+assert_eq "$PUB_STATUS" "0" "a new tag publishes"
+assert_eq "$(cat "$GHLOG")" "release view v9.9.9 --repo owner/name --json tagName
+release create v9.9.9 $D/$VSIX_NAME $D/SHA256SUMS --repo owner/name --title v9.9.9 --notes-file $D/notes.md --verify-tag" \
+    "a new tag creates the release with the vsix, SHA256SUMS and the notes"
+
+run_publish exists --repo owner/name v9.9.9 "$D"
+assert_eq "$PUB_STATUS" "0" "a rerun on an existing release succeeds"
+assert_eq "$(cat "$GHLOG")" "release view v9.9.9 --repo owner/name --json tagName
+release upload v9.9.9 $D/$VSIX_NAME $D/SHA256SUMS --repo owner/name --clobber
+release edit v9.9.9 --repo owner/name --title v9.9.9 --notes-file $D/notes.md" \
+    "a rerun re-uploads both assets with --clobber and updates the notes"
+assert_contains "$(cat "$WORK/pub.out")" "updated the existing release v9.9.9" "a rerun says it updated the release"
+
+run_publish error --repo owner/name v9.9.9 "$D"
+assert_eq "$PUB_STATUS" "1" "an unclear gh failure stops publish"
+assert_eq "$(cat "$WORK/pub.err")" "publish-release: cannot tell whether v9.9.9 is released: HTTP 502: Bad Gateway" \
+    "an unclear gh failure is named"
+assert_not_contains "$(cat "$GHLOG")" "release create" "an unclear gh failure creates nothing"
+
+run_publish missing --repo owner/name v9.9.9 "$WORK/assets-wrong"
+assert_eq "$PUB_STATUS" "1" "a wrong checksum stops publish"
+assert_eq "$(cat "$WORK/pub.err")" "release-assets: checksum mismatch for $VSIX_NAME" "publish names the checksum mismatch"
+assert_eq "$(cat "$GHLOG")" "" "a wrong checksum never reaches gh"
+
+run_publish missing --repo owner/name v9.9.9 "$WORK/assets-nosums"
+assert_eq "$PUB_STATUS" "1" "a missing SHA256SUMS stops publish"
+assert_eq "$(cat "$GHLOG")" "" "a missing SHA256SUMS never reaches gh"
+
+new_assets "$WORK/assets-nonotes"
+bash "$ASSETS" write "$WORK/assets-nonotes" v9.9.9 >/dev/null
+rm -f "$WORK/assets-nonotes/notes.md"
+run_publish missing --repo owner/name v9.9.9 "$WORK/assets-nonotes"
+assert_eq "$PUB_STATUS" "1" "missing notes stop publish"
+assert_contains "$(cat "$WORK/pub.err")" "publish-release: missing $WORK/assets-nonotes/notes.md" "missing notes are named"
+assert_eq "$(cat "$GHLOG")" "" "missing notes never reach gh"
+
+run_publish missing v9.9.9 "$D"
+assert_eq "$PUB_STATUS" "2" "publish without --repo is a usage error"
+
+python3 - "$REPO/.github/workflows/release.yml" "$REPO/test/publish-release.sh" >"$WORK/wf.txt" <<'PY'
 import sys
 
 path = sys.argv[1]
 try:
     text = open(path, encoding="utf-8").read()
+    publish_script = open(sys.argv[2], encoding="utf-8").read()
 except OSError as exc:
     print("NO|release workflow is readable|%s" % exc)
     sys.exit(0)
@@ -397,10 +752,10 @@ darwin = (
     "3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6",
 )
 
-report("checkout pin appears once", text.count(checkout) == 1, "count %d" % text.count(checkout))
+report("checkout pin is used by both jobs", text.count(checkout) == 2, "count %d" % text.count(checkout))
 report("upload-artifact pin appears once", text.count(upload) == 1, "count %d" % text.count(upload))
 report("download-artifact pin appears once", text.count(download) == 1, "count %d" % text.count(download))
-report("one checkout step", text.count("actions/checkout@") == 1, "count %d" % text.count("actions/checkout@"))
+report("one checkout step per job", text.count("actions/checkout@") == 2, "count %d" % text.count("actions/checkout@"))
 report("tag trigger is v*.*.*", '"v*.*.*"' in text)
 report("no workflow_dispatch", "workflow_dispatch" not in text)
 report("no Darwin shellcheck", "darwin" not in text.lower() and all(item not in text for item in darwin))
@@ -421,25 +776,52 @@ report("contents: write belongs to publish", job == "publish", "job %r" % job)
 report("verify can read contents", "contents: read" in text)
 report("verify does not grant actions: write", "actions: write" not in text)
 report("publish does not grant actions: read", "actions: read" not in text)
-report("credentials are not persisted", text.count("persist-credentials: false") == 1)
+report("credentials are never persisted", text.count("persist-credentials: false") == 2,
+       "count %d" % text.count("persist-credentials: false"))
 report("both jobs use ubuntu-latest", text.count("runs-on: ubuntu-latest") == 2, "count %d" % text.count("runs-on: ubuntu-latest"))
-report("verify writes notes before the suite", "bash test/check-release.sh --notes-out" in text)
-report("verify lints and runs the suite", "bash test/lint.sh" in text and "bash test/run-all.sh" in text)
-report("verify builds the vsix into the release dir", 'bin/cc-vscode build "$RUNNER_TEMP/release/cc-switch-binding.vsix"' in text)
+
+split = text.find("\n  publish:")
+verify_job = text[:split] if split >= 0 else ""
+publish_job = text[split:] if split >= 0 else ""
+report("the workflow has a publish job", split >= 0)
+report("verify checks out full history", "fetch-depth: 0" in verify_job)
+report("verify fetches main", "git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main" in verify_job)
+report("verify refuses a tag that is not on origin/main",
+       "bash test/check-release.sh --ancestor-of origin/main --notes-out" in verify_job)
+report("verify lints and runs the suite", "bash test/lint.sh" in verify_job and "bash test/run-all.sh" in verify_job)
+report("verify checks the stated counts", "bash test/check-counts.sh\n" in verify_job and "--fix" not in text)
+report("verify builds the versioned vsix into the release dir",
+       'bin/cc-vscode build "$RUNNER_TEMP/release/cc-switch-binding-${GITHUB_REF_NAME#v}.vsix"' in verify_job)
+report("verify writes SHA256SUMS",
+       'bash test/release-assets.sh write "$RUNNER_TEMP/release" "$GITHUB_REF_NAME"' in verify_job)
+report("verify checks SHA256SUMS",
+       'bash test/release-assets.sh verify "$RUNNER_TEMP/release" "$GITHUB_REF_NAME"' in verify_job)
 report("upload fails when the release dir is empty", "if-no-files-found: error" in text)
-report("publish creates the release from the tag name", 'gh release create "$GITHUB_REF_NAME"' in text)
-report("publish names the repository without a checkout", '--repo "$GITHUB_REPOSITORY"' in text)
-report("publish uses the job token", "GH_TOKEN: ${{ github.token }}" in text)
+report("publish runs the publish script",
+       'bash test/publish-release.sh --repo "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RUNNER_TEMP/release"' in publish_job)
+report("publish has no inline gh release command", "gh release" not in text)
+report("publish uses the job token", "GH_TOKEN: ${{ github.token }}" in publish_job)
+report("publish runs no suite or build", "run-all" not in publish_job and "cc-vscode" not in publish_job)
+report("reruns of one tag do not overlap", "group: release-${{ github.ref }}" in text and "cancel-in-progress: false" in text)
+report("the publish script re-uploads with --clobber", "--clobber" in publish_script)
+report("the publish script updates the notes of an existing release", "gh release edit" in publish_script)
+report("the publish script verifies the assets first",
+       publish_script.find("release-assets.sh\" verify") >= 0
+       and publish_script.find("release-assets.sh\" verify") < publish_script.find("gh release view"))
 
 order = [
     "actions/checkout@",
+    "Fetch main",
     "Prepare the release directory",
-    "Check the tag against the manifests and changelog",
+    "Check the tag against the manifests, changelog and main",
     "Install shellcheck v0.11.0",
     "Lint shell scripts",
     "Run test suites",
+    "Check stated test counts",
     "Build the companion extension",
+    "Write and verify SHA256SUMS",
     "Upload release files",
+    "actions/checkout@",
     "Download release files",
     "Publish the GitHub release",
 ]
@@ -450,7 +832,7 @@ for name in order:
     if found < 0:
         ordered = False
         break
-    pos = found
+    pos = found + 1
 report("verify steps run before publish", ordered)
 PY
 wf_n=0
@@ -466,7 +848,7 @@ while IFS= read -r line; do
     fi
     wf_n=$((wf_n + 1))
 done < "$WORK/wf.txt"
-if [ "$wf_n" -ge 20 ]; then
+if [ "$wf_n" -ge 30 ]; then
     ok "workflow contract reported its checks"
 else
     no "workflow contract reported its checks" "saw $wf_n"

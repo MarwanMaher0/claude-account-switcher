@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Fail unless the release tag is vX.Y.Z, matches the three manifests, and has one
-# dated CHANGELOG section. Prints that section. A tag push runs this before publish.
+# Fail unless the release tag is vX.Y.Z, matches the three manifests, has one dated
+# CHANGELOG section with no non-empty "## Unreleased" section above it, and (with
+# --ancestor-of REF) names a commit that REF already contains. Prints that section.
+# A tag push runs this before publish:
+#
+#   bash test/check-release.sh [--root DIR] [--notes-out FILE] [--ancestor-of REF] [vX.Y.Z]
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2093  # reason: exec keeps python3's status; the exit below runs only if python3 cannot start
 exec python3 - "$HERE" "$@" <<'PY'
@@ -29,6 +33,7 @@ def env_val(name):
 
 root_opt = None
 notes_out = None
+ancestor_ref = None
 tag_arg = None
 i = 0
 while i < len(argv):
@@ -43,6 +48,11 @@ while i < len(argv):
         if i >= len(argv):
             die("--notes-out needs a path")
         notes_out = argv[i]
+    elif arg == "--ancestor-of":
+        i += 1
+        if i >= len(argv) or not argv[i]:
+            die("--ancestor-of needs a ref")
+        ancestor_ref = argv[i]
     elif arg.startswith("-"):
         die("unknown option %s" % arg)
     else:
@@ -55,6 +65,32 @@ if root_opt is None:
     root = os.path.realpath(os.path.dirname(script_dir))
 else:
     root = os.path.realpath(root_opt)
+
+def git(*args):
+    # Only the repository at the release root counts: a leaked GIT_DIR or a parent
+    # checkout must not answer for a fixture or an unpacked tree.
+    env = os.environ.copy()
+    env.pop("GIT_DIR", None)
+    env.pop("GIT_WORK_TREE", None)
+    env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(root)
+    try:
+        return subprocess.run(
+            ["git", "-C", root] + list(args),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            env=env,
+        )
+    except OSError:
+        return None
+
+
+def git_commit(name):
+    proc = git("rev-parse", "--verify", "--quiet", name + "^{commit}")
+    if proc is None or proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
 
 ref = env_val("GITHUB_REF")
 ref_name = env_val("GITHUB_REF_NAME")
@@ -77,21 +113,8 @@ if tag_arg is not None:
 elif env_tag is not None:
     tag = env_tag
 else:
-    env = os.environ.copy()
-    env.pop("GIT_DIR", None)
-    env.pop("GIT_WORK_TREE", None)
-    env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(root)
-    try:
-        proc = subprocess.run(
-            ["git", "-C", root, "describe", "--exact-match", "--tags"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            env=env,
-        )
-    except OSError:
-        die("no exact tag")
-    if proc.returncode != 0 or not proc.stdout.strip():
+    proc = git("describe", "--exact-match", "--tags")
+    if proc is None or proc.returncode != 0 or not proc.stdout.strip():
         die("no exact tag")
     tag = proc.stdout.strip()
 
@@ -164,6 +187,44 @@ if len(dated) != 1:
     die("CHANGELOG.md has %d dated sections for %s" % (len(dated), version))
 
 start = dated[0]
+
+# Changes still listed under "## Unreleased" above this version would ship without
+# being in its notes. An empty heading kept for the next release is fine.
+unreleased = re.compile(r"^##\s+\[?unreleased\]?\s*$", re.IGNORECASE)
+for idx in range(start):
+    if not unreleased.match(lines[idx]):
+        continue
+    body_end = idx + 1
+    while body_end < len(lines) and not lines[body_end].startswith("## "):
+        body_end += 1
+    if any(line.strip() for line in lines[idx + 1:body_end]):
+        die("CHANGELOG.md has a non-empty Unreleased section above %s; "
+            "move its entries into the %s section" % (version, version))
+
+if ancestor_ref is not None:
+    # The files checked above are the working tree, so it must be the tagged commit;
+    # before the tag exists (a pre-tag check), HEAD is the commit about to be tagged.
+    head = git_commit("HEAD")
+    if head is None:
+        die("%s is not a git checkout" % root)
+    tagged = git_commit("refs/tags/" + tag)
+    if tagged is None:
+        tagged = head
+    elif tagged != head:
+        die("the checkout is not %s; check out the tag first" % tag)
+    shallow = git("rev-parse", "--is-shallow-repository")
+    if shallow is not None and shallow.stdout.strip() == "true":
+        die("the checkout is shallow; fetch full history (fetch-depth: 0) first")
+    target = git_commit(ancestor_ref)
+    if target is None:
+        die("cannot resolve %s; fetch it first (git fetch origin main)" % ancestor_ref)
+    proc = git("merge-base", "--is-ancestor", tagged, target)
+    if proc is None or proc.returncode not in (0, 1):
+        die("cannot compare %s with %s" % (tag, ancestor_ref))
+    if proc.returncode == 1:
+        die("%s is not an ancestor of %s; release only commits already on main"
+            % (tag, ancestor_ref))
+
 end = start + 1
 while end < len(lines) and not lines[end].startswith("## "):
     end += 1

@@ -14,9 +14,24 @@ Install this companion from your editor's extension registry or install a packag
 cc vscode on
 ```
 
+To install a VSIX from a GitHub release, verify it first ([below](#verify-a-release-download)).
+
 That command installs/verifies the local companion, configures Claude Code's process wrapper, and writes `~/.claude-switch/vscode-binding.json` with the local tool paths and terminal shim. Installing this extension alone does not install those tools or configure account binding. Use `cc pin` in the CLI to assign accounts to folders; see the [VS Code setup guide](https://github.com/MarwanMaher0/claude-account-switcher#step-6-vs-code-users-only).
 
 The extension runs in the workspace extension host but intentionally does not bind remote windows. Non-file folders are ignored. In a multi-root workspace, the first local folder decides the window's account; separate differently pinned folders into separate windows.
+
+## Verify a release download
+
+Each [GitHub release](https://github.com/MarwanMaher0/claude-account-switcher/releases) attaches `cc-switch-binding-X.Y.Z.vsix` and a `SHA256SUMS` file holding its SHA-256 checksum. Download both into the same folder (replace `X.Y.Z` with the release version), then check the VSIX before installing it:
+
+```bash
+gh release download vX.Y.Z --repo MarwanMaher0/claude-account-switcher \
+  --pattern 'cc-switch-binding-X.Y.Z.vsix' --pattern SHA256SUMS
+sha256sum -c SHA256SUMS          # Linux
+shasum -a 256 -c SHA256SUMS      # macOS
+```
+
+Either command must print `cc-switch-binding-X.Y.Z.vsix: OK`. Anything else (`FAILED`, or a missing-file warning) means the download is incomplete or altered: delete it and download again; do not install it. The checksum proves the file matches what the release workflow built and published; it is not a signature, so get both files from the release page of this repository only.
 
 ## Commands and status
 

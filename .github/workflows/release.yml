@@ -8,21 +8,33 @@ on:
 permissions:
   contents: read
 
+# A rerun and the original run never publish the same tag at once.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
+      # Full history, so the ancestry check below is not fooled by a shallow clone.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch main
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 
       - name: Prepare the release directory
         run: mkdir -p "$RUNNER_TEMP/release"
 
-      - name: Check the tag against the manifests and changelog
-        run: bash test/check-release.sh --notes-out "$RUNNER_TEMP/release/notes.md"
+      # Manifests, one dated section, no non-empty Unreleased above it, and the
+      # tagged commit already on main.
+      - name: Check the tag against the manifests, changelog and main
+        run: bash test/check-release.sh --ancestor-of origin/main --notes-out "$RUNNER_TEMP/release/notes.md"
 
       - name: Install shellcheck v0.11.0
         run: |
@@ -46,8 +58,16 @@ jobs:
       - name: Run test suites
         run: bash test/run-all.sh
 
+      - name: Check stated test counts
+        run: bash test/check-counts.sh
+
       - name: Build the companion extension
-        run: bin/cc-vscode build "$RUNNER_TEMP/release/cc-switch-binding.vsix"
+        run: bin/cc-vscode build "$RUNNER_TEMP/release/cc-switch-binding-${GITHUB_REF_NAME#v}.vsix"
+
+      - name: Write and verify SHA256SUMS
+        run: |
+          bash test/release-assets.sh write "$RUNNER_TEMP/release" "$GITHUB_REF_NAME"
+          bash test/release-assets.sh verify "$RUNNER_TEMP/release" "$GITHUB_REF_NAME"
 
       - name: Upload release files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -62,18 +82,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Only for the release scripts at the tag; nothing here is built or tested again.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Download release files
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release
-          path: release
+          path: ${{ runner.temp }}/release
 
+      # Verifies SHA256SUMS, then creates the release, or on a rerun re-uploads the
+      # assets with --clobber and updates the notes.
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          vsix="$(find release -name '*.vsix' -print -quit)"
-          notes="$(find release -name 'notes.md' -print -quit)"
-          test -n "$vsix"
-          test -n "$notes"
-          gh release create "$GITHUB_REF_NAME" "$vsix" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file "$notes"
+        run: bash test/publish-release.sh --repo "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RUNNER_TEMP/release"

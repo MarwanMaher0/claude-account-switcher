@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Security — a harder tag release
+- A release publishes only a commit that is already on `main`. The release workflow checks
+  out full history, fetches `main`, and runs
+  `bash test/check-release.sh --ancestor-of origin/main`; the new `--ancestor-of REF` option
+  refuses a tag `REF` does not contain, a checkout that is not the tag, a shallow clone and
+  an unfetched ref, each with one `check-release: …` line.
+- `check-release.sh` refuses a `CHANGELOG.md` whose `## Unreleased` section above the tagged
+  version still lists entries, which would otherwise ship without being in the release
+  notes. An empty `## Unreleased` heading is fine.
+- The verify job runs `bash test/check-counts.sh`, so a release cannot ship while the README
+  badge or CONTRIBUTING states the wrong check count.
+- The release asset is named `cc-switch-binding-X.Y.Z.vsix` and comes with a `SHA256SUMS`
+  file covering it, written and checked by the new `test/release-assets.sh` (a missing,
+  misnamed or altered vsix, a missing `SHA256SUMS` or a line for any other file fails).
+  `vscode/cc-switch-binding/README.md` explains how to verify a download with
+  `sha256sum -c` or `shasum -a 256 -c`.
+- Publishing is rerun-safe: the new `test/publish-release.sh` verifies `SHA256SUMS` again,
+  then creates the release, or, when it already exists, re-uploads both assets with
+  `gh release upload --clobber` and updates the notes instead of failing. Runs for the same
+  tag no longer overlap.
+- Vulnerabilities are reported through GitHub private vulnerability reporting (the
+  repository's Security tab), not a public issue; `SECURITY.md` says so.
+- `test/test-release.sh` fails each new gate on its own with a clear message (a tag not on
+  main, stale counts, a non-empty Unreleased section, a missing or wrong checksum, a rerun
+  against an existing release) against throwaway fixtures, git repos and a stub `gh`,
+  offline, and checks that a clean fixture passes. CONTRIBUTING's release steps describe
+  the new flow.
+
 ## 2.4.0 — 2026-11-12
 
 ### Security — isolate Python imports from project files

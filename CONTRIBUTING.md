@@ -6,7 +6,7 @@
 bash test/run-all.sh
 ```
 
-1412 checks across the twenty-one suites run with `CC_TEST_SKIP=test-live.sh bash test/run-all.sh`
+1519 checks across the twenty-one suites run with `CC_TEST_SKIP=test-live.sh bash test/run-all.sh`
 (`test-live.sh` is the nineteenth suite of twenty-two in `run-all.sh`; like every suite it uses
 `test/lib.sh`'s stub and passes offline). There is no framework to install. `claude` is replaced
 with a stub and every test runs against a throwaway `HOME`, so the suite cannot touch a real
@@ -95,19 +95,40 @@ messages are short, and every failure ends with the command to run next.
 
 ## Releasing
 
-A release is a `vX.Y.Z` tag. The tag, the three version fields, and one dated changelog
-section must name the same version before anything is published:
+A release is a `vX.Y.Z` tag on a commit that is already on `main`. The tag, the three
+version fields, and one dated changelog section must name the same version, and the stated
+check counts must be right, before anything is published. Every gate is a script under
+`test/`, so it runs the same way locally as on the tag push, and `bash test/test-release.sh`
+fails each one on its own against throwaway fixtures and git repos, offline.
 
 1. Set the same `X.Y.Z` in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`
    (`plugins[0].version`), and `vscode/cc-switch-binding/package.json`.
-2. Add one `## X.Y.Z — YYYY-MM-DD` heading to the root `CHANGELOG.md`. The dash is an em
-   dash, the date is `YYYY-MM-DD`, and the section ends at the next `## ` heading. That
-   section is the GitHub release notes. Do not use the extension changelog.
-3. Check it before tagging: `bash test/check-release.sh vX.Y.Z`. `--notes-out notes.md`
-   writes the notes only when the check passes. A failure prints `check-release: …` on
-   stderr and nothing on stdout. `bash test/test-release.sh` fails each gate on its own.
-4. Tag that commit `vX.Y.Z` and push the tag. `.github/workflows/release.yml` runs only on
-   a `v*.*.*` tag push. It runs the check, lints, runs the suites, builds
-   `cc-switch-binding.vsix`, and publishes a GitHub release titled with the tag, with the
-   changelog section as the notes and the vsix attached. It does not run on branch pushes
-   or `workflow_dispatch`.
+2. Rename `## Unreleased` in the root `CHANGELOG.md` to one `## X.Y.Z — YYYY-MM-DD`
+   heading. The dash is an em dash, the date is `YYYY-MM-DD`, and the section ends at the
+   next `## ` heading. That section is the GitHub release notes. Do not use the extension
+   changelog. An `## Unreleased` heading may stay above it only if it is empty: entries
+   there would ship without being in the notes, so the check refuses them.
+3. Run `bash test/check-counts.sh` (`--fix` rewrites the README badge and the count above).
+4. Merge to `main`, then check the commit you will tag:
+   `git fetch origin main && bash test/check-release.sh --ancestor-of origin/main vX.Y.Z`.
+   `--ancestor-of REF` refuses a tag (or, before tagging, `HEAD`) that `REF` does not
+   contain, a checkout that is not the tag, and a shallow clone. `--notes-out notes.md`
+   writes the notes only when every check passes. A failure prints `check-release: …` on
+   stderr and nothing on stdout.
+5. Tag that commit `vX.Y.Z` and push the tag. `.github/workflows/release.yml` runs only on
+   a `v*.*.*` tag push, never on branch pushes or `workflow_dispatch`. The `verify` job
+   (read-only) checks out full history, fetches `main`, runs
+   `test/check-release.sh --ancestor-of origin/main`, lints, runs the suites and
+   `test/check-counts.sh`, builds `cc-switch-binding-X.Y.Z.vsix`, and writes and checks
+   `SHA256SUMS` with `test/release-assets.sh`. The `publish` job (the only one that can
+   write) runs `test/publish-release.sh`, which verifies `SHA256SUMS` again and creates a
+   release titled with the tag, the changelog section as the notes, and the vsix and
+   `SHA256SUMS` attached.
+6. If a run fails after the release was created, rerun it: when the release already exists,
+   `publish-release.sh` re-uploads both assets with `gh release upload --clobber` and
+   updates the notes with `gh release edit` instead of failing. The notes come from the tagged commit's changelog,
+   so a rerun republishes the same section.
+7. Start the next cycle with an empty `## Unreleased` heading at the top of `CHANGELOG.md`.
+
+Users verify a download as described in
+[the extension README](vscode/cc-switch-binding/README.md#verify-a-release-download).
