@@ -10,17 +10,25 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="${CC_INSTALL_DIR:-$HOME/.local/bin}"
 SHARE="${CC_SHARE_DIR:-$HOME/.local/share/cc-switch}"
 
+mkdir -p "$DEST"
+
 # `cc` is also the standard name of the C compiler, and ~/.local/bin usually comes
 # before /usr/bin on PATH. Find any other `cc` first, so the user is told plainly
 # that builds calling `cc` could start the account switcher instead.
+on_path=0
 other_cc=""
 IFS=: read -r -a path_dirs <<<"$PATH"
-for d in "${path_dirs[@]}"; do
-    [ "$d" = "$DEST" ] && continue
-    if [ -x "$d/cc" ]; then other_cc="$d/cc"; break; fi
+for d in ${path_dirs[@]+"${path_dirs[@]}"}; do
+    [ -n "$d" ] || continue
+    if [ "$d" -ef "$DEST" ]; then
+        on_path=1
+        continue
+    fi
+    if [ -z "$other_cc" ] && [ -x "$d/cc" ] && [ ! -d "$d/cc" ]; then
+        other_cc="${d%/}/cc"
+    fi
 done
 
-mkdir -p "$DEST"
 for f in cc cc-detect cc-watch cc-vscode cc-claude-wrapper; do
     install -m 755 "$SRC/bin/$f" "$DEST/$f"
     echo "  installed $DEST/$f"
@@ -32,11 +40,10 @@ for f in package.json extension.js; do
 done
 echo "  installed $SHARE/vscode/cc-switch-binding"
 
-case ":$PATH:" in
-    *":$DEST:"*) ;;
-    *) echo
-       echo "  NOTE: $DEST is not on your PATH." ;;
-esac
+if [ "$on_path" -eq 0 ]; then
+    echo
+    echo "  NOTE: $DEST is not on your PATH."
+fi
 
 resolved_cc="$(command -v cc || true)"
 if ! [ "$resolved_cc" -ef "$DEST/cc" ]; then

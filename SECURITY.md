@@ -45,7 +45,9 @@ own account folders only when run with `--apply`, and records every step for `--
 
 **Early switch (opt-in).** It reads the rate-limit usage that Claude Code passes to status line
 commands, and records the percentages and reset times in `~/.claude-switch/usage/`. No request is
-made to obtain it.
+made to obtain it. Only the account's own `settings.json` status line is chained by default;
+project `.claude/settings*.json` status lines are ignored unless `"projectStatusLine": true` is set
+in `earlySwitch`.
 
 ## The failure mode worth knowing about
 

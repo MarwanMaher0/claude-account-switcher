@@ -243,6 +243,13 @@ with transcript.open("a", encoding="utf-8") as fh:
                                          "resetsAt": int(now.timestamp()) + 3600}}) + "\n")
 notice = json.loads(run(["bash", str(hooks / "limit-notice.sh")], data=payload))
 assert notice["decision"] == "block" and "5-hour limit" in notice["reason"], notice
+default_acct = next(a["id"] for a in status["accounts"] if a["isDefault"])
+run([str(bin_dir / "cc"), "pin", str(project), "--account", default_acct, "--fallback", "isolated", "--no-vscode"])
+pinned_notice = json.loads(run(["bash", str(hooks / "limit-notice.sh")], data=payload))
+assert pinned_notice["decision"] == "block" and "This folder falls back to 'isolated'" in pinned_notice["reason"], pinned_notice
+run([str(bin_dir / "cc"), "pin", str(project), "--account", default_acct, "--fallback", "none", "--no-vscode"])
+stop_notice = json.loads(run(["bash", str(hooks / "limit-notice.sh")], data=payload))
+assert stop_notice["decision"] == "block" and ("is pinned to '%s' with nothing else allowed" % default_acct) in stop_notice["reason"], stop_notice
 PY
 )"; then
     ok "S-1/S-6 runtime: no copied credentials or project/startup imports in commands and hooks"

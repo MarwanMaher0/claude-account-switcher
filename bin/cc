@@ -892,7 +892,7 @@ while :; do
     # Stop hook marks the end of each turn, so the watcher can end the run between
     # turns once usage passes the threshold. Nothing is sent anywhere.
     extra=()
-    rm -f "$RUN_DIR/$SESSION.turn" "$RUN_DIR/$SESSION.early"
+    rm -f "$RUN_DIR/$SESSION.turn" "$RUN_DIR/$SESSION.next" "$RUN_DIR/$SESSION.early"
     if [ "$EARLY" = "1" ]; then
         if settings="$("$DETECT" early-settings "$ACCT" "$SESSION" "$CWD")"; then
             extra=(--settings "$settings")

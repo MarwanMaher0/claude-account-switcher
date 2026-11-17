@@ -384,6 +384,11 @@ statusline_input() {
         "$1" "$future" "$(( future + 86400 ))"
 }
 printf '{"statusLine":{"type":"command","command":"echo MY-OWN-STATUS"}}\n' > "$HOME/.claude-2/settings.json"
+mkdir -p "$HOME/work/acme/.claude"
+printf '{"statusLine":{"type":"command","command":"touch \\"%s\\"; echo PROJECT-STATUS"}}\n' "$SANDBOX/proj-sl" \
+    > "$HOME/work/acme/.claude/settings.json"
+printf '{"statusLine":{"type":"command","command":"touch \\"%s\\"; echo LOCAL-STATUS"}}\n' "$SANDBOX/proj-sl" \
+    > "$HOME/work/acme/.claude/settings.local.json"
 settings="$(detect early-settings acme s1 "$HOME/work/acme")"
 it "ES-1 the run's settings add a status line and a Stop hook"
 assert_ok python3 -c 'import json, sys
@@ -392,7 +397,27 @@ assert "statusline acme s1" in d["statusLine"]["command"]
 assert "turn-ended" in d["hooks"]["Stop"][0]["hooks"][0]["command"]' "$settings"
 out="$(statusline_input 97.5 | detect statusline acme s1)"
 assert_eq "$out" "MY-OWN-STATUS" "ES-2 the user's own status line still prints"
+assert_no_file "$SANDBOX/proj-sl" "ES-2b project .claude/settings*.json statusLine is ignored by default"
 assert_file "$HOME/.claude-switch/usage/acme.json" "ES-3 usage is recorded per account"
+
+detect config-set earlySwitch.projectStatusLine true
+detect early-settings globex s1 "$HOME/work/acme" >/dev/null
+out_globex="$(statusline_input 10 | detect statusline globex s1)"
+assert_eq "$out_globex" "" "ES-3b switching to an account without statusLine clears stale .next and ignores non-boolean projectStatusLine"
+assert_no_file "$HOME/.claude-switch/run/s1.next" "ES-3b stale .next file is removed when the account has no statusLine"
+assert_no_file "$SANDBOX/proj-sl" "ES-3b string 'true' does not enable projectStatusLine"
+
+detect config-set-json earlySwitch.projectStatusLine true
+detect early-settings globex s1 "$HOME/work/acme" >/dev/null
+assert_eq "$(statusline_input 10 | detect statusline globex s1)" "LOCAL-STATUS" \
+    "ES-3c earlySwitch.projectStatusLine=true chains .claude/settings.local.json first"
+rm -f "$SANDBOX/proj-sl" "$HOME/work/acme/.claude/settings.local.json"
+detect early-settings globex s1 "$HOME/work/acme" >/dev/null
+assert_eq "$(statusline_input 10 | detect statusline globex s1)" "PROJECT-STATUS" \
+    "ES-3d earlySwitch.projectStatusLine=true falls back to .claude/settings.json"
+rm -rf "$SANDBOX/proj-sl" "$HOME/work/acme/.claude" "$HOME/.claude-switch/usage/globex.json"
+detect config-set-json earlySwitch.projectStatusLine false
+detect early-settings acme s1 "$HOME/work/acme" >/dev/null
 
 t="$HOME/s1.jsonl"; printf '{"type":"user","uuid":"u1"}\n{"type":"assistant","uuid":"a1"}\n' > "$t"
 printf '{"session_id":"s1","transcript_path":"%s"}' "$t" | detect turn-ended

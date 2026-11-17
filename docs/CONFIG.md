@@ -198,7 +198,7 @@ finished, and Claude is waiting for you.
 ## Switching before the limit
 
 ```json
-"earlySwitch": { "enabled": true, "percent": 98 }
+"earlySwitch": { "enabled": true, "percent": 98, "projectStatusLine": false }
 ```
 
 Off by default. When on, `cc` ends a run **between turns** once the account has used `percent` of
@@ -209,8 +209,11 @@ Where the number comes from: Claude Code passes the usage it received with each 
 (`rate_limits.five_hour` and `rate_limits.seven_day`) to the status line command. For runs it
 starts, `cc` adds its own status line, which records that usage in
 `~/.claude-switch/usage/<account>.json`, and a `Stop` hook that marks the end of each turn. Both
-are passed with `--settings` for that run only; your settings files are not changed. If you have a
-status line of your own, it still runs and shows as before.
+are passed with `--settings` for that run only; your settings files are not changed. If the
+account's `settings.json` defines a `statusLine` of your own, it still runs and shows as before.
+Project `.claude/settings.json` and `.claude/settings.local.json` status lines are ignored unless
+`"projectStatusLine": true` is set in `earlySwitch`, so an untrusted repository cannot supply a
+command for `cc` to run.
 
 - **No network call.** The data is what Claude Code already received.
 - **Pro and Max only.** Claude Code reports usage only for those plans. On other plans, such as

@@ -1,11 +1,12 @@
 ---
-description: Show which Claude Code account each config dir holds, and whether either is rate limited
+description: Show every registered Claude Code account, its config dir, and whether any is rate limited
 ---
 
 Run `"${CLAUDE_PLUGIN_ROOT}/bin/cc" status` and report the result.
 
-Present it as a short table: account, email, plan, and limit state (with the reset
-time when limited). Then state which account `cc` would launch next.
+Present it as a short table: account, limit state (with the reset time when
+limited), email, and config folder. Note any folder pin that applies here, and
+state which account `cc` would launch next.
 
 Do not attempt to switch accounts — a running session cannot change accounts,
 because credentials are read once at process start.
